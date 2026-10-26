@@ -1,0 +1,18 @@
+# 换行符：源码/文档统一入库为 LF；Windows 批处理必须保持 CRLF
+* text=auto
+
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+*.ps1       text eol=crlf
+
+# 二进制（不要做任何文本转换，否则会损坏）
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.webp      binary
+*.npz       binary
+*.npy       binary
+*.sofa      binary
+*.wav       binary
+*.mp3       binary
+*.zip       binary

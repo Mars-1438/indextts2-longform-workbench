@@ -1,0 +1,710 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第一次用？全能音声工作台 · 最短流程</title>
+<style>
+  :root {
+    --bg: #f4f2ee;
+    --card: #fff;
+    --ink: #1b1a18;
+    --muted: #6f6a62;
+    --faint: #a09a90;
+    --border: #e4e0d8;
+    --primary: #d2372e;
+    --primary-soft: #fdf0ef;
+    --accent: #1f5fe0;
+    --accent-soft: #f2f6ff;
+    --ok: #1e9e5a;
+    --ok-soft: #f1fbf5;
+    --warn: #a86a08;
+    --warn-soft: #fffaf0;
+    --mono: "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
+    --sans: "Segoe UI", system-ui, -apple-system, "Microsoft YaHei", "PingFang SC", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17181a;
+      --card: #1e2023;
+      --ink: #ecebe7;
+      --muted: #a8a49c;
+      --faint: #78746c;
+      --border: #303337;
+      --primary: #ef6a60;
+      --primary-soft: #2b1d1c;
+      --accent: #7ba7ff;
+      --accent-soft: #1a2230;
+      --ok: #4ec98a;
+      --ok-soft: #16241d;
+      --warn: #e0ab4a;
+      --warn-soft: #2a2216;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0 20px 70px;
+    background: var(--bg); color: var(--ink);
+    font: 14px/1.7 var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+
+  header.hero { padding: 42px 0 24px; }
+  .kicker {
+    display: inline-block; font-size: 11px; letter-spacing: .16em;
+    color: var(--primary); background: var(--primary-soft);
+    border: 1px solid color-mix(in srgb, var(--primary) 26%, transparent);
+    border-radius: 999px; padding: 3px 11px; margin-bottom: 14px;
+  }
+  h1 { font-size: 30px; line-height: 1.25; margin: 0 0 10px; letter-spacing: -.01em; }
+  .lede { color: var(--muted); max-width: 760px; margin: 0 0 22px; }
+  .lede b { color: var(--ink); }
+
+  nav.flow { display: flex; flex-wrap: wrap; gap: 8px; }
+  nav.flow a {
+    display: inline-flex; align-items: center; gap: 7px;
+    text-decoration: none; color: var(--ink);
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 7px 12px; font-size: 12.5px;
+    transition: border-color .15s, transform .15s;
+  }
+  nav.flow a:hover { border-color: var(--primary); transform: translateY(-1px); }
+  nav.flow a i {
+    font-style: normal; width: 18px; height: 18px; border-radius: 50%;
+    background: var(--primary); color: #fff; font-size: 11px; font-weight: 700;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+
+  section.step {
+    background: var(--card); border: 1px solid var(--border); border-radius: 16px;
+    padding: 24px 26px 22px; margin: 18px 0;
+    box-shadow: 0 1px 2px rgba(20, 18, 16, .04);
+  }
+  section.step > h2 {
+    display: flex; align-items: baseline; gap: 10px;
+    font-size: 19px; margin: 0 0 4px; letter-spacing: -.01em;
+  }
+  section.step > h2 .no {
+    flex: none; font: 700 13px/1 var(--mono); color: #fff; background: var(--primary);
+    width: 24px; height: 24px; border-radius: 8px;
+    display: inline-flex; align-items: center; justify-content: center;
+    transform: translateY(-1px);
+  }
+  section.step > h2 small { font-size: 12px; font-weight: 400; color: var(--faint); }
+  .where { color: var(--muted); font-size: 12.5px; margin: 2px 0 14px 34px; }
+  .where code { font-family: var(--mono); font-size: 11.5px; }
+
+  ol.how { margin: 0 0 14px; padding-left: 22px; }
+  ol.how li { margin: 5px 0; }
+  ol.how li b { font-weight: 600; }
+
+  figure.shot { margin: 16px 0 6px; }
+  figure.shot a { display: block; }
+  figure.shot img {
+    display: block; width: auto; max-width: 100%; height: auto;
+    border: 1px solid var(--border); border-radius: 11px; background: var(--bg);
+  }
+  /* 竖长的面板局部图：别拉到整卡宽，按原尺寸放在左边更清楚 */
+  figure.shot.narrow img { width: auto; max-width: 440px; }
+  figure.shot figcaption { font-size: 11.5px; color: var(--faint); margin-top: 6px; }
+
+  .tip, .warn {
+    border-radius: 10px; padding: 10px 13px; font-size: 12.5px; margin: 12px 0 0;
+    border: 1px solid transparent;
+  }
+  .tip { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 22%, transparent); }
+  .tip b { color: var(--accent); }
+  .okbox { background: var(--ok-soft); border-color: color-mix(in srgb, var(--ok) 24%, transparent); }
+  .okbox b { color: var(--ok); }
+  .warn { background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 26%, transparent); }
+  .warn b { color: var(--warn); }
+
+  h2.plain { font-size: 19px; margin: 34px 0 10px; letter-spacing: -.01em; }
+  .sub { color: var(--muted); font-size: 13px; margin: -4px 0 14px; }
+
+  /* ---------------- 全功能地图 ---------------- */
+  /* 两列瀑布流：卡片高度差很大，用多列排版不会有「一行被最高卡撑出空洞」的问题 */
+  .mapwrap { column-count: 2; column-gap: 14px; }
+  @media (max-width: 900px) { .mapwrap { column-count: 1; } }
+  article.feat {
+    background: var(--card); border: 1px solid var(--border); border-radius: 13px;
+    padding: 15px 17px 14px; position: relative; overflow: hidden;
+    break-inside: avoid; -webkit-column-break-inside: avoid;
+    margin: 0 0 14px; display: block;
+  }
+  article.feat::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+    background: var(--primary); opacity: .85;
+  }
+  article.feat.wide { column-span: all; }
+  article.feat h3 {
+    font-size: 14.5px; margin: 0 0 3px; display: flex; align-items: center; gap: 7px;
+  }
+  article.feat h3 .tag {
+    font-size: 9.5px; font-weight: 600; letter-spacing: .04em; color: var(--primary);
+    background: var(--primary-soft); border: 1px solid color-mix(in srgb, var(--primary) 22%, transparent);
+    border-radius: 999px; padding: 1px 7px;
+  }
+  article.feat .where2 { font-size: 11px; color: var(--faint); margin-bottom: 8px; }
+  article.feat .where2 code { font-family: var(--mono); font-size: 10.5px; }
+  article.feat ul { margin: 0; padding-left: 17px; font-size: 12.5px; }
+  article.feat li { margin: 3px 0; }
+  article.feat li b { font-weight: 600; }
+  article.feat figure.shot { margin: 10px 0 0; }
+  /* 卡片里的示意图统一压到 300px 以内：完整显示（contain，不裁切），不撑高整张卡片 */
+  article.feat figure.shot img {
+    max-width: 100%; max-height: 300px; width: auto; height: auto;
+    object-fit: contain; background: var(--bg);
+  }
+  article.feat figure.shot.small img { max-width: 420px; }
+  article.feat figure.shot figcaption { font-size: 10.5px; }
+  article.feat::after { content: ""; display: block; clear: both; }
+  /* 宽卡（占两列）里图放右侧、文字绕排：不然左边一小块图、右边一大片空白 */
+  article.feat.wide > figure.shot {
+    float: right; width: 42%; max-width: 470px; margin: 2px 0 10px 18px;
+  }
+  article.feat.wide > figure.shot img { max-height: 300px; width: auto; max-width: 100%; }
+  article.feat.wide.nofloat > figure.shot { float: none; width: auto; margin: 12px 0 0; }
+  article.feat.wide.nofloat > figure.shot img { max-height: 420px; }
+  @media (max-width: 900px) {
+    article.feat.wide > figure.shot { float: none; width: auto; max-width: 100%; margin: 10px 0 0; }
+  }
+
+  /* 阶段标题：一条横线 + 编号 + 一句话目标 */
+  .phase { display: flex; align-items: baseline; gap: 9px; margin: 30px 0 12px; }
+  .phase .no {
+    flex: none; font: 700 11px/1 var(--mono); color: #fff; background: var(--ink);
+    border-radius: 6px; padding: 4px 7px; letter-spacing: .04em;
+  }
+  .phase h3 { font-size: 15px; margin: 0; letter-spacing: -.01em; }
+  .phase .goal { font-size: 11.5px; color: var(--faint); }
+  .phase .rule { flex: 1; height: 1px; background: var(--border); min-width: 20px; }
+
+  /* 规则表（智能导入的分行方案 / 识别规则） */
+  table.ruletbl {
+    width: 100%; border-collapse: collapse; margin: 9px 0 2px; font-size: 11.5px;
+    border: 1px solid var(--border); border-radius: 9px; overflow: hidden;
+  }
+  table.ruletbl th, table.ruletbl td {
+    border-bottom: 1px solid var(--border); padding: 6px 8px;
+    text-align: left; vertical-align: top; line-height: 1.55;
+  }
+  table.ruletbl th { background: var(--bg); color: var(--muted); font-size: 10.5px; font-weight: 600; }
+  table.ruletbl tr:last-child td { border-bottom: 0; }
+  table.ruletbl td b { font-weight: 600; }
+  table.ruletbl code {
+    font-family: var(--mono); font-size: 10px; background: var(--bg);
+    padding: 0 3px; border-radius: 3px;
+  }
+  .feat .steps3 { display: flex; gap: 8px; flex-wrap: wrap; margin: 6px 0 10px; }
+  .feat .steps3 span {
+    font-size: 11px; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 7px; padding: 3px 8px; color: var(--muted);
+  }
+  table.keys {
+    width: 100%; border-collapse: collapse; background: var(--card);
+    border: 1px solid var(--border); border-radius: 12px; overflow: hidden; font-size: 12.5px;
+  }
+  table.keys th, table.keys td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  table.keys th { background: var(--bg); font-size: 11px; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+  table.keys tr:last-child td { border-bottom: 0; }
+  kbd {
+    font: 11px/1 var(--mono); border: 1px solid var(--border);
+    border-bottom-width: 2px; border-radius: 5px; padding: 3px 5px; background: var(--bg);
+  }
+  details.faq {
+    background: var(--card); border: 1px solid var(--border); border-radius: 11px;
+    padding: 11px 14px; margin: 8px 0;
+  }
+  details.faq summary { cursor: pointer; font-weight: 600; font-size: 13px; }
+  details.faq p { margin: 8px 0 2px; color: var(--muted); font-size: 12.5px; }
+  details.faq code { font-family: var(--mono); font-size: 11.5px; }
+  footer { color: var(--faint); font-size: 11.5px; margin-top: 30px; text-align: center; }
+  @media (max-width: 640px) {
+    header.hero { padding-top: 26px; }
+    h1 { font-size: 23px; }
+    section.step { padding: 18px 16px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <span class="kicker">最短流程 · 约 10 分钟</span>
+    <h1>第一次用？从一段文字到一条混音，只要六步</h1>
+    <p class="lede">
+      全能音声工作台做的是「长篇台本 → 分句配音 → 贴音效 → 摆空间 → 出混音」。
+      下面这条是<b>最短可用路径</b>，每一步只讲必须做的事；走通一遍之后，
+      最下面的<b>「全功能地图」</b>把其余能力（分组、筛选、素材库、清理空间、关键帧、空间音频、导出方案…）都列了一遍。
+    </p>
+    <nav class="flow">
+      <a href="#s1"><i>1</i>导入台本</a>
+      <a href="#s2"><i>2</i>提取音色</a>
+      <a href="#s3"><i>3</i>生成音声</a>
+      <a href="#s4"><i>4</i>加入音效</a>
+      <a href="#s5"><i>5</i>时间轴编辑</a>
+      <a href="#s6"><i>6</i>导出混音</a>
+      <a href="#map"><i>▦</i>全功能地图</a>
+      <a href="#keys"><i>⌘</i>快捷键</a>
+      <a href="#faq"><i>?</i>常见问题</a>
+    </nav>
+  </header>
+
+  <section class="step" id="s1">
+    <h2><span class="no">1</span>导入台本 <small>一段文字变成「一句一行」</small></h2>
+    <div class="where">位置：左边「我的台本」→ <code>⋯ 更多</code> → 新建 / 导入</div>
+    <ol class="how">
+      <li>点左侧 <b>⋯ 更多 → 新建台本</b>，把文稿整段粘进去；或者直接 <b>导入 .txt</b>。</li>
+      <li>分行方式选 <b>按标点断句</b>（推荐）：一句一行，后面生成、试听、重生成都以「句」为单位。</li>
+      <li>想改哪一句，直接点文本改；行尾的数字是字数，括号里是时长。</li>
+    </ol>
+    <figure class="shot">
+      <a href="/guide-img/g1-script.png" target="_blank"><img src="/guide-img/g1-script.png" alt="台本编辑区"></a>
+      <figcaption>① 左边是台本列表，中间一句一行，右边是属性 / 批量 / 生成 / 导出四个页签。</figcaption>
+    </figure>
+    <div class="tip"><b>小技巧：</b>顶部工具条上的「智能分行」可以把一大段按长度或标点重新切开；「历史」里存着每次保存的快照，改乱了能退回去。</div>
+  </section>
+
+  <section class="step" id="s2">
+    <h2><span class="no">2</span>提取音色 <small>告诉它「用谁的声音念」</small></h2>
+    <div class="where">位置：右上 <code>🎙 音色素材库</code>（或 <code>📥 素材导入台</code>）</div>
+    <ol class="how">
+      <li>把一段干净的参考音频（<b>5～15 秒、一个人、没有背景音乐</b>）拖进 <b>素材导入台</b>。</li>
+      <li>在导入台里点 <b>存入音色库</b>，起个名字（比如「旁白-男」）。视频也能直接拖进来，会自动抽成音频。</li>
+      <li>回到台本，右侧 <b>全局默认参数</b> 里选这个音色，或者选中若干句 → <b>批量改属性</b> 只给这几句换音色。</li>
+    </ol>
+    <figure class="shot">
+      <a href="/guide-img/g2-import.png" target="_blank"><img src="/guide-img/g2-import.png" alt="素材导入台"></a>
+      <figcaption>② 导入台是素材中转站：导入 → 处理后默认保留原素材，方便反复试参数。</figcaption>
+    </figure>
+    <div class="okbox tip"><b>已经内置：</b>ffmpeg（视频抽音频）和 Demucs（去伴奏 / 只留人声）都随包提供，<b>不需要联网下载</b>。导入台底部那一行状态是绿点就说明可用。</div>
+  </section>
+
+  <section class="step" id="s3">
+    <h2><span class="no">3</span>生成音声 <small>先小样，再整篇</small></h2>
+    <div class="where">位置：右侧 <code>生成</code> 页签</div>
+    <ol class="how">
+      <li>先选中 <b>1～2 句</b> 点「生成选中」，试听一下音色、情绪、语速对不对。</li>
+      <li>满意了再 <b>全选 → 开始生成</b>。第一次会先加载模型（右侧顶部状态条由灰变绿），之后每句大约几秒。</li>
+      <li>生成完，句子右边会显示 <b>实际时长</b>；改过文本或参数的句子会标「待重生成」。</li>
+      <li>某一句不满意：点行尾 <b>⟳</b> 重生成，或者 <b>⋯ → 改属性并重生成</b> 只改这一句的音色 / 情感。</li>
+    </ol>
+    <figure class="shot narrow">
+      <a href="/guide-img/g3-generate.png" target="_blank"><img src="/guide-img/g3-generate.png" alt="生成面板"></a>
+      <figcaption>③ 「生成」页签：选渲染范围（选中行 / 未生成 / 全部）→ 开始生成。最上面那行是模型与依赖状态，切页签也一直看得到。</figcaption>
+    </figure>
+    <div class="warn tip"><b>注意：</b>改「全局默认参数」会影响所有没单独设置过的句子，所以会先弹确认框。手滑了就用工具条的 <b>↩ 撤回属性</b>。</div>
+  </section>
+
+  <section class="step" id="s4">
+    <h2><span class="no">4</span>加入音效 <small>用标签标「什么时候响」</small></h2>
+    <div class="where">位置：句子行首 <code>＋</code>（句中标签）／行尾 <code>⋯</code> → 在下面插入句间标签</div>
+    <ol class="how">
+      <li><b>句中标签</b>：点行首 ＋ → 选或输入标签名（如「关门」）→ 拖位置滑杆选落在第几个字 → 「音效」里挑一个 → 试听。</li>
+      <li><b>句间标签</b>：行尾 ⋯ → 在下面插入句间标签，适合「段落之间的转场」。<b>留白</b>就是给音效留的时间。</li>
+      <li>句中标签默认带 <b>500ms 延迟</b>，避免和上一句末尾的句间标签挤在同一时刻。</li>
+      <li>标签不会改变这一句的音频，它只是<b>标记位置</b>；进入时间轴后，音效素材会自动落在对应时刻。</li>
+    </ol>
+    <figure class="shot">
+      <a href="/guide-img/g4-sfx.png" target="_blank"><img src="/guide-img/g4-sfx.png" alt="标签与音效面板"></a>
+      <figcaption>④ 标签面板：标签名 / 位置（数字框 + 拖动条）/ 延迟 / 挂载音效（可试听、可调音量）。</figcaption>
+    </figure>
+  </section>
+
+  <section class="step" id="s5">
+    <h2><span class="no">5</span>进入时间轴编辑 <small>排位置、调空间、修节奏</small></h2>
+    <div class="where">位置：台本顶部 <code>🎬 时间轴</code> 按钮（会新建一份工程副本，原台本不动）</div>
+    <ol class="how">
+      <li>语音片段按台本顺序自动铺在音声轨上，标签音效落在对应时刻。</li>
+      <li>拖片段改位置；拖右边缘改长度。<b>选中多段后拖其中一段，会整组一起移动。</b></li>
+      <li>选中片段 → 右侧属性面板改音量 / 声像 / 淡入淡出 / 速度；<b>位置、时长、源内起点</b> 都是「数字框 + 滚动条」。</li>
+      <li>页面顶部的 <b>↕ 重排音声延迟</b>：按台本里的句间停顿，把所有音声片段按句子顺序重新排一遍（只改开始时间）。</li>
+      <li>想让一段语音反复用：右键 → <b>⧉ 复制到素材轨「音声副本音轨」</b>，副本跟台本彻底脱钩，怎么剪都不影响原句。</li>
+    </ol>
+    <figure class="shot">
+      <a href="/guide-img/g5-timeline.png" target="_blank"><img src="/guide-img/g5-timeline.png" alt="时间轴"></a>
+      <figcaption>⑤ 顶栏是时间刻度（滚动时也贴在顶部），左边是音轨头，右边是片段属性。</figcaption>
+    </figure>
+    <div class="tip"><b>空间音频：</b>选中片段 → 右侧「空间」页签 → 选一个预设（如「贴耳微晃」「掠耳而过」）就能一键铺关键帧；也可以在图形面板上手动拖点。</div>
+  </section>
+
+  <section class="step" id="s6">
+    <h2><span class="no">6</span>导出混音 <small>一条成品音轨</small></h2>
+    <div class="where">位置：时间轴右上 <code>导出混音</code></div>
+    <ol class="how">
+      <li>选格式（WAV / MP3 / FLAC）、采样率、声道；需要的话勾「只导出某几条轨」。</li>
+      <li><b>总时长算到哪儿</b>：按最后一段的「显示末端」（眼睛看到的长度）或「未显示部分末端」（被裁掉的那截也算）。</li>
+      <li>点导出，成品会出现在 <code>outputs/</code>，页面上也能直接下载 / 试听。</li>
+    </ol>
+    <figure class="shot narrow">
+      <a href="/guide-img/g6-export.png" target="_blank"><img src="/guide-img/g6-export.png" alt="导出混音"></a>
+      <figcaption>⑥ 选格式、位深、采样率、声道，再决定「总时长算到哪儿」；下面勾选要包含的音轨，最下面是预计时长与导出按钮。</figcaption>
+    </figure>
+    <div class="okbox tip"><b>只想快速拼一条小样？</b>台本右侧「导出」页签里有「拼接导出」，直接按句序拼 WAV，不进时间轴也能出片。</div>
+  </section>
+
+  <h2 class="plain" id="map">全功能地图</h2>
+  <p class="sub">
+    下面按「一篇文章 → 一条成品」的顺序排：<b>备料 → 台本 → 生成 → 时间轴 → 导出</b>。
+    每个阶段先说这一步要解决什么，再列出这个阶段会用到的功能；想跳到某一步，点上面的流程导航即可。
+  </p>
+
+  <!-- ================= 阶段一：备料 ================= -->
+  <div class="phase">
+    <span class="no">阶段 1</span>
+    <h3>备料</h3>
+    <span class="goal">把文字和声音素材先弄进系统</span>
+    <span class="rule"></span>
+  </div>
+
+  <div class="mapwrap">
+
+    <article class="feat wide nofloat">
+      <h3>智能导入 <span class="tag">台词怎么切</span></h3>
+      <div class="where2">位置：顶栏 <code>新建</code>（粘文本建新台本）／左边栏 <code>⋯ 更多 → 导入</code>（追加到当前台本）</div>
+      <div class="steps3">
+        <span>① 选文件 / 粘贴文本</span><span>→</span>
+        <span>② 识别类别（可手改）</span><span>→</span>
+        <span>③ 预览编辑（可拆/并/改分组）</span><span>→</span>
+        <span>导入（每个分组 = 一个批量任务）</span>
+      </div>
+      <p style="margin:0 0 6px;font-size:12.5px">
+        导入器会先判断这份稿子属于哪一类（会在第 2 步列出判断依据和置信度，也可以点别的类别重判），
+        再按这一类的规则切行。<b>所有规则都只是建议</b>——第 3 步预览里每一段都能改。
+      </p>
+
+      <div style="font-size:12.5px;font-weight:600;margin:10px 0 0">A. 三种分行方案（纯文本类最常用，其它类等价）</div>
+      <table class="ruletbl">
+        <tr><th style="width:20%">方案</th><th>怎么切</th><th style="width:22%">适合</th><th style="width:22%">注意</th></tr>
+        <tr>
+          <td><b>按长度</b><br><span style="color:var(--faint);font-size:10.5px">切句后合并（默认）</span></td>
+          <td>先按句末标点 <code>。！？!?…</code> 和换行切成小句，再往后合并，直到接近「单段上限」（默认 70 字）。</td>
+          <td>口播稿、讲稿、小说正文——最通用</td>
+          <td>引号 / 括号内部不切；单句本身超上限时，才在逗号顿号处软切</td>
+        </tr>
+        <tr>
+          <td><b>一句一行</b></td>
+          <td>一个句末标点一行，<b>不再合并</b>。短句也各占一行。</td>
+          <td>逐句精修、要给每句单独挂标签 / 单独重做</td>
+          <td>行数变多，生成次数也变多；上下文会碎</td>
+        </tr>
+        <tr>
+          <td><b>一段一行</b><br><span style="color:var(--faint);font-size:10.5px">按空行</span></td>
+          <td>按空行分段，每段 = 一行（段内仍受单段上限约束）。</td>
+          <td>已经排好版的口播稿、每段就是一口气念完的</td>
+          <td>段落太长会被再切；没有空行的稿子会变成一整行</td>
+        </tr>
+      </table>
+
+      <div style="font-size:12.5px;font-weight:600;margin:14px 0 0">B. 五类稿子的识别规则</div>
+      <table class="ruletbl">
+        <tr><th style="width:17%">类别</th><th style="width:30%">靠什么认出来</th><th>怎么切 / 怎么处理</th></tr>
+        <tr><td><b>⏱ 时间轴类</b></td>
+            <td>行首带时间码 <code>00:00:01</code> / <code>[00:01.500]</code>，或 SRT / VTT 字幕</td>
+            <td>按时间码切、<b>保留原时间轴</b>；可把稿子里的停顿标记转成静默（并设停顿上限）。进时间轴后位置就是稿子里的时间。</td></tr>
+        <tr><td><b>🎭 剧本类</b></td>
+            <td><code>角色：台词</code> 前缀、引号、括号动作提示</td>
+            <td>按角色切。角色名只进「分组 / 备注」<b>不进正文</b>；同一角色连说的几句可以合并到上限；括号里的动作可写进备注（不朗读）。</td></tr>
+        <tr><td><b>📖 小说类</b></td>
+            <td>章节标题（<code>第 x 章</code> / <code># 标题</code>）</td>
+            <td>按章节切段、默认按章节分组；可让括号里的内容「不念」。</td></tr>
+        <tr><td><b>🏷 指令类</b></td>
+            <td><code>【镜头】</code>、<code>[pause=500]</code> 这类标记</td>
+            <td>标记本身不朗读：可以变成停顿、变成分组名，或只写进备注。</td></tr>
+        <tr><td><b>🧩 纯文本</b></td>
+            <td>以上特征都没有</td>
+            <td>用上面 A 的三种方案。默认「按长度」。</td></tr>
+      </table>
+
+      <div style="font-size:12.5px;font-weight:600;margin:14px 0 0">C. 切完之后：上限、分组、停顿、预设</div>
+      <ul style="margin-top:4px">
+        <li><b>单段上限</b>（默认 70 字 / 纯文本，剧本 70、小说 80、指令 60）：一行最长多少字。超过会被切开。</li>
+        <li><b>分组</b>：不分组 / 按章节 / 按角色 / 按场景 / 每 N 段一组。分组决定后面「批量生成」的单位，长文建议每 30 段一组。</li>
+        <li><b>每段后加停顿</b>：批量给每段末尾加静音（台本里存成停顿值）。</li>
+        <li><b>预设</b>：每类都有几个一键配置，比如「口播稿（按长度）」「逐句精修（一句一行）」「按段落」「长文分批（每 30 段一组）」——选完还能再改单项。</li>
+        <li><b>预览里能改什么</b>：拆分一行、合并两行、改分组、改文字；超过上限 / 空行这类问题会标出来。确认后一次导入。</li>
+      </ul>
+      <figure class="shot"><a href="/guide-img/h1-import.png" target="_blank"><img src="/guide-img/h1-import.png" alt="新建台本"></a>
+        <figcaption>① 粘贴文本；分行方案和参数在第 2 步，第 3 步还能逐段改。</figcaption></figure>
+    </article>
+
+    <article class="feat wide">
+      <h3>素材导入台 <span class="tag">声音素材进门</span></h3>
+      <div class="where2">位置：顶栏 <code>📥 素材导入台</code>（或从音色库 / 音效库点「导入」）</div>
+      <ul>
+        <li>拖入音频或视频 → 先落到「导入台」这个<b>中转站</b>，还不是正式素材。<b>视频会自动抽音频</b>（ffmpeg 已内置）。</li>
+        <li>常用处理：<b>去伴奏 / 只留人声</b>（Demucs，离线权重已内置）、<b>中置提取</b>（DSP，轻量、不占显存）、
+          <b>降噪</b>、<b>标准化</b>、<b>裁掉首尾静音</b>、<b>重采样</b>、<b>裁剪</b>。</li>
+        <li>处理完<b>默认保留原素材</b>（方便换参数再试），确认好了再「存入音色库 / 音效库」。</li>
+        <li>底部一行是 ffmpeg 状态：绿点 = 可用。换机器没带上时，可以上传或指定路径。</li>
+      </ul>
+      <figure class="shot"><a href="/guide-img/g2-import.png" target="_blank"><img src="/guide-img/g2-import.png" alt="素材导入台"></a></figure>
+    </article>
+
+    <article class="feat wide">
+      <h3>三个素材库怎么分工 <span class="tag">别搞混</span></h3>
+      <div class="where2">位置：顶栏 <code>🎙 音色素材库</code> / <code>🔔 音效素材库</code> / <code>📥 素材导入台</code></div>
+      <ul>
+        <li><b>音色库（全局）</b>：参考音频，决定「用谁的声音念」。5~15 秒、一个人、干净，效果最好。</li>
+        <li><b>音效库（全局）</b>：短音频（关门、脚步、风、转场）。台本标签可以挂，时间轴也能直接插。</li>
+        <li><b>导入台（中转）</b>：还没决定归哪儿的东西，处理完再分拣；不进正式库，随时可以清。</li>
+        <li>同一个音频在多处各存一份是正常的（工程里还会存副本），「清理空间」会告诉你谁占地方。</li>
+      </ul>
+      <figure class="shot small"><a href="/guide-img/h5-sfxlib.png" target="_blank"><img src="/guide-img/h5-sfxlib.png" alt="音效库"></a></figure>
+    </article>
+
+  </div>
+
+  <!-- ================= 阶段二：台本 ================= -->
+  <div class="phase">
+    <span class="no">阶段 2</span>
+    <h3>台本</h3>
+    <span class="goal">分行、分组、把要改的句子挑出来</span>
+    <span class="rule"></span>
+  </div>
+
+  <div class="mapwrap">
+
+    <article class="feat">
+      <h3>我的台本 <span class="tag">源文件 / 工程</span></h3>
+      <div class="where2">位置：左边栏，分两组显示</div>
+      <ul>
+        <li><b>台本（源文件）</b>：你导入的那份文字。生成、改属性都在这里。想追加内容用「⋯ 更多 → 导入」。</li>
+        <li><b>工程（时间轴副本）</b>：第一次点「时间轴」时自动生成。之后所有剪辑改动只进副本，<b>源文件不动</b>；想退回起点用工程页的「回到初始样本」。</li>
+        <li><b>多选</b>：Ctrl 点加选 / Shift 点连选；选中后出现批量条，可一次<b>删除 / 复制</b>多份；Esc 取消。</li>
+      </ul>
+    </article>
+
+    <article class="feat">
+      <h3>智能分行 <span class="tag">导入后重切</span></h3>
+      <div class="where2">位置：工具条 <code>智能分行</code></div>
+      <ul>
+        <li>两种模式：<b>按标点分句</b>（一句一行）／<b>按长度合并</b>（短句并到接近上限）。</li>
+        <li>可设<b>每行字数上限</b>；可选<b>处理范围</b>：只处理「未生成 / 需重生成」的行，或全篇（全篇会把已生成的标成待重生成）。</li>
+        <li>导入时分错了，用它重切就行，不用重新导入。</li>
+      </ul>
+    </article>
+
+    <article class="feat">
+      <h3>分组 <span class="tag">批量任务的单位</span></h3>
+      <div class="where2">位置：右侧 <code>批量</code> 页签</div>
+      <ul>
+        <li>一组 = 一批句子 + 一套音色/情感参数。旁白、对话、内心独白分开，生成和重做都能按组来。</li>
+        <li>「新建分组」收进当前选中的句子；卡片上的「生成 / 编辑」只作用于这一组；「选中未分组」找漏网的。</li>
+        <li>时间轴里也能按组多选（右键语音片段 → 选中同组）。</li>
+      </ul>
+      <figure class="shot small"><a href="/guide-img/h3-batch.png" target="_blank"><img src="/guide-img/h3-batch.png" alt="批量与分组"></a></figure>
+    </article>
+
+    <article class="feat">
+      <h3>筛选与状态 <span class="tag">找问题句</span></h3>
+      <div class="where2">位置：工具条下面那排「筛选」+ 顶部统计</div>
+      <ul>
+        <li>按<b>状态</b>（未生成 / 已生成 / 待重生成 / 失败 / 有标签 / 已改动）、<b>音色</b>、<b>分组</b>过滤。</li>
+        <li>顶部「改动 N」只看<b>和生成时不一样</b>的句子——改完稿回来重生成时最常用。</li>
+        <li>「选中」支持区间写法 <code>1-20,25,30-</code>，圈一批很快。</li>
+      </ul>
+      <figure class="shot small"><a href="/guide-img/h2-filter.png" target="_blank"><img src="/guide-img/h2-filter.png" alt="筛选与统计"></a></figure>
+    </article>
+
+  </div>
+
+  <!-- ================= 阶段三：生成 ================= -->
+  <div class="phase">
+    <span class="no">阶段 3</span>
+    <h3>生成</h3>
+    <span class="goal">把文字变成声音，顺手把音效位置标好</span>
+    <span class="rule"></span>
+  </div>
+
+  <div class="mapwrap">
+
+    <article class="feat wide">
+      <h3>批量生成与单句重做 <span class="tag">主流程</span></h3>
+      <div class="where2">位置：右侧 <code>生成</code> 页签 / 行尾 <code>⟳</code></div>
+      <ul>
+        <li>范围三选一：<b>选中行 / 未生成 / 全部</b>，再点「开始生成」；可随时「停止」，已完成的不会丢。</li>
+        <li>先试 1~2 句确认音色和情绪，再整篇跑，省时间。</li>
+        <li>单句重做：行尾 <b>⟳</b>；只改这一句的参数：<b>⋯ → 改属性并重生成</b>（不影响别的句子）。</li>
+        <li>生成完行上显示<b>实际时长</b>（不是估算），时间轴按实际时长排；文本或参数改过会标「待重生成」。</li>
+        <li>顶部状态条常驻：模型是否加载、ffmpeg、人声分离，切页签也看得见。</li>
+      </ul>
+      <figure class="shot small"><a href="/guide-img/h4-render.png" target="_blank"><img src="/guide-img/h4-render.png" alt="生成页签"></a></figure>
+    </article>
+
+    <article class="feat wide">
+      <h3>句中标签 / 句间标签 <span class="tag">给音效留位置</span></h3>
+      <div class="where2">位置：行首 <code>＋</code>（句中）／行尾 <code>⋯</code>（句间）</div>
+      <ul>
+        <li><b>句中</b>：落在「第 N 个字之后」，用来对齐台词里的动作（说到「关门」时咔嚓一声）。默认带 <b>500ms 延迟</b>，避免和上一句末尾挤在同一时刻；位置用数字框 + 拖动条调，旁边会算「句中约 x.xx 秒」。</li>
+        <li><b>句间</b>：插在两句之间，<b>留白</b>会真的插入静音，给转场音效留时间。</li>
+        <li>两者都能挂音效（可试听、调音量）；进时间轴后自动变成对应时刻的素材片段。</li>
+        <li>标签本身不出声、不改音频，只标位置；删标签 = 删对应的音效片段。</li>
+      </ul>
+      <figure class="shot small"><a href="/guide-img/g4-sfx.png" target="_blank"><img src="/guide-img/g4-sfx.png" alt="标签与音效"></a></figure>
+    </article>
+
+  </div>
+
+  <!-- ================= 阶段四：时间轴 ================= -->
+  <div class="phase">
+    <span class="no">阶段 4</span>
+    <h3>时间轴</h3>
+    <span class="goal">排位置、调属性、做空间与自动化</span>
+    <span class="rule"></span>
+  </div>
+
+  <div class="mapwrap">
+
+    <article class="feat wide">
+      <h3>时间轴常用操作 <span class="tag">剪辑</span></h3>
+      <div class="where2">位置：台本页 <code>🎬 时间轴</code>（会新建工程副本）</div>
+      <ul>
+        <li>拖片段改位置、拖边缘改长度；<b>选中多段拖一段会整组移动</b>；框选、Ctrl 点加选、Shift 连选。</li>
+        <li>顶部标尺常驻（滚到下面也贴着），拖标尺 = 定位播放头；空格播放/暂停，M 打标记，↑↓ 跳切点。</li>
+        <li><b>↕ 重排音声延迟</b>：按台本句序 + 句间停顿，把跨轨的音声片段重新排成一条时间线（只改开始时间）。</li>
+        <li><b>⇄ 整理重叠</b>：同轨叠在一起时一键挪到空白轨；总时长会跟着片段末端自动变长，也可点顶栏总时长手改。</li>
+      </ul>
+      <figure class="shot"><a href="/guide-img/g5-timeline.png" target="_blank"><img src="/guide-img/g5-timeline.png" alt="时间轴"></a></figure>
+    </article>
+
+    <article class="feat">
+      <h3>片段属性 <span class="tag">右侧面板</span></h3>
+      <div class="where2">位置：选中片段 → 右侧「片段属性」</div>
+      <ul>
+        <li><b>位置 / 时长 / 源内起点</b>都是「数字框 + 滚动条」。</li>
+        <li>音量、声像、淡入淡出、<b>速度</b>（滑杆居中 = 1×）与<b>变速时长</b>（填目标秒数自动算速率）。</li>
+        <li>右键：复制 / 剪切 / 粘贴、<b>复制属性 / 选择性粘贴</b>、切开、恢复完整片段、删除。</li>
+        <li>语音片段还能「⧉ 复制到音声副本音轨」——副本是独立素材，随便剪都不影响台本。</li>
+      </ul>
+      <figure class="shot small"><a href="/guide-img/h7-clipprops.png" target="_blank"><img src="/guide-img/h7-clipprops.png" alt="片段属性"></a></figure>
+    </article>
+
+    <article class="feat">
+      <h3>轨道属性 <span class="tag">整轨操作</span></h3>
+      <div class="where2">位置：左侧轨道头（双击改名 / 右键 / <code>⋯</code>）</div>
+      <ul>
+        <li>M 静音、S 独奏；拖轨道头上的音量条改整轨音量。</li>
+        <li>右键 → <b>整轨混响</b>、<b>把复制的属性套到整轨</b>、<b>整轨统一音量</b>，几十段一次改完。</li>
+        <li>排序：<b>移到音声/素材轨组第一条 / 最后一条</b>、组内上移下移；两组永远不会互相穿插。</li>
+      </ul>
+      <figure class="shot small"><a href="/guide-img/h9-trackmenu.png" target="_blank"><img src="/guide-img/h9-trackmenu.png" alt="轨道菜单"></a></figure>
+    </article>
+
+    <article class="feat wide">
+      <h3>高级：关键帧 / 录制 / 空间音频 / 运动脚本 <span class="tag">进阶</span></h3>
+      <div class="where2">位置：片段属性下半部分（<code>Alt+K</code> 显示/隐藏关键帧面板）</div>
+      <ul>
+        <li><b>关键帧</b>：音量、声像、空间距离都能画曲线。「＋ 播放头加点」或 Alt+点片段直接加；点可拖动、右键删；曲线形态可选平滑/折线。</li>
+        <li><b>关键帧录制</b>：点「● 录音量」再播放，一边听一边推滑杆，自动把动作记成关键帧；再点一次停止。</li>
+        <li><b>空间音频</b>：开启后选房间（混响）+ 干湿比 + HRIR 数据集，再用方位/仰角/距离摆位；圆形面板可直接拖人头周围的位置。</li>
+        <li><b>运动脚本</b>：左右往返 / 绕头圆周 / 由远及近 / 前后穿越 / 8 字 / 螺旋 / 贴耳微晃 / 头顶环绕 / 掠耳而过 / 远近呼吸 / 背后低语…选一个自动铺一串关键帧，再微调。</li>
+      </ul>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px">
+        <figure class="shot small" style="flex:1 1 260px;margin:0"><a href="/guide-img/h8-kf.png" target="_blank"><img src="/guide-img/h8-kf.png" alt="关键帧面板"></a><figcaption>关键帧：页签切换音量/声像/空间，可录制。</figcaption></figure>
+        <figure class="shot small" style="flex:1 1 260px;margin:0"><a href="/guide-img/h12-motion.png" target="_blank"><img src="/guide-img/h12-motion.png" alt="运动脚本"></a><figcaption>运动脚本：13 个预设，选完自动铺关键帧。</figcaption></figure>
+      </div>
+    </article>
+
+  </div>
+
+  <!-- ================= 阶段五：导出与维护 ================= -->
+  <div class="phase">
+    <span class="no">阶段 5</span>
+    <h3>导出与维护</h3>
+    <span class="goal">出成品、给后期、收拾硬盘</span>
+    <span class="rule"></span>
+  </div>
+
+  <div class="mapwrap">
+
+    <article class="feat wide">
+      <h3>导出方案 <span class="tag">出片</span></h3>
+      <div class="where2">位置：时间轴 <code>导出混音</code> / <code>导出工程</code>；台本 <code>导出</code> 页签</div>
+      <ul>
+        <li><b>导出混音</b>：一条成品（WAV / MP3 / FLAC / OGG），可选采样率、声道、只导某几条轨、只导某个时间段；
+          「总时长算到哪儿」决定尾巴按<b>显示末端</b>还是<b>未显示末端</b>（被裁掉/变速压掉的那段也算），有混响尾巴会多留一点。</li>
+        <li><b>导出工程</b>：Reaper（.rpp，最全：位置/裁剪/音量/声像/淡入淡出/自动化）、PR / 达芬奇（.edl）、
+          Audacity（分轨 WAV + labels.txt）。包里一定带<b>分轨 stems</b>、<code>timeline.csv</code>、<code>markers.csv</code>、说明。</li>
+        <li>勾「把用到的音频一起打包」= 自包含，发给别人也能直接打开；不勾则引用本机路径，体积小。</li>
+        <li>有片段的音频文件不见了时会跳过并提示「有 N 段被跳过」；一个能出声的片段都没有时直接报错，不会给你一个空包。</li>
+        <li><b>单句导出</b>：片段右键 → 导出这段；<b>拼接导出</b>：台本「导出」页签里按句序直接拼一条，不进时间轴。</li>
+      </ul>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px">
+        <figure class="shot small" style="flex:1 1 300px;margin:0"><a href="/guide-img/h10-mix.png" target="_blank"><img src="/guide-img/h10-mix.png" alt="导出混音"></a><figcaption>导出混音：格式/采样率/声道/时段/音轨 + 时长口径。</figcaption></figure>
+        <figure class="shot small" style="flex:1 1 300px;margin:0"><a href="/guide-img/h11-pack.png" target="_blank"><img src="/guide-img/h11-pack.png" alt="导出工程"></a><figcaption>导出工程：rpp / edl / audacity，可自包含音频。</figcaption></figure>
+      </div>
+    </article>
+
+    <article class="feat">
+      <h3>清理空间 <span class="tag">维护</span></h3>
+      <div class="where2">位置：顶栏 <code>🧹 清理空间</code></div>
+      <ul>
+        <li>分类列出：回收站、导出产物、历史快照、波形缓存、重复素材，按体积排序。</li>
+        <li>可以只删某一类（比如 90 天前的历史快照），<b>不动你正在用的台本和音频</b>。</li>
+        <li>删掉的东西进回收站，能在 <code>longform/_trash</code> 里找回。</li>
+      </ul>
+      <figure class="shot small"><a href="/guide-img/h6-storage.png" target="_blank"><img src="/guide-img/h6-storage.png" alt="清理空间"></a></figure>
+    </article>
+
+  </div>
+
+  <h2 class="plain" id="keys">快捷键小抄</h2>
+  <table class="keys">
+    <tr><th style="width:38%">台本</th><th>作用</th></tr>
+    <tr><td><kbd>Ctrl</kbd> + <kbd>Z</kbd> / <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Z</kbd></td><td>撤销 / 重做（文本和属性都算）</td></tr>
+    <tr><td><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>C</kbd> / <kbd>V</kbd></td><td>复制 / 粘贴选中的句子（连已生成的音频一起）</td></tr>
+    <tr><td><kbd>Shift</kbd> + 点行</td><td>连续选一段</td></tr>
+    <tr><th>时间轴</th><th>作用</th></tr>
+    <tr><td><kbd>空格</kbd></td><td>播放 / 暂停</td></tr>
+    <tr><td><kbd>Ctrl</kbd> + <kbd>C</kbd> / <kbd>X</kbd> / <kbd>V</kbd></td><td>复制 / 剪切 / 粘贴片段（多选时整组）</td></tr>
+    <tr><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd> / <kbd>V</kbd></td><td>复制片段属性 / 选择性粘贴（含关键帧）</td></tr>
+    <tr><td><kbd>Ctrl</kbd> + 点片段</td><td>加选 / 减选（多选）</td></tr>
+    <tr><td><kbd>Del</kbd></td><td>删除选中片段（语音片段不能删，要回台本删句子）</td></tr>
+    <tr><td><kbd>M</kbd> / <kbd>Shift</kbd> + <kbd>M</kbd></td><td>打标记 / 跳到下一个标记</td></tr>
+    <tr><td><kbd>Alt</kbd> + 点片段</td><td>在点击处加一个关键帧</td></tr>
+  </table>
+
+  <h2 class="plain" id="faq">卡住了？先看这几条</h2>
+
+  <details class="faq">
+    <summary>拖视频进导入台，没反应 / 提示没有 ffmpeg</summary>
+    <p>补丁包已经内置 ffmpeg（<code>bin\ffmpeg.exe</code>）。如果状态条还是黄点，点它右边的 <b>⟳ 重新探测</b>；
+      还不行就 <b>✎ 填路径</b> 指到任意一个 <code>ffmpeg.exe</code>，或者 <b>⬆ 上传</b> 一个（一次就够，会记进配置）。</p>
+  </details>
+
+  <details class="faq">
+    <summary>「去伴奏 / 只留人声」显示不可用</summary>
+    <p>Demucs 的模型权重（80MB）已经随包内置在 <code>vendor2\torch</code>，正常是离线可用的。
+      如果状态显示不可用，多半是这个目录被删了——重新装一次补丁即可（补丁里带着它）。</p>
+  </details>
+
+  <details class="faq">
+    <summary>点生成没声音 / 卡在「加载模型」</summary>
+    <p>第一次生成要先加载 TTS 模型，机器慢的话要几十秒，这是正常的；右侧顶部状态条会从灰点变成绿点。
+      一直不动就看 <code>logs\server.log</code> 最后几行。</p>
+  </details>
+
+  <details class="faq">
+    <summary>时间轴里片段拖到最右边，总时长不涨？</summary>
+    <p>已修：松手后总时长会自动撑到片段末端。也可以直接点顶栏的「总时长」手动改。</p>
+  </details>
+
+  <details class="faq">
+    <summary>单句想反复用，又不想影响台本</summary>
+    <p>在时间轴里右键那一句 → <b>⧉ 复制到素材轨「音声副本音轨」</b>。副本是一条独立音频，可以随便剪、变速、删，都不会动到台本里的原句。</p>
+  </details>
+
+  <details class="faq">
+    <summary>想从头再来一遍</summary>
+    <p>台本页「⋯ 更多 → 历史」里存着每次保存的副本，挑一个还原即可。文件层面在 <code>longform\scripts\</code>，回收站在 <code>longform\_trash\</code>。</p>
+  </details>
+
+  <footer>
+    全能音声工作台 · 补丁 v1.9 · 更细的说明见包内 <code>docs\使用说明.txt</code> 与 <code>docs\技术路线_长篇台本与时间轴.md</code>
+  </footer>
+</div>
+</body>
+</html>

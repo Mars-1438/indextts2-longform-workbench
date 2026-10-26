@@ -1,0 +1,32 @@
+MIT License
+
+Copyright (c) 2026 全能音声工作台 contributors
+
+本许可仅覆盖本仓库中由本项目作者编写的源代码（Python / JavaScript / HTML / CSS /
+安装脚本 / 文档），不覆盖以下内容：
+
+  1. IndexTTS2 语音合成模型及其推理代码（版权归哔哩哔哩 / 原项目作者）；
+  2. 「IndexTTS2.0 超级优化整合包 V3」（版权归 B 站 UP 主「十一君Jun」）；
+  3. Demucs 预训练权重（版权归 Meta AI Research，许可见其官方说明）；
+  4. assets/hrir/ 下的 HRIR 数据（KEMAR 无使用限制但需引用；
+     KU100 近场数据为 CC BY-SA，详见该目录 README 与 CREDITS.md）；
+  5. FFmpeg 二进制（LGPL/GPL，本仓库不包含）。
+上述内容的使用请遵守各自许可，详见 CREDITS.md。
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

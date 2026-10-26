@@ -1,0 +1,70 @@
+# 只提交「工作台这一层」，整合包/模型/运行时/用户数据一律不进仓库。
+
+# ---------- 整合包本体与运行时 ----------
+runtime/
+models/
+python/
+ffmpeg/
+.vscode/
+.idea/
+
+# ---------- 大件二进制（用 Release 附件或脚本获取）----------
+bin/ffmpeg.exe
+bin/ffmpeg
+vendor2/
+_vendor/
+*.pth
+*.pt
+*.onnx
+*.th
+*.ckpt
+*.safetensors
+
+# ---------- 用户数据（台本 / 音频 / 导出 / 日志）----------
+longform/_import/
+longform/_trash/
+longform/scripts/
+longform/media/
+longform/materials/
+longform/refs/
+longform/sfx/
+longform/presets/
+longform/config.json
+outputs/
+logs/
+*.wav
+*.mp3
+*.flac
+*.ogg
+
+# ---------- 打包产物 ----------
+dist/
+*.zip
+!_vendor_placeholder
+
+# ---------- 测试 / 调试脚本（属于开发过程，不发布）----------
+_t_*.py
+_dbg*.py
+_shot*.py
+_seed.py
+_cdp_tl.py
+_run_all.sh
+_run_batch.sh
+_clean_tests.py
+_smoke_empty.py
+.venv_test/
+logs/shots/
+
+# ---------- Python / 系统垃圾 ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
+
+# ---------- 编辑器临时文件 ----------
+*.swp
+*~

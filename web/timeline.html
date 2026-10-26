@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>时间轴 · IndexTTS2 全能音声工作台</title>
+<script>
+// 主题：与全能音声工作台共用 localStorage["lf.theme"]。
+// 默认浅色，不跟随系统；在工作台或本页切换都会同步。
+(function () {
+  var t = localStorage.getItem("lf.theme") === "dark" ? "dark" : "light";
+  document.documentElement.dataset.theme = t;
+  window.addEventListener("storage", function (e) {
+    if (e.key !== "lf.theme") return;
+    document.documentElement.dataset.theme = e.newValue === "dark" ? "dark" : "light";
+    window.dispatchEvent(new CustomEvent("tl-theme-change"));
+  });
+})();
+</script>
+<link rel="stylesheet" href="/timeline-assets/timeline.css?v=20261027f">
+</head>
+<body>
+<div class="tl-app">
+
+  <!-- ============ 顶栏：项目标题 + 导出 ============ -->
+  <header class="tl-topbar">
+    <a class="btn ghost back" href="/longform" id="btnBack" title="回到全能音声工作台">← 工作台</a>
+    <div class="tl-name"><b id="scriptTitle">加载中…</b><span class="projtag" id="projTag" hidden>工程</span></div>
+    <div class="tl-tools">
+      <span class="verbadge" id="verBadge" title="当前前端版本">v38</span>
+      <button class="btn ghost" id="btnTheme" title="切换浅色/深色">🌙 夜间</button>
+      <button class="btn" id="btnMix" title="把整个时间轴混音成单个音频文件">导出混音</button>
+      <button class="btn primary" id="btnPack" title="导出 Reaper / PR / 达芬奇工程">导出工程</button>
+      <button class="btn ghost" id="btnSave" disabled>已保存</button>
+    </div>
+  </header>
+
+  <!-- ============ 传输控制条（transport）============ -->
+  <div class="tl-transport">
+    <div class="tp-group">
+      <button class="tpbtn" id="btnHome" title="回到开头（Home）">⏮</button>
+      <button class="tpbtn" id="btnBack5" title="后退 5 秒">-5s</button>
+      <button class="tpbtn primary" id="btnPlay" title="播放 / 暂停（空格）">▶ 播放</button>
+      <button class="tpbtn" id="btnStop" title="停止并回到开头">■</button>
+      <button class="tpbtn" id="btnFwd5" title="前进 5 秒">+5s</button>
+      <button class="tpbtn" id="btnEnd" title="跳到结尾（End）">⏭</button>
+    </div>
+
+    <div class="tp-clock" title="当前时间 / 总时长">
+      <b id="timeCur">0:00.00</b><i>/</i><span id="timeTotal">0:00</span>
+    </div>
+
+    <div class="tp-group" id="undoGroup">
+      <button class="tpbtn" id="btnUndo" title="撤销（Ctrl+Z）">↶</button>
+      <button class="tpbtn" id="btnRedo" title="重做（Ctrl+Shift+Z）">↷</button>
+      <button class="tpbtn" id="btnHistory" title="历史版本：每次改动都会自动存一份，可随时回退">🕘 历史</button>
+    </div>
+
+    <div class="tp-group">
+      <button class="tpbtn toggle" id="btnLoop" title="循环播放">🔁 循环</button>
+      <button class="tpbtn toggle" id="btnSnap" title="吸附到标记/片段边缘">🧲 吸附</button>
+      <button class="tpbtn toggle on" id="btnHoverInsOn"
+              title="标记处的「＋ 插入素材」悬浮窗：关掉之后鼠标扫过标记不再弹窗，改从右键菜单插入">🪟 标记悬浮窗</button>
+      <label class="rate-wrap" title="预览倍速：只影响试听，不影响导出（导出永远按原速渲染）">
+        <span>倍速</span>
+        <select id="rateSel" class="rate-sel">
+          <option value="0.5">0.5×</option>
+          <option value="0.75">0.75×</option>
+          <option value="1" selected>1.0×</option>
+          <option value="1.25">1.25×</option>
+          <option value="1.5">1.5×</option>
+          <option value="2">2.0×</option>
+          <option value="3">3.0×</option>
+          <option value="custom">自定义…</option>
+        </select>
+      </label>
+      <button class="tpbtn" id="btnHelp" title="快捷键与操作说明（?）">？</button>
+    </div>
+
+    <div class="tp-group zoom">
+      <button class="tpbtn" id="btnZoomOut" title="缩小（Ctrl+滚轮）">－</button>
+      <span class="zoomtag" id="zoomTag">60 px/s</span>
+      <button class="tpbtn" id="btnZoomIn" title="放大（Ctrl+滚轮）">＋</button>
+      <button class="tpbtn" id="btnFit" title="全览">全览</button>
+    </div>
+
+    <div class="tp-group">
+      <button class="tpbtn" id="btnAddVoiceTrack" title="新增一条音声轨（放生成的语音）">＋ 音声轨</button>
+      <button class="tpbtn" id="btnAddSfxTrack" title="新增一条素材轨（放素材）">＋ 素材轨</button>
+      <button class="tpbtn" id="btnCleanTracks" title="删除没有任何片段的空白音轨">🧹 清理空轨</button>
+      <button class="tpbtn" id="btnFixOverlap"
+              title="把同一轨道上重叠的片段挪到空白轨 / 邻近轨道（时间位置不变）">⇄ 整理重叠</button>
+      <button class="tpbtn" id="btnRelayout"
+              title="按台本里的句间停顿重新排列音声片段：只改开始时间，不动时长/属性/素材">↕ 重排音声延迟</button>
+    </div>
+  </div>
+
+  <!-- ============ 主体 ============ -->
+  <div class="tl-body">
+    <div class="tl-stage">
+      <div class="tl-heads" id="heads"></div>
+      <div class="tl-scroll" id="scroll">
+        <!-- 粘性标尺：纵向滚到哪都贴在顶部（下面用负 margin 覆盖在画布自己的标尺带上） -->
+        <canvas id="cvRuler" title="拖动 / 点击这里可以定位播放头"></canvas>
+        <canvas id="cv"></canvas>
+        <div class="tl-playhead" id="playhead"><i></i></div>
+        <div class="tl-tip" id="tip"></div>
+        <div class="hoverins" id="hoverIns" hidden>
+          <button class="btn mini primary" id="btnHoverIns">＋ 插入素材</button>
+          <span id="hoverInsT"></span>
+        </div>
+      </div>
+
+      <!-- 批量操作条：选中 ≥2 段时浮出来（框选 / Shift 连选 / Ctrl 点选 / 按组选） -->
+      <div class="bulkbar" id="bulkBar" hidden>
+        <span class="bkcount" id="bkCount">已选 0 段</span>
+        <button class="bkbtn" id="bkPick" title="按条件批量选中">☑ 选择</button>
+        <button class="bkbtn" id="bkGroup" title="按台本里建好的分组整组选中">▦ 按组</button>
+        <span class="bksep"></span>
+        <button class="bkbtn" id="bkUnlock" title="解锁后可以拖动 / 改时间">🔓 解锁</button>
+        <button class="bkbtn" id="bkLock" title="锁住位置和时间">🔒 锁定</button>
+        <button class="bkbtn" id="bkMute">🔇 静音</button>
+        <button class="bkbtn" id="bkUnmute">🔊 取消静音</button>
+        <button class="bkbtn" id="bkGain" title="统一设置音量，或按比例增减">🎚 音量</button>
+        <button class="bkbtn" id="bkMove" title="整批移到另一条音轨">↧ 移轨</button>
+        <button class="bkbtn" id="bkSmooth" title="把选中片段的曲线切成平滑/折线（关键帧一个都不动）">〰 曲线形态</button>
+        <button class="bkbtn" id="bkSpace"
+                title="给选中片段统一套一个空间方案（HRIR 数据集 + 混响 + 距离）">🌐 空间方案</button>
+        <button class="bkbtn" id="bkCopyProps"
+                title="复制选中片段里第一段的属性（音量/声像/速度/空间/淡入淡出/关键帧）">📋 复制属性</button>
+        <button class="bkbtn" id="bkPasteProps"
+                title="把复制的属性粘到选中的所有片段，可勾选只贴哪几项、关键帧按时间还是按比例">📌 粘贴属性</button>
+        <button class="bkbtn" id="bkDup" title="复制素材片段（语音跟台本走）">⧉ 复制</button>
+        <button class="bkbtn" id="bkDel" title="删除素材片段">🗑 删除</button>
+        <button class="bkbtn" id="bkGenProps"
+                title="批量改音色 / 情感 / 停顿，然后重生成（写回台本，两边同一份数据）">🎛 属性并重生成</button>
+        <button class="bkbtn primary" id="bkRegen"
+                title="只重跑一遍（不改属性）：音频重算，但每句的位置保持不变">↻ 重新生成</button>
+        <span class="spacer"></span>
+        <button class="bkbtn ghost" id="bkClear" title="取消选择（Esc）">✕</button>
+      </div>
+    </div>
+
+    <aside class="tl-side" id="tlSide">
+      <!-- ① 片段属性：选中片段时要第一眼看到，所以放最上面；内容长了整栏可滚动 -->
+      <div class="side-sec" id="secInspector">
+        <div class="sec-h">
+          <span class="sec-t"><i class="sd clip"></i>片段属性</span>
+          <button class="sec-toggle" id="tgInspector" title="折叠/展开">▾</button>
+        </div>
+        <div id="inspector" class="inspector">
+          <div class="hint">点一个片段看它的属性；锁定的要先解锁才能拖动。</div>
+        </div>
+      </div>
+
+      <!-- ② 素材库：与全能音声工作台一致的单向流水线（导入台 → 音效库 / 本工程） -->
+      <div class="side-sec mediapanel" id="secMedia">
+        <div class="sec-h">
+          <span class="sec-t"><i class="sd sfx"></i>素材库<i class="mcount" id="mediaCount">0</i></span>
+          <button class="btn mini ghost mdesk" id="btnDesk"
+                  title="素材导入台（就在本页打开）：批量导入音频/视频 → 处理 → 存成音效">📥 导入台</button>
+          <button class="sec-toggle" id="tgMedia" title="折叠/展开">▾</button>
+        </div>
+        <div class="mseg" id="mSeg">
+          <button type="button" class="msb cur" data-mt="sfx"
+                  title="音效素材库（全局，跨台本共用）：成品音效，拖到素材轨就能用">🔔 音效库</button>
+          <button type="button" class="msb" data-mt="ref"
+                  title="音色素材库（全局，跨台本共用）：参考音频 / 克隆音色，可试听、可当素材插入">🎙 音色库</button>
+          <button type="button" class="msb" data-mt="mat"
+                  title="导入台素材库（全局，跨台本共用）：还没处理/标记的原始素材">📥 导入台</button>
+        </div>
+        <div class="mrow">
+          <input class="msearch" id="mediaSearch" type="text" placeholder="搜索名称…" autocomplete="off">
+          <label class="btn mini ghost upload" id="btnMediaUpload" title="只往本工程加一份（不进货架）；要入库请走导入台">＋
+            <input type="file" id="fileMedia" accept="audio/*" multiple hidden>
+          </label>
+          <button class="btn mini ghost" id="btnMediaRefresh" title="刷新列表">⟳</button>
+        </div>
+        <div class="mhint" id="mediaHint"></div>
+        <div id="mediaList" class="medialist">
+          <div class="hint">还没有素材。点「📥 导入台」导入一段音频/视频，存进音效库就会出现在这里。</div>
+        </div>
+      </div>
+
+      <!-- ③ 标记（吸附点 / 插入点） -->
+      <div class="side-sec grow" id="secMarker">
+        <div class="sec-h">
+          <span class="sec-t"><i class="sd mark"></i>标记
+            <i class="mcount" id="markerCount">0</i></span>
+          <button class="sec-toggle" id="tgMarker" title="折叠/展开">▾</button>
+        </div>
+        <div id="markerList" class="markerlist"></div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- ============ 底部：播放监视（左） + 集成预览/导航（右） ============ -->
+  <div class="tl-hsplit" id="bottomRz" title="拖动调整底部预览窗格高度（双击恢复默认）"><i></i></div>
+  <div class="tl-bottom" id="tlBottom">
+    <div class="tl-meter" id="meterPane" title="按当前播放位置推算的电平（由片段波形峰值 + 增益/声像计算）">
+      <div class="mt-head">
+        <span class="mt-dot" id="mtDot"></span><span id="mtState">未播放</span>
+        <span class="mt-spacer"></span>
+        <select id="mtMode" class="mt-sel" title="监视对象：默认只看当前音声片段；也可以看整体混音或某一条轨">
+          <option value="auto">跟随音声片段</option>
+          <option value="all">整体混音</option>
+        </select>
+      </div>
+      <div class="mt-file" id="mtFile">点播放或双击片段开始</div>
+      <div class="mt-body">
+        <div class="mt-bars">
+          <div class="mt-row"><b>L</b><div class="mt-track"><i id="mtL"></i><u id="mtLp"></u></div></div>
+          <div class="mt-row"><b>R</b><div class="mt-track"><i id="mtR"></i><u id="mtRp"></u></div></div>
+        </div>
+        <div class="mt-db"><span id="mtDb">-∞</span><small>dBFS</small></div>
+      </div>
+    </div>
+    <div class="tl-nav" id="navPane">
+      <canvas id="nav"></canvas>
+      <div class="nav-hint">全片预览 · 点击定位 · 拖红框平移 · 滚轮缩放 · 双击回全览</div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- 素材导入台（内嵌台本页的导入台，不跳转页面） -->
+<div class="deskmask" id="deskMask" hidden>
+  <div class="deskbox">
+    <div class="deskhead">
+      <span class="deskt">📥 素材导入台</span>
+      <span class="hint">批量导入音频/视频 → 处理 → 存成音效／音色；存完直接回到时间轴</span>
+      <span class="spacer"></span>
+      <button class="btn mini ghost" id="btnDeskReload" title="重新载入导入台">⟳ 刷新</button>
+      <button class="btn mini ghost" id="btnDeskFull" title="在台本页打开完整导入台（新标签）">↗ 单独打开</button>
+      <button class="btn mini primary" id="btnDeskClose">完成</button>
+    </div>
+    <iframe id="deskFrame" class="deskframe" title="素材导入台"></iframe>
+  </div>
+</div>
+
+<script src="/timeline-assets/emoctl.js"></script>
+<script src="/timeline-assets/timeline.js?v=20261027f"></script>
+</body>
+</html>

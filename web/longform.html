@@ -1,0 +1,840 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>全能音声工作台 · IndexTTS2</title>
+<script>
+// 主题：与时间轴页共用 localStorage["lf.theme"]。默认浅色，不跟随系统，
+// 避免「系统深色 → 页面突然变黑」的意外。
+(function () {
+  var t = localStorage.getItem("lf.theme") === "dark" ? "dark" : "light";
+  document.documentElement.dataset.theme = t;
+})();
+</script>
+<link rel="icon" href="/assets/favicon.svg">
+<link rel="stylesheet" href="/longform-assets/longform.css?v=20261027f">
+</head>
+<body>
+
+<header class="lf-head">
+  <!-- 第一行：台本与保存，最右边是主行动 -->
+  <div class="head-main">
+    <div class="brand">全能音声工作台<span class="sub">IndexTTS2</span></div>
+    <select id="scriptSel" class="sel" title="切换台本"></select>
+    <button id="btnNew" class="btn">新建</button>
+    <button id="btnImport" class="btn" title="把文本追加到当前台本">导入</button>
+    <button id="btnSmartImport" class="btn" title="智能导入：txt / docx / srt / csv / fountain → 选模板 → 自动分段分组 → 一次建好分组任务">🧠 智能导入</button>
+    <button id="btnSave" class="btn primary">保存</button>
+    <span id="saveState" class="hint">—</span>
+    <div class="spacer"></div>
+    <button id="btnInitial" class="btn ghost" hidden title="回到进入时间轴之前的初始样本">回到初始样本</button>
+    <button id="btnTimeline" class="btn cta" title="保存当前台本 → 新建工程副本 → 进入多轨时间轴编辑（Ctrl+Alt+T）">
+      <span class="cta-ico">⏱</span><span class="cta-txt">保存并进入时间轴</span>
+    </button>
+    <button id="btnLfTheme" class="btn ghost" title="切换日间 / 夜间模式（时间轴页会跟随）">🌙 夜间</button>
+    <a class="back" href="/" title="回到原来的语音合成页面">返回主界面</a>
+  </div>
+  <!-- 第二行：统计 + 素材库 / 默认参数 / 停止播放 -->
+  <div class="head-sub">
+    <div id="statChips" class="chips"></div>
+    <div class="spacer"></div>
+    <button id="btnGuide" class="btn guide" title="第一次用？这里有一份带截图的最短流程（导入台本 → 提取音色 → 生成 → 加音效 → 时间轴 → 导出混音）">🎓 第一次用？看看这里</button>
+    <button id="btnImportDesk" class="btn" title="导入台素材库：批量导入音频/视频（未处理/未标记）→ 处理 → 存入音色库或音效库">📥 素材导入台</button>
+    <button id="btnDefaults" class="btn" title="全局默认参数：音色 / 情感 / 停顿 / 采样，对所有未单独覆盖的行生效">全局默认参数</button>
+    <button id="btnVoiceLib" class="btn" title="音色素材库：参考音频 + 导入台（视频抽音频 / 去伴奏 / 降噪…）">🎙 音色素材库</button>
+    <button id="btnSfxLib" class="btn" title="音效素材库：给台本标签挂的音效，可上传 / 处理 / 复制改名">🔔 音效素材库</button>
+    <button id="btnPresets" class="btn" title="参数预设：把音色+情感+停顿+采样打包记住">参数预设</button>
+    <button id="btnStorage" class="btn ghost" title="存储清理：回收站 / 导出产物 / 历史快照 / 波形缓存 / 重复素材，一目了然地看着删">🧹 清理空间</button>
+    <button id="btnStopAudio" class="btn ghost" title="停止所有正在播放的音色 / 音效 / 试听（Esc）">⏹ 停止播放</button>
+  </div>
+</header>
+
+<div class="lf-main" id="lfMain">
+
+  <aside class="lf-side" id="sidePane">
+    <div class="side-head">
+      <span>我的台本</span>
+      <button id="btnScriptsMore" class="side-more" title="更多：新建 / 导入 / 刷新 / 复制 / 导出 / 显示设置">⋯ 更多</button>
+    </div>
+    <!-- 台本列表多选条（Ctrl 点选 / Shift 连选后出现） -->
+    <div class="selbar" id="scriptSelBar" hidden>
+      <span class="sb-info" id="scriptSelInfo">已选 0</span>
+      <button class="btn mini ghost" id="btnSsAll" title="选中列表里所有台本与工程（当前筛选下）">全选</button>
+      <button class="btn mini ghost" id="btnSsDup" title="给每个选中的台本各建一份副本（含已生成音频）">复制</button>
+      <button class="btn mini ghost danger" id="btnSsDel" title="删除选中的台本 / 工程（音频一起删，进回收站）">删除</button>
+      <button class="btn mini ghost" id="btnSsClear" title="取消选择（Esc）">✕</button>
+    </div>
+    <div id="scriptsList" class="scripts"></div>
+  </aside>
+
+  <div class="rz" id="rzLeft" title="拖动调整宽度"></div>
+
+  <section class="lf-center">
+    <div class="toolbar">
+      <div class="seg" id="viewSeg">
+        <button data-view="edit" class="cur" type="button">编辑</button>
+        <button data-view="board" type="button">工作台</button>
+      </div>
+      <label class="mini-chk"><input type="checkbox" id="selAll"> 全选</label>
+      <span id="selInfo" class="hint">未选中</span>
+      <input id="rangeInput" class="inp tiny" placeholder="1-20,25,30-">
+      <button id="btnSelRange" class="btn mini">选中</button>
+      <button id="btnSelMissing" class="btn mini">未生成</button>
+      <button id="btnSelNone" class="btn mini ghost">清空</button>
+      <div class="spacer"></div>
+      <button id="btnSelHead" class="btn mini ghost" title="从开头一直选到当前句（光标所在行 / 最后点过的行）">↑ 往前全选</button>
+      <button id="btnSelTail" class="btn mini ghost" title="从当前句一直选到末尾">↓ 往后全选</button>
+      <button id="btnBulkProps2" class="btn mini" title="对选中的句子批量修改音色 / 情感 / 停顿">批量改属性</button>
+      <button id="btnCopySel" class="btn mini" title="复制选中的句子：文本 / 句中标签 / 行属性，已生成的音频也会一起复制（Ctrl+Alt+C）">复制选中</button>
+      <button id="btnPasteLines" class="btn mini ghost" title="粘贴到「光标所在句」后面（Ctrl+Alt+V）">粘贴</button>
+      <button id="btnPropUndo" class="btn mini ghost" title="撤回上一步属性修改（只回退音色/情感/停顿/标签等属性，不动文本）">↩ 撤回属性</button>
+      <button id="btnChanged" class="btn mini ghost" title="只看「改过内容或属性、和生成时不一样」的句子（点一下切换）">改动 <b>0</b></button>
+      <div class="spacer"></div>
+      <button id="btnSmartSplit" class="btn mini" title="按句子长度或标点重新分行">智能分行</button>
+      <button id="btnUndo" class="btn mini ghost" title="撤销（Ctrl+Z）">↶</button>
+      <button id="btnRedo" class="btn mini ghost" title="重做（Ctrl+Shift+Z）">↷</button>
+      <button id="btnHistory" class="btn mini ghost" title="历史副本（存盘，换会话也在）">历史</button>
+    </div>
+
+    <div class="filters">
+      <span class="hint">筛选</span>
+      <select id="fStatus" class="sel mini">
+        <option value="">全部状态</option>
+        <option value="done">已生成</option>
+        <option value="pending">未生成</option>
+        <option value="stale">需重新生成</option>
+        <option value="error">失败</option>
+        <option value="inline">有句中标签</option>
+        <option value="inline0">无句中标签</option>
+        <option value="tag">仅句间标签</option>
+      </select>
+      <select id="fRef" class="sel mini"><option value="">全部音色</option></select>
+      <select id="fEmo" class="sel mini">
+        <option value="">全部情感</option>
+        <option value="0">同音色</option>
+        <option value="1">情感音频</option>
+        <option value="2">情感向量</option>
+        <option value="3">情感文本</option>
+      </select>
+      <input id="fQ" class="inp tiny" placeholder="搜索文本/标签">
+      <button id="btnFindInline" class="btn mini ghost" title="只显示插入了句中标签的句子（再点一次取消）">只看句中标签</button>
+      <label class="mini-chk"><input type="checkbox" id="fTagOnly"> 只看标签</label>
+      <button id="btnClearFilter" class="btn mini ghost">清除</button>
+      <div class="spacer"></div>
+      <span id="visInfo" class="hint mono"></span>
+    </div>
+
+    <div class="edithint">
+      <b>回车</b> 句中切分 / 句末新建空行 · <b>Backspace</b> 行首合并 · <b>Delete</b> 行尾并入下一行 ·
+      <b>Ctrl+Enter</b> 生成这一行 · <b>右键</b> 行菜单（属性 / 复制 / 前后全选）· 行间空隙插句间标签 · 句首 ＋ 插句中标签
+    </div>
+
+    <div id="rows" class="rows" tabindex="-1"></div>
+    <div id="board" class="board" hidden></div>
+
+    <div class="rowfoot">
+      <button id="btnAddTail" class="btn mini ghost">＋ 末尾加一行</button>
+      <button id="btnAddTag" class="btn mini ghost">＋ 句间标签</button>
+      <span class="hint">句间标签占一行、可留白；句中标签只做标记，不改音频。</span>
+    </div>
+  </section>
+
+  <div class="rz" id="rzRight" title="拖动调整宽度"></div>
+
+  <aside class="lf-panel" id="panelPane">
+    <!-- ===== 顶部：模型/依赖状态 + 生成进度（和「批量/生成/导出」三个页签平级，永远可见） ===== -->
+    <div class="topstat" id="topStat">
+      <div class="tsrow">
+        <span class="tsdot" id="tsTtsDot"></span>
+        <span class="tslab">模型</span>
+        <span class="tsval" id="tsTts">未知</span>
+        <span class="spacer"></span>
+        <span class="tsdot" id="tsFfDot"></span>
+        <span class="tslab">ffmpeg</span>
+        <span class="tsval" id="tsFf">检查中…</span>
+      </div>
+      <div class="tsrow">
+        <span class="tsdot" id="tsSepDot"></span>
+        <span class="tslab">人声分离</span>
+        <span class="tsval" id="tsSep">检查中…</span>
+        <span class="spacer"></span>
+        <button class="tsbtn" id="tsRefresh" type="button" title="重新检测模型与依赖">⟳</button>
+      </div>
+    </div>
+
+      <div class="progresswrap idle" id="progWrap">
+        <div class="prow">
+          <span id="rCount" class="mono">—</span>
+          <span id="rTime" class="hint mono"></span>
+        </div>
+        <div class="pbar">
+          <div class="bar big" id="rBarBox"><i id="rBar" style="width:0%"></i></div>
+          <div class="pct" id="rPct">0%</div>
+        </div>
+        <div class="bar thin"><i id="rBarLine" style="width:0%"></i></div>
+        <div class="stages" id="rStages">
+          <span class="stage" data-stage="model">① 模型</span>
+          <span class="stage" data-stage="gen">② 逐句生成</span>
+          <span class="stage" data-stage="done">③ 完成</span>
+        </div>
+        <div class="modelrow" id="rModelRow">
+          <span class="mdot" id="rModelDot"></span>
+          <span id="rModelPhase">模型状态未知</span>
+          <span class="spacer"></span>
+          <span id="rSpeed" class="hint mono"></span>
+        </div>
+        <div class="optrow" style="margin:4px 0 0">
+          <span class="hint">进度样式</span>
+          <div class="seg mini" id="progSeg">
+            <button type="button" data-ps="bar" class="cur">细条</button>
+            <button type="button" data-ps="glow">流光</button>
+            <button type="button" data-ps="seg">分段</button>
+            <button type="button" data-ps="stripe">斜纹</button>
+          </div>
+        </div>
+        <div id="rNow" class="rnow"></div>
+        <div id="rText" class="rtext"></div>
+        <div id="rMsg" class="hint"></div>
+      </div>
+
+    <nav class="ptabs" id="ptabs">
+      <button class="ptab cur" data-tab="batch" type="button">批量</button>
+      <button class="ptab" data-tab="render" type="button">生成</button>
+      <button class="ptab" data-tab="export" type="button">导出</button>
+    </nav>
+
+    <!-- ========== 批量任务（= 分组） ========== -->
+    <div class="ppane cur" data-pane="batch">
+      <div class="sec-h">批量任务 = 分组</div>
+      <div id="batchList" class="batchlist"></div>
+      <div class="pfoot">
+        <button id="btnNewBatch" class="btn primary grow">＋ 新建分组</button>
+        <button id="btnBulkProps" class="btn" title="对「已选中」的句子批量改音色 / 情感 / 停顿">批量改属性</button>
+      </div>
+      <div class="hint">一个分组 = 一批句子 + 一套音色/情感参数。生成时可以只跑某几个分组。</div>
+
+      <div class="sec-h" style="margin-top:18px">分组情况</div>
+      <div id="batchStats" class="bstat"></div>
+      <div class="pfoot">
+        <button id="btnSelUncovered" class="btn mini grow" title="选中还没被任何分组包含的句子">选中未分组</button>
+        <button id="btnSelOverlap" class="btn mini grow" title="选中同时属于多个分组的句子">选中多组重复</button>
+      </div>
+      <div class="hint">每个分组卡片上还有「选中本组」，用来直接选中这个分组里的全部句子。</div>
+    </div>
+
+    <!-- ========== 生成 ========== -->
+    <div class="ppane" data-pane="render">
+      <div class="phead"><span id="rState" class="badge">空闲</span><span id="rModel" class="hint"></span></div>
+
+      <label class="fl">渲染范围</label>
+      <div class="radios">
+        <label><input type="radio" name="rMode" value="sel" checked> 选中行</label>
+        <label><input type="radio" name="rMode" value="missing"> 未生成 / 需重生成</label>
+        <label><input type="radio" name="rMode" value="batches"> 按批量任务</label>
+        <label><input type="radio" name="rMode" value="all"> 全部行</label>
+      </div>
+      <div id="rBatchBox" class="box" hidden>
+        <div id="rBatchList" class="batchpick"></div>
+        <div class="hint">可多选；同一句被多个任务选中时只生成一次。</div>
+      </div>
+
+      <div class="pfoot">
+        <button id="btnRender" class="btn primary grow">开始生成</button>
+        <button id="btnStop" class="btn danger" disabled>停止</button>
+      </div>
+
+
+      <label class="mini-chk"><input type="checkbox" id="rAutoScroll" checked> 自动滚动到当前行</label>
+      <div class="phead" style="margin-top:12px"><span class="badge">日志</span></div>
+      <pre id="rLog" class="log"></pre>
+    </div>
+
+    <!-- ========== 导出 ========== -->
+    <div class="ppane" data-pane="export">
+      <div class="sec-h">导出音频（拼接）</div>
+
+      <div class="fl">导出行范围</div>
+      <div class="radios">
+        <label><input type="radio" name="exScope" value="all" checked> 全部行</label>
+        <label><input type="radio" name="exScope" value="sel"> 仅选中行</label>
+      </div>
+
+      <label class="fl">导出时段（秒）<span class="hint">留空 = 整条</span>
+        <button class="qbtn" id="qRange" type="button" title="说明">?</button></label>
+      <div class="row2">
+        <input id="exFrom" class="inp" type="number" min="0" step="0.1" placeholder="开始 0">
+        <input id="exTo" class="inp" type="number" min="0" step="0.1" placeholder="结束（到末尾）">
+      </div>
+      <div class="optrow" style="margin-top:6px">
+        <button id="exRangeAll" class="btn mini ghost" type="button">整条</button>
+        <button id="exRangeSel" class="btn mini ghost" type="button">选中行范围</button>
+      </div>
+
+      <div class="fl">格式 <button class="qbtn" id="qFmt" type="button" title="说明">?</button></div>
+      <select id="exFmt" class="sel">
+        <option value="wav">WAV — 无损，最通用（推荐）</option>
+        <option value="flac">FLAC — 无损压缩，约省 40%</option>
+        <option value="mp3">MP3 — 体积小（内置编码器，码率偏低）</option>
+        <option value="ogg">OGG — 体积小（内置编码器）</option>
+      </select>
+
+      <div class="fl">音质 / 位深 <button class="qbtn" id="qQual" type="button" title="说明">?</button></div>
+      <select id="exQuality" class="sel"></select>
+
+      <div class="fl">采样率 <button class="qbtn" id="qRate" type="button" title="说明">?</button></div>
+      <select id="exRate" class="sel">
+        <option value="16000">16000 Hz — 语音识别 / AI 训练</option>
+        <option value="22050">22050 Hz — 与 TTS 原始输出一致（最省体积）</option>
+        <option value="32000">32000 Hz — 语音/播客折中</option>
+        <option value="44100" selected>44100 Hz — CD / 音乐标准（推荐）</option>
+        <option value="48000">48000 Hz — 视频剪辑（PR / 达芬奇）</option>
+        <option value="96000">96000 Hz — 高保真母版（体积很大）</option>
+      </select>
+
+      <div class="fl">声道 <button class="qbtn" id="qCh" type="button" title="说明">?</button></div>
+      <select id="exCh" class="sel">
+        <option value="2" selected>立体声（双声道，默认）</option>
+        <option value="1">单声道（体积减半）</option>
+      </select>
+
+      <label class="fl">统一停顿覆盖 <span class="hint">留空 = 每行自己的停顿</span>
+        <button class="qbtn" id="qGap" type="button" title="说明">?</button></label>
+      <input id="exGap" class="inp" type="number" min="0" max="30000" step="10" placeholder="留空">
+
+      <div id="exEst" class="hint">正在估算…</div>
+      <div class="pfoot"><button id="btnExport" class="btn primary grow">拼接导出</button></div>
+      <div id="exResult" class="hint"></div>
+
+      <div class="divider"></div>
+
+      <div class="fl">单句批量导出（ZIP）<span class="hint">格式 / 音质 / 采样率 / 声道沿用上面设置</span></div>
+      <div class="row2">
+        <select id="exNaming" class="sel grow">
+          <option value="index_text">序号_文本</option>
+          <option value="index">只有序号</option>
+          <option value="text">只有文本</option>
+        </select>
+        <input id="exPrefix" class="inp" placeholder="前缀（可选）">
+      </div>
+      <div class="pfoot">
+        <button id="btnExportZipSel" class="btn grow">导出选中行</button>
+        <button id="btnExportZipAll" class="btn grow">导出全部</button>
+      </div>
+      <div id="exZipResult" class="hint"></div>
+
+      <div class="sec-h" style="margin-top:20px">映射 CSV（对接后期）</div>
+      <div class="hint">序号 / uid / 分组 / 正文 / 附属备注 / 慢语速 / 时长 / 音频文件名，
+        用来把每句音频对回剪辑工程（PR / 达芬奇 / 剪映的表格导入都能吃）。</div>
+      <div class="pfoot"><button id="btnExportMap" class="btn grow">导出映射 CSV</button></div>
+      <div id="exMapResult" class="hint"></div>
+
+      <div class="sec-h" style="margin-top:20px">导出文本</div>
+
+      <div class="optrow">
+        <label class="mini-chk"><input type="checkbox" id="txTs" checked> 带时间戳</label>
+        <label class="mini-chk"><input type="checkbox" id="txMeta" checked> 附加信息</label>
+        <label class="mini-chk"><input type="checkbox" id="txTags" checked> 含标签</label>
+      </div>
+      <div class="pfoot">
+        <button id="btnExportMd" class="btn grow">导出 Markdown</button>
+        <button id="btnExportTxt" class="btn grow">导出纯文本</button>
+      </div>
+      <div id="exMdResult" class="hint"></div>
+      <div class="hint">附加信息 = 统计、时间轴表格、音色/情感列；关掉只留台本正文。</div>
+
+      <div class="sec-h" style="margin-top:20px">
+        历史成品<button id="btnExRefresh" class="btn mini ghost" style="float:right">刷新</button>
+      </div>
+      <div id="exList" class="exports"></div>
+    </div>
+  </aside>
+</div>
+
+<div id="drawer" class="drawer" hidden>
+  <div class="drawer-box">
+    <div class="drawer-head">
+      <div class="dh-t">
+        <b id="drawerTitle">全局默认参数</b>
+        <small id="drawerSub"></small>
+      </div>
+      <button id="drawerClose" class="iconbtn" title="关闭（Esc）">✕</button>
+    </div>
+    <div class="drawer-body">
+      <!-- 全局默认参数 -->
+      <div class="ppane" data-pane="default">
+        <div class="phead"><span class="badge">全局默认</span><span class="hint">作用范围是整个台本：新行、以及没有单独覆盖的行都继承这里</span></div>
+        <label class="fl">默认音色</label>
+        <select id="dRef" class="sel"></select>
+        <label class="fl">默认情感模式</label>
+        <select id="dEmoMode" class="sel">
+          <option value="0">与音色参考音频相同</option>
+          <option value="1">情感参考音频</option>
+          <option value="2">情感向量</option>
+          <option value="3">情感描述文本（实验）</option>
+        </select>
+        <label class="fl">默认情感参考音频 <span class="hint">模式 1 用</span></label>
+        <div id="dEmoRefHost"></div>
+        <label class="fl">默认情感向量 <span class="hint">模式 2 用</span></label>
+        <div id="dEmoVecHost"></div>
+        <label class="fl">情感权重 <span id="dWeightOut" class="mono">0.65</span></label>
+        <input id="dWeight" type="range" min="0" max="1" step="0.01" value="0.65">
+        <label class="fl">默认行间停顿 <span class="hint">毫秒</span></label>
+        <input id="dPause" class="inp" type="number" min="0" max="30000" step="10" value="200">
+        <label class="fl">每段最大 Token <span class="hint">120 ≈ 90 字</span></label>
+        <input id="dSeg" class="inp" type="number" min="20" max="600" step="10" value="120">
+
+        <div class="phead" style="margin-top:14px"><span class="badge">分句</span></div>
+        <label class="fl">每行字数上限</label>
+        <div class="row2">
+          <input id="dMaxChars" class="inp" type="number" min="10" max="400" step="5" value="70">
+          <select id="dSplitMode" class="sel">
+            <option value="packed">按长度合并</option>
+            <option value="sentence">一句一行</option>
+          </select>
+        </div>
+
+        <div class="phead" style="margin-top:14px"><span class="badge">采样参数</span></div>
+        <label class="fl">temperature <span id="sTempOut" class="mono">0.80</span></label>
+        <input id="sTemp" type="range" min="0.1" max="2" step="0.05" value="0.8">
+        <label class="fl">top_p <span id="sTopPOut" class="mono">0.80</span></label>
+        <input id="sTopP" type="range" min="0" max="1" step="0.01" value="0.8">
+        <div class="row2">
+          <div><label class="fl">top_k</label><input id="sTopK" class="inp" type="number" min="1" max="100" value="30"></div>
+          <div><label class="fl">num_beams</label><input id="sBeams" class="inp" type="number" min="1" max="10" value="3"></div>
+        </div>
+        <div class="row2">
+          <div><label class="fl">rep_penalty</label><input id="sRep" class="inp" type="number" min="0.1" max="20" step="0.1" value="10"></div>
+          <div><label class="fl">max_mel</label><input id="sMaxMel" class="inp" type="number" min="50" max="1815" step="10" value="1500"></div>
+        </div>
+        <div class="pfoot"><button id="btnSaveDefault" class="btn primary grow">保存全局默认</button></div>
+      </div>
+
+      <!-- 音色库 -->
+      <div class="ppane" data-pane="voice">
+        <div class="libacts">
+          <label class="btn primary grow" style="text-align:center;cursor:pointer">＋ 上传音色
+            <input type="file" id="fileRefs" accept=".wav,.mp3,.flac,.ogg,.m4a,audio/wav,audio/mpeg,audio/flac,audio/ogg,audio/mp4" multiple hidden>
+          </label>
+          <button id="btnGoMedia" class="btn" title="进「素材导入台」：批量导入 / 视频抽音频 / 去伴奏 / 降噪，处理完直接存成音色">📥 导入台处理</button>
+        </div>
+        <div class="libbar">
+          <div class="seg mini" id="refViewSeg">
+            <button type="button" data-rv="list" class="cur">列表</button>
+            <button type="button" data-rv="card">卡片</button>
+            <button type="button" data-rv="grid">网格</button>
+          </div>
+          <input id="refSearch" class="inp libsearch" placeholder="搜音色名…" autocomplete="off">
+          <button id="btnRefRefresh" class="btn mini ghost" type="button" title="刷新音色列表">⟳</button>
+          <span id="refCount" class="libcount">0 个</span>
+        </div>
+        <div id="refHint" class="libhint"></div>
+        <div id="refList" class="reflist liblist mode-list"></div>
+        <div class="libfoot">
+          <b>用在哪：</b>台本每一行的「音色」都从这里选；点名字改名、✓ 设为全局默认、▶ 试听、右键更多。<br>
+          只取前 5–15 秒最稳。上传后统一转成 <b>22.05kHz 单声道 WAV</b>（模型只认这条线），同内容自动去重。
+        </div>
+      </div>
+
+      <!-- 音效素材库 -->
+      <div class="ppane" data-pane="sfx">
+        <div class="libacts">
+          <label class="btn primary grow" style="text-align:center;cursor:pointer">＋ 上传音效
+            <input type="file" id="fileSfx" accept="audio/*,video/*,.wav,.mp3,.flac,.ogg,.m4a" multiple hidden>
+          </label>
+          <button id="btnSfxPreprocess" class="btn" title="进「素材导入台」：裁剪 / 去静音 / 淡入淡出 / 变速变调 / 从歌里取人声，处理完存成音效">📥 导入台处理</button>
+        </div>
+        <div class="libbar">
+          <div class="seg mini" id="sfxViewSeg">
+            <button type="button" data-sv="list" class="cur">列表</button>
+            <button type="button" data-sv="card">卡片</button>
+            <button type="button" data-sv="grid">网格</button>
+          </div>
+          <input id="sfxSearch" class="inp libsearch" placeholder="搜音效名…" autocomplete="off">
+          <button id="btnSfxPaste" class="btn mini ghost" type="button" disabled title="把上次「复制」的音效粘贴成一份副本">粘贴副本</button>
+          <button id="btnSfxRefresh" class="btn mini ghost" type="button" title="刷新音效列表">⟳</button>
+          <span id="sfxCount" class="libcount">0 个</span>
+        </div>
+        <div id="sfxHint" class="libhint"></div>
+        <div id="sfxList" class="matlist liblist mode-list"></div>
+        <div class="libfoot">
+          <b>用在哪：</b>句间标签的 🔔 按钮（或右键「挂载音效」）从这里挑；音效固定在「标签时间 + 留白」处，
+          进时间轴后自动出现在素材轨的对应位置。<br>
+          视频只是<b>来源</b>：导入时就把音轨抽成 44.1k WAV，库里不保留视频；混音与工程导出读到的始终是这条 WAV。
+        </div>
+      </div>
+
+      <!-- 素材导入台（中转站） -->
+      <div class="ppane" data-pane="media">
+        <div class="phead">
+          <span class="badge" id="matBadge">导入台素材库</span>
+          <span class="hint" id="matCap">检测能力中…</span>
+        </div>
+
+        <!-- 去向：处理完存进哪个库 -->
+        <div id="matTargetBar" class="scopebar tgt">
+          <span class="scopebar-t">存入</span>
+          <div class="seg mini" id="matTargetSeg">
+            <button type="button" data-mt="ref" class="cur">🎙 音色库</button>
+            <button type="button" data-mt="sfx">🔔 音效库</button>
+          </div>
+          <span class="hint" id="matTargetHint">音色会统一转 22.05k 单声道（模型只认这个）</span>
+          <button id="btnMatTrash" class="btn mini ghost" type="button"
+                  title="导入台回收站：清空/删除过的文件都在这，可一键恢复">♻ 回收站</button>
+          <button id="btnMatClear" class="btn mini ghost" type="button"
+                  title="把导入台里勾选的（没勾就全部）移进回收站，可找回">清空导入台</button>
+        </div>
+
+        <label class="dropzone" id="matDrop">
+          <input type="file" id="fileMat" accept="audio/*,video/*" multiple hidden>
+          <b>拖多个文件到这里，或点击选择</b>
+          <span id="matFormats">音频 wav/mp3/flac/ogg/m4a · 视频 mp4/mov/mkv …</span>
+        </label>
+
+        <div class="optrow" style="margin-top:8px">
+          <input id="matSearch" class="inp" placeholder="搜素材名/来源…" style="width:130px">
+          <select id="matFilter" class="sel mini">
+            <option value="">全部</option>
+            <option value="audio">音频</option>
+            <option value="video">视频抽取</option>
+            <option value="derived">处理结果</option>
+          </select>
+          <button id="btnMatRefresh" class="btn mini ghost" type="button">刷新</button>
+          <button id="btnMatAll" class="btn mini ghost" type="button">全选 / 取消</button>
+          <span id="matCount" class="hint">0 个素材</span>
+        </div>
+        <div class="optrow" style="margin:0 0 4px">
+          <div class="seg mini" id="matViewSeg">
+            <button type="button" data-mv="list" class="cur">列表</button>
+            <button type="button" data-mv="card">卡片</button>
+            <button type="button" data-mv="grid">网格</button>
+          </div>
+          <span class="spacer"></span>
+          <span class="hint">右键可试听 / 重命名 / 快捷处理</span>
+        </div>
+        <div id="matList" class="matlist mode-list"></div>
+
+        <div class="sec-h" style="margin-top:16px">处理 <span class="hint" id="matSelHint">先勾选素材</span></div>
+        <div class="optrow" id="qpVoiceRow" style="margin:-2px 0 6px">
+          <span class="hint">快捷：</span>
+          <button id="qpClean" class="btn mini" type="button" title="人声 + 降噪 + 去静音 + 标准化">净化人声</button>
+          <button id="qpRef" class="btn mini" type="button" title="在「净化人声」基础上裁前 15 秒、转单声道 → 适合当音色">做成音色</button>
+        </div>
+        <div class="optrow" id="qpSfxRow" style="margin:-2px 0 6px" hidden>
+          <span class="hint">音效快捷：</span>
+          <button id="qpSfxShort" class="btn mini" type="button" title="去首尾静音 + 10ms 淡入 + 80ms 淡出 + 峰值 -1dB">短音效</button>
+          <button id="qpSfxAmb" class="btn mini" type="button" title="低切 80Hz + 降噪 + 300ms 淡入淡出（保留环境感）">环境音</button>
+          <button id="qpSfxVoice" class="btn mini" type="button" title="提取人声 + 降噪 + 去静音 + 峰值 -1dB">人声提示</button>
+        </div>
+        <div id="matOpsVoice">
+        <div class="matops">
+          <div class="opcard">
+            <label class="mini-chk"><input type="checkbox" id="opVocal"> 提取人声（去伴奏）</label>
+            <div class="row2">
+              <select id="opVocalMode" class="sel grow">
+                <option value="vocals">只要人声</option>
+                <option value="instrumental">只要伴奏</option>
+              </select>
+              <select id="opVocalEngine" class="sel" title="分离算法">
+                <option value="dsp">中置提取（快）</option>
+                <option value="demucs">Demucs 高精度</option>
+              </select>
+            </div>
+            <div class="row2" id="vocalDspOpts">
+              <span class="hint">强度 <b id="vVocal" class="mono">0.65</b></span>
+              <input id="opVocalStrength" type="range" min="0.2" max="1" step="0.05" value="0.65" style="flex:1">
+            </div>
+            <div class="hint" id="vocalEngineHint">中置提取：人声居中、伴奏铺得宽时效果最好；伴奏也居中会残留。需要立体声素材。</div>
+          </div>
+
+          <div class="opcard">
+            <label class="mini-chk"><input type="checkbox" id="opDenoise"> 降噪</label>
+            <div class="row2"><span class="hint">强度 <b id="vDenoise" class="mono">0.50</b></span>
+              <input id="opDenoiseAmt" type="range" min="0.1" max="1" step="0.05" value="0.5" style="flex:1">
+            </div>
+            <div class="hint">谱减法：压掉稳定的底噪（空调声、嘶声），过强会让人声发闷。</div>
+          </div>
+
+          <div class="opcard">
+            <label class="mini-chk"><input type="checkbox" id="opTrimSil"> 去掉首尾静音</label>
+            <div class="row2">
+              <input id="opSilDb" class="inp" type="number" value="-45" step="1" min="-80" max="-10">
+              <span class="hint">dB 阈值</span>
+            </div>
+            <div class="hint">低于阈值的开头/结尾会被裁掉，保留 60ms 余量。</div>
+          </div>
+
+          <div class="opcard">
+            <label class="mini-chk"><input type="checkbox" id="opNorm"> 响度标准化</label>
+            <div class="row2">
+              <select id="opNormMode" class="sel grow">
+                <option value="peak">峰值归一</option>
+                <option value="rms">RMS 归一</option>
+              </select>
+              <input id="opNormDb" class="inp" type="number" value="-1" step="0.5" min="-40" max="0">
+              <span class="hint">dB</span>
+            </div>
+            <div class="hint">峰值归一保证不削波；RMS 归一听感更均匀，适合较长素材。</div>
+          </div>
+
+          <div class="opcard">
+            <label class="mini-chk"><input type="checkbox" id="opTrim"> 裁剪时间段</label>
+            <div class="row2">
+              <input id="opTrimStart" class="inp" type="number" min="0" step="0.1" placeholder="起 0">
+              <input id="opTrimEnd" class="inp" type="number" min="0" step="0.1" placeholder="止（到末尾）">
+              <span class="hint">秒</span>
+            </div>
+            <div class="hint">先裁再处理：只想要副歌/某一句时很有用。</div>
+          </div>
+
+          <div class="opcard">
+            <label class="mini-chk"><input type="checkbox" id="opFade"> 淡入淡出</label>
+            <div class="row2">
+              <input id="opFadeIn" class="inp" type="number" min="0" step="0.1" placeholder="淡入 s">
+              <input id="opFadeOut" class="inp" type="number" min="0" step="0.1" placeholder="淡出 s">
+            </div>
+          </div>
+
+          <div class="opcard">
+            <label class="mini-chk"><input type="checkbox" id="opConv"> 采样率 / 声道（默认都不变）</label>
+            <div class="row2">
+              <select id="opSr" class="sel grow">
+                <option value="">保持原样</option>
+                <option value="16000">16000 Hz</option>
+                <option value="22050">22050 Hz</option>
+                <option value="44100">44100 Hz</option>
+                <option value="48000">48000 Hz</option>
+              </select>
+              <select id="opCh" class="sel">
+                <option value="">声道不变（原文件）</option>
+                <option value="1">单声道</option>
+                <option value="2">立体声</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        </div>
+
+        <!-- 音效向处理：按「音效」的逻辑来（短、有冲击力、可能带环境声/人声） -->
+        <div id="matOpsSfx" hidden>
+        <div class="matops">
+          <div class="opcard">
+            <label class="mini-chk"><input type="checkbox" id="opSTrim"> 裁剪时间段</label>
+            <div class="row2">
+              <input id="opSTrimStart" class="inp" type="number" min="0" step="0.1" placeholder="起 0">
+              <input id="opSTrimEnd" class="inp" type="number" min="0" step="0.1" placeholder="止（到末尾）">
+              <span class="hint">秒</span>
+            </div>
+            <div class="hint">先裁掉不要的部分再做其它处理，最省时间。</div>
+          </div>
+
+          <div class="opcard">
+            <label class="mini-chk"><input type="checkbox" id="opSSil"> 去首尾静音</label>
+            <div class="row2">
+              <input id="opSSilDb" class="inp" type="number" value="-45" step="1" min="-80" max="-10">
+              <span class="hint">dB 阈值</span>
+            </div>
+            <div class="hint">音效最怕开头带 0.3 秒空白，挂到标签上会显得慢半拍。</div>
+          </div>
+
+          <div class="opcard">
+            <label class="mini-chk"><input type="checkbox" id="opSDn"> 降噪</label>
+            <div class="row2"><span class="hint">强度 <b id="vSdn" class="mono">0.50</b></span>
+              <input id="opSDnAmt" type="range" min="0.1" max="1" step="0.05" value="0.5" style="flex:1">
+            </div>
+            <div class="hint">谱减：压掉稳定底噪（空调、嘶声）。环境音想保留质感就别开太高。</div>
+          </div>
+
+          <div class="opcard">
+            <label class="mini-chk"><input type="checkbox" id="opSFade"> 淡入 / 淡出</label>
+            <div class="row2">
+              <input id="opSFadeIn" class="inp" type="number" min="0" step="0.01" placeholder="淡入 s">
+              <input id="opSFadeOut" class="inp" type="number" min="0" step="0.01" placeholder="淡出 s">
+            </div>
+            <div class="hint">短音效建议 5–20ms 淡入淡出，消掉咔哒声。</div>
+          </div>
+
+          <div class="opcard">
+            <label class="mini-chk"><input type="checkbox" id="opSNorm"> 响度 / 音量</label>
+            <div class="row2">
+              <select id="opSNormMode" class="sel grow">
+                <option value="peak">峰值归一</option>
+                <option value="rms">RMS 归一</option>
+              </select>
+              <input id="opSNormDb" class="inp" type="number" value="-1" step="0.5" min="-40" max="0">
+              <span class="hint">dB</span>
+            </div>
+            <div class="row2">
+              <span class="hint">额外增益</span>
+              <input id="opSGain" class="inp" type="number" value="0" step="0.5" min="-30" max="30">
+              <span class="hint">dB（可负）</span>
+            </div>
+            <div class="hint">归一 + 增益：先对齐峰值，再整体加减音量，混音里更好控。</div>
+          </div>
+
+          <div class="opcard">
+            <label class="mini-chk"><input type="checkbox" id="opSSpeed"> 变速（不变调）</label>
+            <div class="row2">
+              <input id="opSSpeedVal" type="range" min="0.5" max="2" step="0.05" value="1" style="flex:1">
+              <b id="vSpeed" class="mono">1.00×</b>
+            </div>
+            <div class="hint">WSOLA 时间伸缩：<b>1.00×</b> 不变，大于 1 更快、小于 1 更慢，音高不变。</div>
+          </div>
+
+          <div class="opcard">
+            <label class="mini-chk"><input type="checkbox" id="opSPitch"> 变调（不变时长）</label>
+            <div class="row2">
+              <input id="opSPitchVal" type="range" min="-7" max="7" step="1" value="0" style="flex:1">
+              <b id="vPitch" class="mono">0</b><span class="hint">半音</span>
+            </div>
+            <div class="hint">重采样 + 时间伸缩：升高会更「薄」，降低更「厚」，长度不变。</div>
+          </div>
+
+          <div class="opcard">
+            <label class="mini-chk"><input type="checkbox" id="opSFilter"> 低切 / 高切</label>
+            <div class="row2">
+              <span class="hint">低切</span>
+              <input id="opSHp" class="inp" type="number" value="80" min="10" max="2000" step="10">
+              <span class="hint">Hz</span>
+            </div>
+            <div class="row2">
+              <span class="hint">高切</span>
+              <input id="opSLp" class="inp" type="number" value="0" min="0" max="20000" step="100">
+              <span class="hint">Hz（0 = 不做）</span>
+            </div>
+            <div class="hint">低切去轰鸣/空调声，高切去嘶声。环境音常用 80Hz 低切。</div>
+          </div>
+
+          <div class="opcard">
+            <label class="mini-chk"><input type="checkbox" id="opSReverse"> 反向播放</label>
+            <div class="hint">整段倒放：做「吸入」「上升」类音效常用。建议配合淡入。</div>
+          </div>
+
+          <div class="opcard">
+            <label class="mini-chk"><input type="checkbox" id="opSSep"> 从歌曲里取</label>
+            <div class="row2">
+              <select id="opSSepMode" class="sel grow">
+                <option value="vocals">只要人声</option>
+                <option value="instrumental">只要伴奏</option>
+              </select>
+              <select id="opSSepEngine" class="sel" title="分离算法">
+                <option value="dsp">中置提取（快）</option>
+                <option value="demucs">Demucs 高精度</option>
+              </select>
+            </div>
+            <div class="row2" id="sepDspOpts">
+              <span class="hint">强度 <b id="vSep" class="mono">0.65</b></span>
+              <input id="opSSepStrength" type="range" min="0.2" max="1" step="0.05" value="0.65" style="flex:1">
+            </div>
+            <div class="hint" id="sepEngineHint">中置提取，需要立体声素材；伴奏也居中时会残留。</div>
+          </div>
+
+          <div class="opcard">
+            <label class="mini-chk"><input type="checkbox" id="opSConv"> 采样率 / 声道（默认都不变）</label>
+            <div class="row2">
+              <select id="opSSr" class="sel grow">
+                <option value="">保持原样</option>
+                <option value="22050">22050 Hz</option>
+                <option value="44100">44100 Hz</option>
+                <option value="48000">48000 Hz</option>
+              </select>
+              <select id="opSCh" class="sel">
+                <option value="">声道不变（原文件）</option>
+                <option value="1">单声道</option>
+                <option value="2">立体声</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        </div>
+
+        <div class="pfoot">
+          <button id="btnMatRun" class="btn primary grow">处理并存入音色库</button>
+          <button id="btnMatDirect" class="btn" type="button"
+                  title="不勾任何处理项，直接收进目标库（只做格式归一）">直接存入</button>
+        </div>
+        <!-- 存完直接去对应的库看结果 / 挂着用 -->
+        <div class="pfoot jumprow">
+          <button id="btnJumpRef" class="btn grow" type="button"
+                  title="打开「音色素材库」：设为默认音色、套用到选中行、重命名 / 删除">🎙 去音色素材库</button>
+          <button id="btnJumpSfx" class="btn grow" type="button"
+                  title="打开「音效素材库」：给句间标签挂音效、拆成短音效">🔔 去音效素材库</button>
+        </div>
+        <label class="mini-chk" style="margin-top:7px;display:flex;gap:6px;align-items:flex-start">
+          <input type="checkbox" id="matKeepSrc" checked>
+          <span class="hint" style="line-height:1.5">处理后把原始素材留在导入台（推荐：方便二次处理；取消勾选才会把源文件移进回收站）</span>
+        </label>
+        <div id="matResult" class="hint"></div>
+        <!-- ffmpeg：视频抽音频要用它；别人的电脑上常常没有，这里给上传/指定入口 -->
+        <div class="ffbar" id="matFfmpegBar">
+          <div class="ffline">
+            <span class="ffdot" id="matFfDot"></span>
+            <span class="hint grow" id="matFfState">正在检查 ffmpeg…</span>
+          </div>
+          <div class="ffbtns">
+            <button class="btn mini ghost" id="btnFfUpload" type="button"
+                    title="选一个本机的 ffmpeg.exe（30~90MB），上传后存进整合包 bin/，以后离线也能用">⬆ 上传 ffmpeg.exe</button>
+            <button class="btn mini ghost" id="btnFfPath" type="button"
+                    title="直接填 ffmpeg.exe 的完整路径（也可以填它所在的文件夹）">✎ 填路径…</button>
+            <button class="btn mini ghost" id="btnFfProbe" type="button" title="重新探测一遍所有可能的位置">⟳ 重新探测</button>
+            <input type="file" id="fileFf" accept=".exe,application/octet-stream" hidden>
+          </div>
+        </div>
+        <div class="hint" style="margin-top:8px">
+          <b>导入台素材库（中转站）</b>：上传的音频/视频先落在这里，勾好处理项后点「处理并存入」，
+          结果才会成为音色 / 音效。导入台里的中间文件不会出现在两个库里。
+        </div>
+      </div>
+
+      <!-- 参数预设 -->
+      <div class="ppane" data-pane="presets">
+        <div class="libacts">
+          <input id="presetName" class="inp grow" placeholder="预设名称（如：哄睡低沉男声）">
+          <button id="btnSavePreset" class="btn primary" title="把当前「全局默认参数」存成一个预设">保存当前默认</button>
+        </div>
+        <div class="libbar">
+          <input id="presetSearch" class="inp libsearch" placeholder="搜预设名…" autocomplete="off">
+          <button id="btnPresetRefresh" class="btn mini ghost" type="button" title="刷新预设列表">⟳</button>
+          <span id="presetCount" class="libcount">0 个</span>
+        </div>
+        <div id="presetHint" class="libhint"></div>
+        <div id="presetList" class="reflist liblist"></div>
+        <div class="libfoot">
+          <b>用在哪：</b>点名字或 ✓ 应用，会写入「全局默认参数」——之后新建的行、以及没单独覆盖的行都用它。
+          预设里打包了音色 + 情感模式/权重 + 停顿 + 采样参数。
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<div id="modal" class="modal" hidden>
+  <div class="modal-box">
+    <h3 id="modalTitle">标题</h3>
+    <div id="modalBody"></div>
+    <div class="modal-foot">
+      <button id="modalCancel" class="btn ghost">取消</button>
+      <button id="modalOk" class="btn primary">确定</button>
+    </div>
+  </div>
+</div>
+
+<div id="ctxMenu" class="ctxmenu" hidden></div>
+
+<!-- 跟随鼠标的小输入卡：重命名音色 / 音效 / 素材时用，永远浮在最上层 -->
+<div id="popcard" class="popcard" hidden>
+  <div class="pop-t" id="popTitle">重命名</div>
+  <input id="popInput" class="inp" autocomplete="off" spellcheck="false">
+  <div class="pop-hint" id="popHint" hidden></div>
+  <div class="pop-foot">
+    <button id="popCancel" class="btn mini ghost" type="button">取消</button>
+    <button id="popOk" class="btn mini primary" type="button">保存</button>
+  </div>
+</div>
+<div id="toast" class="toast" hidden></div>
+
+<script src="/longform-assets/emoctl.js?v=20261027f"></script>
+<script src="/longform-assets/longform.js?v=20261027f"></script>
+</body>
+</html>

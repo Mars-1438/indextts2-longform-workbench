@@ -1712,7 +1712,20 @@
   }
   if (typeof window !== "undefined" && !window.__tlAudioUnloadBound) {
     window.__tlAudioUnloadBound = true;
-    window.addEventListener("beforeunload", resetPool);
+    window.addEventListener("beforeunload", (e) => {
+      resetPool();
+      if (!S.dirty || !S.data) return;
+      /* 改完 700ms 内就关页面 / 刷新时，防抖保存还没跑，改动会静默丢失。
+         这里先用 keepalive 抢发一次（页面卸载后请求仍会继续），再弹确认。 */
+      try {
+        fetch(`${API}/project`, {
+          method: "PATCH", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(S.data.project), keepalive: true,
+        });
+      } catch (_) { /* 忽略：至少还有确认框兜底 */ }
+      e.preventDefault();
+      e.returnValue = "";
+    });
   }
 
   // 片段在给定时间点的音量包络（含淡入淡出）
@@ -2656,7 +2669,11 @@
     const b = $("btnSave");
     b.disabled = true; b.textContent = "未保存";
     clearTimeout(S.saveTimer);
-    S.saveTimer = setTimeout(save, 700);
+    /* 定时保存也要走同一条队列：否则它和 persist 的保存会并发，
+       PATCH 乱序 = 后点的改动被先点的覆盖。 */
+    S.saveTimer = setTimeout(() => {
+      PERSIST_CHAIN = PERSIST_CHAIN.then(() => save()).catch(() => {});
+    }, 700);
     undoMark(label);
   }
 
@@ -2696,12 +2713,20 @@
 
   // 立即保存并重载（用于增删片段这类需要后端立即落盘、再拉回权威数据的操作，
   // 避免 markDirty 的 700ms 防抖和 reload 之间竞态导致新片段被旧数据覆盖丢失）
-  async function persist(label) {
+  /* 串行化落盘：快速连续操作（连着拖两下、批量改完再改一段）会并发 PATCH + reload。
+     PATCH 乱序 = 旧数据盖掉新数据；reload 乱序 = 界面"退回上一版"。 */
+  let PERSIST_CHAIN = Promise.resolve();
+  function persist(label) {
     clearTimeout(S.saveTimer);
     S.dirty = true;
     undoMark(label || "编辑片段");
-    await save();
-    await reload();
+    PERSIST_CHAIN = PERSIST_CHAIN.then(async () => {
+      await save();
+      /* 保存期间又有新改动（dirty 被重新置位）：跳过这次 reload。
+         否则会拿服务端的旧快照把刚改的内容冲掉，改由下一轮 persist 处理。 */
+      if (!S.dirty) await reload();
+    }).catch(() => {});
+    return PERSIST_CHAIN;
   }
 
   /* 总时长跟着片段末端走：任何片段被拖到当前总时长之外，就把它撑大。
@@ -8701,6 +8726,7 @@
       return S.multi.size;
     },
     multiCount() { return S.multi.size; },
+    markDirtyForTest(label) { markDirty(label || "测试标脏"); },
     copyVoiceToTrack(idOrIds) {
       // 传数组 = 批量（多选复制）；传单个 id = 老行为，返回新片段 id
       const many = Array.isArray(idOrIds);

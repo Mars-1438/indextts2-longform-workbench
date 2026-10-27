@@ -302,11 +302,19 @@ async function loadScripts() {
   return r.scripts;
 }
 
+/* 切换台本的序列号：快速连点两份时，先发出去的请求可能后返回，
+   不认这个号就会「后点的台本被先点的覆盖」。 */
+let SWITCH_SEQ = 0;
+
 async function switchScript(sid) {
+  const seq = ++SWITCH_SEQ;
+  clearTimeout(saveTimer);          // 别让旧台本的防抖保存晚一步打过来
   if (dirty && SCRIPT) await saveNow();
+  if (seq !== SWITCH_SEQ) return;   // 等保存的这段时间里又点了别的台本
   stopAllAudio();
   stopPolling();
   const r = await api(`/scripts/${sid}`);
+  if (seq !== SWITCH_SEQ) return;   // 这个响应已经过时，直接丢掉
   SCRIPT = r.script;
   STATS = r.stats;
   RENDER = r.render || null;
@@ -2495,18 +2503,28 @@ function payloadLines() {
   });
 }
 
-async function saveNow() {
+/* 保存也串行：两处同时触发（防抖 + 轮询结束时）时，PATCH 乱序会让旧内容盖掉新内容。 */
+let SAVE_CHAIN = Promise.resolve();
+
+function saveNow() {
   clearTimeout(saveTimer);
-  if (!SCRIPT) return;
+  if (!SCRIPT) return Promise.resolve();
+  const sid = SCRIPT.id;
+  // 快照：真正发出去的是「按下保存那一刻」的内容，之后继续编辑不会改变这次请求
+  const body = JSON.stringify({
+    title: SCRIPT.title, defaults: SCRIPT.defaults, sampling: SCRIPT.sampling,
+    tag_presets: SCRIPT.tag_presets || [], batches: SCRIPT.batches || [],
+    lines: payloadLines(),
+  });
+  SAVE_CHAIN = SAVE_CHAIN.then(() => doSave(sid, body)).catch(() => {});
+  return SAVE_CHAIN;
+}
+
+async function doSave(sid, body) {
   try {
-    const r = await api(`/scripts/${SCRIPT.id}`, {
-      method: "PATCH",
-      body: JSON.stringify({
-        title: SCRIPT.title, defaults: SCRIPT.defaults, sampling: SCRIPT.sampling,
-        tag_presets: SCRIPT.tag_presets || [], batches: SCRIPT.batches || [],
-        lines: payloadLines(),
-      }),
-    });
+    const r = await api(`/scripts/${sid}`, { method: "PATCH", body });
+    // 已经切到别的台本：只落盘，不动界面上的状态（那是新台本的）
+    if (!SCRIPT || SCRIPT.id !== sid) return;
     STATS = r.stats;
     // 服务端顺手回了「每行改了什么」和最新状态：就地更新标注，
     // 不用整页重渲染（否则正在输入的 textarea 会丢焦点）。
@@ -3239,13 +3257,17 @@ function initRenderPanel() {
 
 async function startRender(mode, uids, batches) {
   if (!SCRIPT) return;
+  const sid = SCRIPT.id;              // 记住是给哪份台本点的
   if (dirty) await saveNow();
+  if (!SCRIPT || SCRIPT.id !== sid) return;   // 等保存的这段时间切了台本，别再发
   try {
     let body;
     if (mode === "uids") body = { mode: "uids", uids };
     else if (mode === "batches") body = { mode: "batches", batches };
     else body = { mode };
-    const r = await api(`/scripts/${SCRIPT.id}/render`, { method: "POST", body: JSON.stringify(body) });
+    const r = await api(`/scripts/${sid}/render`, { method: "POST", body: JSON.stringify(body) });
+    // 请求还没回来就切走了：状态属于上一份台本，别写进新台本的界面
+    if (!SCRIPT || SCRIPT.id !== sid) return;
     RENDER = r.render;
     paintRender(); startPolling();
     toast(`开始生成 ${RENDER.total} 句`);
@@ -3267,8 +3289,12 @@ function stopPolling() {
 
 async function pollRender() {
   if (!SCRIPT) return;
+  const sid = SCRIPT.id;
   try {
-    const r = await api(`/scripts/${SCRIPT.id}/render`);
+    const r = await api(`/scripts/${sid}/render`);
+    /* 请求发出去到回来之间可能已经切了台本：这份状态属于上一个台本，
+       写进去会让新台本显示「正在生成 xx%」、甚至提前把轮询停掉。 */
+    if (!SCRIPT || SCRIPT.id !== sid) return;
     RENDER = r.render; STATS = r.stats;
     if (r.model) MODEL = r.model;
     if (r.statuses) {

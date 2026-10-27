@@ -719,6 +719,11 @@ html[data-theme="dark"] .insp-badge.mute { border-color: #5a3030; background: #2
 }
 .bulkbar .bkbtn.primary:hover:not(:disabled) { filter: brightness(1.06); color: #fff; }
 .bulkbar .bkbtn.ghost { border-color: transparent; background: transparent; color: var(--faint); }
+/* 两态按钮的「当前态」：全部已锁定 / 全部已静音时点亮，点一下就是反向操作 */
+.bulkbar .bkbtn.on {
+  border-color: var(--primary); color: var(--primary);
+  background: rgba(210, 55, 46, .12); font-weight: 600;
+}
 .bulkbar .bkbtn:disabled { opacity: .4; cursor: not-allowed; }
 html[data-theme="dark"] .bulkbar { box-shadow: 0 8px 24px rgba(0, 0, 0, .5); }
 

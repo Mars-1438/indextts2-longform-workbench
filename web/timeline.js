@@ -496,8 +496,9 @@
   /* ================================ 多选 ================================
      单选（S.sel）是「看属性」，多选（S.multi）是「批量操作」。
      · 点空白拖框 = 框选；Shift 点 = 连选；Ctrl/⌘ 点 = 加/减选
-     · 选完底部浮出批量条：解锁 / 锁定 / 静音 / 音量 / 移轨 / 复制 / 删除 / 重新生成
-     · 「按组」直接按台本里的分组整组选上（组名从片段上带过来） */
+     · 选完底部浮出批量条：锁定（一个键两态）/ 静音（一个键两态）/ 音量 / 移轨 / 复制 / 删除 / 重新生成
+     · 「按组」直接按台本里的分组整组选上（组名从片段上带过来）
+     · 框选完要把 S.sel 落到其中一段上（锚点），否则只认 S.multi 的入口（L 键、属性面板）会找不到当前片段 */
   const selClips = () => Array.from(S.multi).map((id) => clipById(id)).filter(Boolean);
   const inMulti = (id) => S.multi.has(id);
 
@@ -518,9 +519,15 @@
 
   function clearMulti() {
     S.bulkOpen = false;
-    if (!S.multi.size) { updateBulkBar(); return; }
+    const hadMulti = S.multi.size, hadSel = !!S.sel;
     S.multi.clear();
+    /* 取消选择要连锚点一起清：只清集合而留着 S.sel，按 L / V 还会偷偷作用到
+       「上一次点过的那段」，看起来像随机改了一个没选中的片段。 */
+    S.sel = null;
+    S.anchor = null;
     updateBulkBar();
+    if (!hadMulti && !hadSel) return;
+    drawInspector();
     draw();
   }
 
@@ -594,10 +601,27 @@
     en("bkRegen", nv > 0);
     en("bkMove", cs.length > 0);
     en("bkGain", cs.length > 0);
-    en("bkLock", cs.length > 0);
-    en("bkUnlock", cs.length > 0);
-    en("bkMute", cs.length > 0);
-    en("bkUnmute", cs.length > 0);
+    /* 锁定 / 静音各只留一个按钮，文案跟着选中片的实际状态走：
+       全部已锁 → 显示「🔓 解锁」，否则显示「🔒 锁定」（混合状态按「全锁」算，和 L 键一致）；
+       全部已静音 → 显示「🔊 取消静音」，否则显示「🔇 静音」。 */
+    const allLocked = cs.length > 0 && cs.every((c) => c.locked);
+    const allMuted = cs.length > 0 && cs.every((c) => c.mute);
+    const bl = $("bkLock");
+    if (bl) {
+      bl.textContent = allLocked ? "🔓 解锁" : "🔒 锁定";
+      bl.classList.toggle("on", allLocked);
+      bl.title = allLocked
+        ? "全部已锁定：点一下解锁（快捷键 L）"
+        : "锁住位置和时间（混合状态也是全部锁定，快捷键 L）";
+      bl.disabled = cs.length === 0;
+    }
+    const bm = $("bkMute");
+    if (bm) {
+      bm.textContent = allMuted ? "🔊 取消静音" : "🔇 静音";
+      bm.classList.toggle("on", allMuted);
+      bm.title = allMuted ? "全部已静音：点一下取消（快捷键 V）" : "静音选中片段（快捷键 V）";
+      bm.disabled = cs.length === 0;
+    }
     en("bkCopyProps", cs.length > 0);
     en("bkPasteProps", cs.length > 0 && !!PROP_CLIP);
   }
@@ -2030,10 +2054,17 @@
   // 重叠分流：优先放到「同类别的空白音轨」，没有才新建一条。
   // 新建时按拖拽方向放在当前轨的上方(dir=-1)或下方(dir=+1)。
   /* 锁定 / 解锁：多选时作用于整组；选中的片段锁定状态不一致时，**优先全部锁定**。
-     （单段维持原来的「点一下切换」手感） */
+     （单段维持原来的「点一下切换」手感）
+     c 可以省略：框选之后 S.sel 可能是空的，这时直接按多选集合处理 ——
+     以前 L 键写成 `if (key === "l" && c)`，框选完按 L 一点反应都没有就是这个原因。 */
   function lockSelection(c) {
-    const list = (S.multi.size > 1 && S.multi.has(c.id)) ? selClips() : [c].filter(Boolean);
-    if (!list.length) return;
+    const base = c || (S.sel ? clipById(S.sel) : null);
+    let list;
+    if (S.multi.size > 1) list = selClips();
+    else if (base) list = [base];
+    else list = selClips();
+    list = list.filter(Boolean);
+    if (!list.length) { toast("先选一段（或多段）再锁定", true); return; }
     const allLocked = list.every((x) => x.locked);
     const to = !allLocked;
     list.forEach((x) => {
@@ -2041,6 +2072,7 @@
       commitClip(x, to ? "锁定片段" : "解锁片段");
     });
     drawInspector(); draw();
+    updateBulkBar();
     toast(to ? `已锁定 ${list.length} 段` : `已解锁 ${list.length} 段`);
   }
 
@@ -2797,6 +2829,10 @@
   cv.addEventListener("mousedown", (e) => {
     if (!S.data) return;
     hideCtx();
+    /* 只有左键才走「点选 / 拖动」。右键以前也会进来：
+       在多选集合里右键一段就进入 move 拖拽，松手时 endDrag 的 wasMultiSel 分支
+       把集合收成这一段 —— 表现就是「右键一下就只剩一个片段被选中」。 */
+    if (e.button !== 0) return;
     const r = cv.getBoundingClientRect();
     const x = e.clientX - r.left, y = e.clientY - r.top;
 
@@ -3089,7 +3125,16 @@
     cv.style.cursor = "default";
     if (d && d.type === "marquee") {
       S.marquee = null;
-      if (!d.moved) { S.multi.clear(); updateBulkBar(); }   // 单击空白 = 取消选择
+      if (!d.moved) { S.multi.clear(); S.sel = null; updateBulkBar(); }
+      else if (S.multi.size) {
+        /* 框选不产生「被点的那一段」，但要给后续操作一个锚点：
+           否则 S.sel 是空，按 L / V、看属性面板都找不到当前片段。 */
+        const ids = Array.from(S.multi);
+        S.sel = ids[ids.length - 1];
+        S.anchor = S.sel;
+      }
+      updateBulkBar();
+      drawInspector();
       draw();
       return;
     }
@@ -3248,7 +3293,15 @@
       openAreaMenu(at, tr, ti, e.clientX, e.clientY);
       return;
     }
+    /* 右键不动已有多选：点的那段**在集合里**就保留整组（菜单里的锁定/静音/删除等
+       都会作用于整组）；点在集合外面才把选择收成这一段的单选。 */
+    if (!inMulti(c.id)) {
+      S.multi.clear();
+      S.multi.add(c.id);
+      updateBulkBar();
+    }
     S.sel = c.id;
+    S.anchor = c.id;
     drawInspector(); draw();
     openClipMenu(c, e.clientX, e.clientY);
   });
@@ -7701,11 +7754,13 @@
       dropMenuBelow(ev.currentTarget, entries);
     };
 
-    /* --- 锁定 / 静音 --- */
-    $("bkUnlock").onclick = () => applyAll((c) => { c.locked = false; }, "批量解锁", "已解锁");
-    $("bkLock").onclick = () => applyAll((c) => { c.locked = true; }, "批量锁定", "已锁定");
-    $("bkMute").onclick = () => applyAll((c) => { c.mute = true; }, "批量静音", "已静音");
-    $("bkUnmute").onclick = () => applyAll((c) => { c.mute = false; }, "批量取消静音", "已取消静音");
+    /* --- 锁定 / 静音：一个按钮两态，点一下切换（和 L / V 键同一套逻辑） --- */
+    $("bkLock").onclick = () => {
+      const l = cs();
+      if (!l.length) { toast("先选片段", true); return; }
+      lockSelection(l[0]);
+    };
+    $("bkMute").onclick = () => muteSel();
 
     /* --- 音量 --- */
     $("bkGain").onclick = () => {
@@ -8700,10 +8755,7 @@
       return;
     }
     if (key === "v" && !mod) { e.preventDefault(); muteSel(); return; }
-    if (key === "l" && !mod && c) {
-      lockSelection(c);
-      return;
-    }
+    if (key === "l" && !mod) { e.preventDefault(); lockSelection(c); return; }
     if (e.key === "Escape") {
       S.marquee = null;
       hideCtx();

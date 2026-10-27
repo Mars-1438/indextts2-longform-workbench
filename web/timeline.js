@@ -2281,47 +2281,30 @@
 
   /* 复制语音到「音声副本音轨」：台本那一句完全不受影响。
      副本落在一条专属素材轨上，位置固定在所有音声轨下方、其它素材轨上方。 */
-  async function copyVoiceToCopyTrack(c) {
-    if (!c || c.kind !== "voice" || !c.uid) { toast("这段不是音声片段", true); return null; }
-    if (!c.has_audio) { toast("这一段还没有生成音频", true); return null; }
-    let d;
-    try {
-      const r = await fetch(`${API}/media/from-voice`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ uid: c.uid }),
-      });
-      d = await r.json();
-      if (!r.ok) throw new Error(d.detail || "复制音频失败");
-    } catch (e) {
-      toast("复制失败：" + e.message, true);
-      return null;
-    }
-    await loadMedia().catch(() => {});
-    // 已有「音声副本音轨」就复用，没有就建一条
+  /* 副本轨：没有就建一条。位置固定在「素材组第一条」——即所有音声轨下方、其它素材轨上方。 */
+  function ensureVoiceCopyTrack() {
     let tr = tracks().find((t) => t.kind === "sfx" && t.name === VOICE_COPY_TRACK);
-    if (!tr) {
-      tr = {
-        id: "t" + uid(), name: VOICE_COPY_TRACK, kind: "sfx",
-        gain: 1, pan: 0, mute: false, solo: false, clips: [],
-      };
-      /* 插到「素材组的第一条」之前 —— 也就是所有音声轨的下方、其它素材轨的上方。
-         不能按「最后一条音声轨的下标 +1」算：工程里轨道数组万一不是分组存放的，
-         那样算出来会落到最底下（表现就是「和新建音轨一样跑到最后」）。 */
-      const atSfxTop = (arr) => {
-        const i = arr.findIndex((t) => t.kind && t.kind !== "voice");
-        return i < 0 ? arr.length : i;
-      };
-      tr.clips = tr.clips || [];
-      S.data.tracks.splice(atSfxTop(S.data.tracks), 0, tr);   // 这份要带 clips（界面靠它画）
-      if (Array.isArray(S.data.project.tracks)) {
-        S.data.project.tracks.splice(atSfxTop(S.data.project.tracks), 0, {
-          id: tr.id, name: tr.name, kind: "sfx", gain: 1, pan: 0, mute: false, solo: false,
-        });
-      }
+    if (tr) return tr;
+    tr = {
+      id: "t" + uid(), name: VOICE_COPY_TRACK, kind: "sfx",
+      gain: 1, pan: 0, mute: false, solo: false, clips: [],
+    };
+    const atSfxTop = (arr) => {
+      const i = arr.findIndex((t) => t.kind && t.kind !== "voice");
+      return i < 0 ? arr.length : i;
+    };
+    tr.clips = tr.clips || [];
+    S.data.tracks.splice(atSfxTop(S.data.tracks), 0, tr);
+    if (Array.isArray(S.data.project.tracks)) {
+      S.data.project.tracks.splice(atSfxTop(S.data.project.tracks), 0, {
+        id: tr.id, name: tr.name, kind: "sfx", gain: 1, pan: 0, mute: false, solo: false,
+      });
     }
-    const item = addSfx(d.name, c.start, tr.id, d.dur, d.display || d.name);
-    if (!item) { toast("插入失败", true); return null; }
-    // 把听感相关的属性一起带过去（空间/混响/音量/淡入淡出），副本听起来才跟原句一样
+    return tr;
+  }
+
+  /* 把音声片段的听感属性抄到副本上，副本听起来才跟原句一致 */
+  function copyVoiceSoundProps(c, item) {
     item.gain = c.gain; item.pan = c.pan;
     item.az = c.az || 0; item.el = c.el || 0;
     item.dist = c.dist == null ? 1 : c.dist;
@@ -2329,14 +2312,68 @@
     item.room = c.room || ""; item.send = Number(c.send) || 0;
     item.hrtf = c.hrtf || ""; item.sp_preset = c.sp_preset || "";
     item.fade_in = c.fade_in || 0; item.fade_out = c.fade_out || 0;
-    S.sel = item.id;
-    S.multi.clear(); S.multi.add(item.id);
+    /* 关键帧也带过去：音量/声像/空间距离的自动化是这一段最费工夫的部分，
+       不带过去副本就是「一条直的声音」，等于白做。 */
+    if (c.kf && Object.keys(c.kf).length) {
+      S.data.project.kf = S.data.project.kf || {};
+      S.data.project.kf[item.id] = JSON.parse(JSON.stringify(c.kf));
+    }
+    return item;
+  }
+
+  /* 批量：把若干音声片段各自复制成**独立素材**，落到「音声副本音轨」。
+     台本那边一句都不多、原句不动；副本改名 / 裁剪 / 删除都与台本无关。 */
+  async function copyVoicesToCopyTrack(list) {
+    const all = (list || []).filter((x) => x && x.kind === "voice");
+    if (!all.length) { toast("选中的不是音声片段", true); return []; }
+    const ready = all.filter((x) => x.uid && x.has_audio);
+    if (!ready.length) { toast("选中的音声片段都还没有生成音频", true); return []; }
+    if (ready.length < all.length) {
+      toast(`有 ${all.length - ready.length} 段还没生成音频，已跳过`);
+    }
+    /* 逐段请服务端把 audio/<uid>.wav 复制成独立素材。
+       一段失败不影响其它段（比如某句音频文件被手工删了）。 */
+    const got = [];
+    for (const c of ready) {
+      try {
+        const r = await fetch(`${API}/media/from-voice`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ uid: c.uid }),
+        });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || "复制音频失败");
+        got.push({ c, d });
+      } catch (e) {
+        toast(`「${(c.text || "").slice(0, 8)}…」复制失败：${e.message}`, true);
+      }
+    }
+    if (!got.length) return [];
+    await loadMedia().catch(() => {});
+    const tr = ensureVoiceCopyTrack();
+    const made = [];
+    got.forEach(({ c, d }) => {
+      const item = addSfx(d.name, c.start, tr.id, d.dur, d.display || d.name);
+      if (item) made.push(copyVoiceSoundProps(c, item));
+    });
+    if (!made.length) { toast("插入失败", true); return []; }
+    // 复制出来的这几段直接选中，方便接着拖 / 改属性
+    S.multi.clear();
+    made.forEach((x) => S.multi.add(x.id));
+    S.sel = made[made.length - 1].id;
     updateBulkBar();
     markDirty("复制语音到素材轨");
     drawInspector(); draw(); resize(); buildHeads();
     await persist("复制语音到素材轨");
-    toast(`已复制到「${tr.name}」（${d.display || d.name}）`);
-    return item;
+    toast(made.length > 1
+      ? `已复制 ${made.length} 段到「${tr.name}」`
+      : `已复制到「${tr.name}」（${got[0].d.display || got[0].d.name}）`);
+    return made;
+  }
+
+  /* 单段入口：调试钩子与旧调用点用 */
+  async function copyVoiceToCopyTrack(c) {
+    const made = await copyVoicesToCopyTrack([c]);
+    return made.length ? made[0] : null;
   }
 
   /* 粘贴整块：at = 第一段的起点；返回新片段数组。
@@ -2370,6 +2407,10 @@
             item.room = src.room || ""; item.send = Number(src.send) || 0;
             item.hrtf = src.hrtf || "";
             item.fade_in = src.fade_in || 0; item.fade_out = src.fade_out || 0;
+            if (src.kf && Object.keys(src.kf).length) {
+              S.data.project.kf = S.data.project.kf || {};
+              S.data.project.kf[item.id] = JSON.parse(JSON.stringify(src.kf));
+            }
             out.push(item);
           }
         } catch (e) {
@@ -3470,8 +3511,15 @@
     add(c.locked ? "解锁（可改位置时间）" : "锁定（位置时间固定）", "", () => {
       c.locked = !c.locked; commitClip(c, c.locked ? "锁定片段" : "解锁片段"); drawInspector();
     });
-    add(c.mute ? "取消静音" : "静音这段", "", () => {
-      c.mute = !c.mute; commitClip(c, c.mute ? "静音片段" : "取消静音"); drawInspector();
+    /* 多选时静音也作用于整批（否则「选了 5 段，右键静音只哑了 1 段」） */
+    const muteSel = (S.multi.size > 1 && S.multi.has(c.id)) ? selClips() : [c];
+    const allMuted = muteSel.length > 0 && muteSel.every((x) => x.mute);
+    add(muteSel.length > 1
+      ? (allMuted ? `取消静音（${muteSel.length} 段）` : `静音选中的 ${muteSel.length} 段`)
+      : (c.mute ? "取消静音" : "静音这段"), "", () => {
+      const toMute = !allMuted;
+      muteSel.forEach((x) => { x.mute = toMute; commitClip(x, toMute ? "静音片段" : "取消静音"); });
+      drawInspector();
     });
     if (c.kind === "voice" && c.uid) {
       add("🎛 改属性并重生成…（音色 / 情感 / 停顿）", "", () => openGenProps([c.uid], c));
@@ -3499,9 +3547,16 @@
     add(nSel > 1 ? `复制选中的 ${nSel} 段` : "复制", "Ctrl+C", () => {
       copySelection();
     }, false, !!c.from_tag);
-    if (c.kind === "voice") {
-      add("⧉ 复制到素材轨「音声副本音轨」", "",
-        () => copyVoiceToCopyTrack(c), false, !c.uid || !c.has_audio);
+    if (c.kind === "voice" || (S.multi.size > 1 && selClips().some((x) => x.kind === "voice"))) {
+      /* 多选时（右键点在选中的片段上）一次把选中的音声片段全复制过去 */
+      const vs = (S.multi.size > 1 && S.multi.has(c.id))
+        ? selClips().filter((x) => x.kind === "voice")
+        : [c];
+      const okN = vs.filter((x) => x.uid && x.has_audio).length;
+      add(vs.length > 1
+        ? `⧉ 复制选中的 ${vs.length} 段到素材轨「音声副本音轨」`
+        : "⧉ 复制到素材轨「音声副本音轨」", "",
+      () => copyVoicesToCopyTrack(vs), false, okN === 0);
     }
     add(nSel > 1 ? `剪切选中的 ${nSel} 段` : "剪切", "Ctrl+X", () => {
       if (!copySelection(true)) return;
@@ -7659,6 +7714,12 @@
         if (!src) return;
         const clone = { ...src, id: uid(), start: Math.max(0, c.start + c.dur + 0.01) };
         items.push(clone);
+        // 关键帧存在 project.kf 里，不在片段对象上 —— 不显式拷一份，复制出来的就没有自动化
+        const kk = (S.data.project.kf || {})[src.id];
+        if (kk && Object.keys(kk).length) {
+          S.data.project.kf = S.data.project.kf || {};
+          S.data.project.kf[clone.id] = JSON.parse(JSON.stringify(kk));
+        }
         newIds.push(clone.id);
       });
       await persist("批量复制");
@@ -8632,9 +8693,20 @@
     get motionPresets() { return SPACE_MOTIONS.map((m) => m.id); },
     /* 本轮新增：语音复制到「音声副本音轨」 / 重排计划的预览 */
     setSpeed(id, sp) { const c = clipById(id); if (c) applySpeed(c, sp); },
-    copyVoiceToTrack(id) {
-      const c = clipById(id);
-      return c ? copyVoiceToCopyTrack(c).then((x) => (x ? x.id : null)) : Promise.resolve(null);
+    /* 测试用：直接设多选集合（模拟 Ctrl 点选的结果） */
+    setMultiIds(ids) {
+      setMulti((ids || []).filter((x) => !!clipById(x)));
+      if (ids && ids.length) S.sel = ids[ids.length - 1];
+      updateBulkBar(); drawInspector(); draw();
+      return S.multi.size;
+    },
+    multiCount() { return S.multi.size; },
+    copyVoiceToTrack(idOrIds) {
+      // 传数组 = 批量（多选复制）；传单个 id = 老行为，返回新片段 id
+      const many = Array.isArray(idOrIds);
+      const cs = (many ? idOrIds : [idOrIds]).map((x) => clipById(x)).filter(Boolean);
+      return copyVoicesToCopyTrack(cs).then((made) => (many ? made.map((x) => x.id)
+        : (made[0] ? made[0].id : null)));
     },
     trackNames() { return orderedTracks().map((t) => [t.kind, t.name]); },
     relayoutPlan() {

@@ -1,17 +1,12 @@
 # 全能音声工作台 · IndexTTS2 长篇台本与全流程音声制作扩展
 
-<img width="444" height="512" alt="684170308-5e459985-6a9e-431e-873b-70b2bceb3ee3" src="https://github.com/user-attachments/assets/f0078af1-08e8-40c4-9046-65bddba58b99" />
-
-
-
-
 **从一份台本，到一部完整的音声作品。**
 
 长篇台本管理、批量 AI 配音、多轨时间轴、音效编排、空间音频、自动化混音、专业工程导出 —— 将原本分散在多个软件和繁琐手工操作中的音声制作环节，整合进一套连贯的工作流。
 
 本项目基于 **IndexTTS2.0 超级优化整合包 V3** 开发，为其扩展长篇台本工作台与多轨音频制作能力。它不是独立的 TTS 模型，也不只是一个批量配音工具，而是面向**有声书、广播剧、ASMR、角色音声、游戏语音及视频解说**等场景的全流程音声制作工作台。
 
-<sub>当前版本 v1.9 · 2026-10-26 · Windows 便携整合包 · MIT（仅本项目代码）· 简体中文界面</sub>
+<sub>当前版本 v0.19 · 2026-10-27 · Windows 便携整合包 · MIT（仅本项目代码）· 简体中文界面</sub>
 
 > ⚠️ **这是扩展补丁，不是独立软件。** 必须先安装整合包 V3（提供模型与运行时），本仓库只提供工作台这一层代码。
 > 整合包的下载方式与原作者信息见下方 [关于原项目与版权](#-关于原项目与版权)。
@@ -31,10 +26,7 @@
 - **批量管理与重做** —— 支持单句生成、选中行批量生成、未生成内容补全及全文生成；可按状态、音色和分组筛选，并快速定位修改过的句子。
 - **句内音效标记** —— 在指定文字之后或两句之间添加音效标记，设置延迟与留白，为后续时间轴编排做好准备。
 
-<p align="center">
-<img src="https://github.com/user-attachments/assets/1a574b7b-1c92-4ee7-88f0-7fd8ee95f76c" alt="界面预览" width="700">
-<img src="https://github.com/user-attachments/assets/f517b075-4f52-432e-ae17-30001400fb2b" alt="界面预览" width="700">
-</p>
+<p align="center"><img src="docs/images/01-script.png" alt="台本导入、分句预览与分组管理" width="900"></p>
 
 ### 02 · 批量 AI 配音，逐句生成、试听与重做
 
@@ -46,10 +38,7 @@
 - **修改追踪** —— 快速查看文本或生成状态发生变化的句子，减少查找与重复劳动。
 - **多选与批量操作** —— 支持连续或非连续多选、批量删除和复制；复制句子时可连同已有音频一起复制。
 
-<p align="center">
-<img src="https://github.com/user-attachments/assets/585deea4-ee5e-45f7-a177-ab36cf156bb4" alt="界面预览" width="400">
-<img src="https://github.com/user-attachments/assets/63e56103-e003-45cf-b19c-43dc1a56c19b" alt="界面预览" width="700">
-</p>
+<p align="center"><img src="docs/images/02-render.png" alt="配音参数、逐句试听与批量生成界面" width="380"></p>
 
 ### 03 · 导入与处理素材，建立自己的音色库和音效库
 
@@ -60,9 +49,7 @@
 - **素材分类沉淀** —— 将处理后的音频保存到音色库或音效库，供后续配音和时间轴工程复用。
 - **保留原始素材** —— 默认保留原文件，便于重新处理、调整参数和制作不同版本。
 
-<p align="center">
-<img src="https://github.com/user-attachments/assets/679c1854-66ca-4c8a-a817-0726166dc1b1" alt="素材处理界面" width="600">
-</p>
+<p align="center"><img src="docs/images/03-import.png" alt="素材导入台、音频处理工具与素材库" width="900"></p>
 
 ### 04 · 多轨时间轴，把台词和音效真正编排起来
 
@@ -86,10 +73,6 @@
 - **运动脚本预设** —— 内置 13 种运动脚本，可快速生成左右往返、绕头圆周、掠过耳侧、头顶环绕、背后低语等空间运动效果。
 - **关键帧曲线** —— 为方位、仰角、距离等空间参数设计随时间变化的轨迹，塑造连续的声音运动。
 
-<p align="center">
-<img src="https://github.com/user-attachments/assets/4457cdc1-c2d0-42ef-9853-6aa93517b6aa" alt="空间音频面板" width="320">
-<img src="https://github.com/user-attachments/assets/23fdc345-0077-44e7-910f-a7aae8292da3" alt="参数设置面板" width="320">
-</p>
 <p align="center"><img src="docs/images/05-motion.png" alt="空间音频参数、运动脚本预设与空间轨迹" width="400"></p>
 
 ### 06 · 自动化控制与实时录制，让声音随时间变化
@@ -158,6 +141,13 @@
 - B 站主页：<https://space.bilibili.com/470166715/>
 - 整合包相关视频：<https://www.bilibili.com/video/BV18AJX6SEBN/>
 
+原作者提供的整合包下载（以下链接按作者公开信息整理，**请以原作者发布页为准**）：
+
+| 网盘 | 链接 |
+|---|---|
+| 夸克网盘 | <https://pan.quark.cn/s/9cd4d7d5dfa9> |
+| 百度网盘 | <https://pan.baidu.com/s/1dTd34exfqdGWtVPTD566fQ?pwd=2333> （提取码 `2333`） |
+| 123 网盘 | <https://1833900014.share.123pan.cn/123pan/nkiATd-LtDpH> |
 
 > 如果你是第一次知道这个整合包：**请先感谢并支持原作者**。整合包本体的一切问题（模型、显存、安装、更新）
 > 都应该去原作者那边反馈，而不是本仓库。
@@ -280,13 +270,14 @@ A：代码是 MIT，但**模型、整合包、Demucs 权重、HRIR 数据各有�
 声音克隆本身还涉及声音权利人的授权。
 
 **Q：能移植到别的 TTS / 别的整合包吗？**
-A：理论上可以，写个适配器就行，见 [docs/移植到其它整合包.md](docs/移植到其它整合包.md)。
+A：可以，写个适配器就行，见 [docs/移植到其它整合包.md](docs/移植到其它整合包.md)。
 
 ---
 
 ## 📮 反馈
 
-- 工作台本身的 bug / 建议：个人业余项目，更推荐去找蓝色大肥鱼
+- 工作台本身的 bug / 建议：请在本仓库开 Issue，尽量带上「版本号 + 复现步骤 + `logs\server.log` 相关片段 + 截图」。
 - 整合包、模型、安装环境的问题：请找原作者。
 
-> 
+> 个人业余项目，迭代比较快（[CHANGELOG](CHANGELOG.md) 里能看到节奏）。Issue 会看，但不保证响应时间；
+> 能自己按移植指南改的地方，欢迎直接提 PR。

@@ -3244,7 +3244,11 @@ function initRenderPanel() {
       startRender("batches", null, ids);
       return;
     }
-    startRender(mode, mode === "sel" ? [...SEL] : null);
+    /* 「选中行」必须把 uid 列表一起送过去：这里以前传的是 mode="sel"、
+       startRender 里的 body 只保留 mode、uids 被丢掉，服务端不认识 "sel"
+       就落到「全部行」分支 —— 选 2 句却整篇 5 句都在跑，就是这么来的。 */
+    if (mode === "sel") { startRender("uids", [...SEL]); return; }
+    startRender(mode, null);
   };
   $("btnStop").onclick = async () => {
     try {
@@ -3262,8 +3266,13 @@ async function startRender(mode, uids, batches) {
   if (!SCRIPT || SCRIPT.id !== sid) return;   // 等保存的这段时间切了台本，别再发
   try {
     let body;
-    if (mode === "uids") body = { mode: "uids", uids };
-    else if (mode === "batches") body = { mode: "batches", batches };
+    /* "sel" 也走 uids 协议（老调用点 / 外部脚本可能还传 sel）：
+       绝不能让「选中行」在没有 uid 列表的情况下发出去，服务端会当成全部行。 */
+    if (mode === "uids" || mode === "sel") {
+      const list = (uids || []).filter(Boolean);
+      if (!list.length) { toast("先在左侧选中要生成的行", true); return; }
+      body = { mode: "uids", uids: list };
+    } else if (mode === "batches") body = { mode: "batches", batches };
     else body = { mode };
     const r = await api(`/scripts/${sid}/render`, { method: "POST", body: JSON.stringify(body) });
     // 请求还没回来就切走了：状态属于上一份台本，别写进新台本的界面

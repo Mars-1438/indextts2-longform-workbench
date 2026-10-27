@@ -4197,22 +4197,31 @@ def register_longform(app, api, deps):
         mode = req.get("mode") or ("uids" if req.get("uids") else "all")
         if mode == "batches":
             wanted_b = set(req.get("batches") or [])
+            if not wanted_b:
+                raise HTTPException(400, "「按批量任务」模式没收到 batches：请先勾选要跑的组")
             uids = []
             for b in script.get("batches") or []:
                 if b.get("id") in wanted_b:
                     uids.extend(b.get("uids") or [])
             wanted = set(uids)
             uids = [l["uid"] for l in script["lines"] if l["uid"] in wanted]
-        elif mode == "uids":
+        elif mode in ("uids", "sel"):
+            # "sel" 是前端「选中行」的旧写法：必须带 uids。
+            # 以前没有这个分支，"sel" 会落到 else（全部行）—— 选 2 句整篇都在跑。
+            if "uids" not in req:
+                raise HTTPException(400, "「选中行」模式缺少 uids 列表，已拒绝（不猜成全篇）")
             wanted = set(req.get("uids") or [])
             uids = [l["uid"] for l in script["lines"] if l["uid"] in wanted]
         elif mode == "missing":
             uids = [l["uid"] for l in script["lines"]
                     if l.get("kind") != "tag" and l.get("status") != "done"
                     and (l.get("text") or "").strip()]
-        else:
+        elif mode == "all":
             uids = [l["uid"] for l in script["lines"]
                     if l.get("kind") != "tag" and (l.get("text") or "").strip()]
+        else:
+            # 未知范围一律拒绝：宁可报错，也不要「猜着来」把整篇重跑一遍。
+            raise HTTPException(400, f"不认识的渲染范围：{mode}（可用：sel/uids/missing/batches/all）")
         job = _start_render(sid, uids)
         return {"ok": True, "render": job.public()}
 

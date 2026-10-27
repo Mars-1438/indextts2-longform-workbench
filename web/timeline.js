@@ -1936,14 +1936,17 @@
       if (n) {
         a.volume = 1;
         try {
-          // 距离律与后端 hrir.dist_gain 同一条：1/(0.4+0.6d)
+          // 距离律与后端 hrir.dist_gain 完全同一条：
+          // min(1.25, 1/(0.45+0.55d)) —— 近场封顶 +1.9dB。
+          // 以前是 1/(0.4+0.6d)、0.2m 就有 +5.7dB，再叠 +6dB 低频补偿，
+          // 低语/ASMR 在试听里就削顶了（导出反而没这么响，两边不一致）。
           const sp0 = kfSpaceAt(c, clamp(S.pos - c.start, 0, c.dur));
           const dNow = sp0.dist || 1;
-          const dg = 1 / (0.4 + 0.6 * clamp(dNow, 0.05, 30));
+          const dg = Math.min(1.25, 1 / (0.45 + 0.55 * clamp(dNow, 0.05, 30)));
           n.gain.gain.value = vol * (c.binaural ? dg : 1);
           if (n.low) {
-            const t = clamp((1 - dNow) / 0.8, 0, 1);
-            n.low.gain.value = c.binaural ? 6 * t : 0;
+            const t = clamp((1 - dNow) / 1.0, 0, 1);
+            n.low.gain.value = c.binaural ? 3 * t : 0;
           }
           if (n.wetGain) {
             n.wetGain.gain.value = (c.room && Number(c.send) > 0)
@@ -7297,7 +7300,8 @@
         p.appendChild(document.createTextNode(
           `完成：${fmtShort(d.duration)}，${bytesTxt(d.size)}（${(d.format || "wav").toUpperCase()} ${d.kbps}kbps）` +
           (d.channels === 1 ? "，单声道" : "，立体声") +
-          `，${((d.sample_rate || 44100) / 1000).toFixed(1)}kHz，耗时 ${d.seconds}s　`));
+          `，${((d.sample_rate || 44100) / 1000).toFixed(1)}kHz，耗时 ${d.seconds}s` +
+          (d.peak > 0.99 ? "，⚠ 峰值已贴上限（整体音量降 2~3dB 更安全）" : "") + "　"));
         p.appendChild(a);
         toast("混音导出完成");
       } catch (e) { p.textContent = "失败：" + e.message; }

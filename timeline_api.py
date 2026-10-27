@@ -351,7 +351,7 @@ HEAD_R = 0.0875          # 人头半径（米）
 SOUND_C = 343.0          # 声速
 
 
-def _soft_knee(x, th=0.85, ceil=0.98):
+def _soft_knee(x, th=0.92, ceil=0.995):
     """无状态软限幅：|x| ≤ th 原样，超过的部分用 tanh 平滑压到 1.0 以内。
 
     **必须无状态、无门控**。之前是按块判峰值决定「这一块要不要压」：
@@ -1307,12 +1307,15 @@ def _prepared_source(sid, c):
     if abs(speed - 1) > 1e-3 and _resample is not None:
         up, down = _speed_ratio(speed)
         seg = _resample(seg, up, down)
-    want = int(clip_dur * SR)
+    # 这里的数据还是**源采样率**（变速率只做了速度缩放，没做采样率转换）。
+    # 以前写死 SR：源是 22050 时既把长度算错（后半被补零 = 听起来「丢句」），
+    # 又把 22050 的样本标成 44100 写出去（音调升高、块边界出现「啪」）。
+    want = int(round(clip_dur * sr))
     if len(seg) < want:
         seg = np.pad(seg, (0, want - len(seg)))
     seg = np.clip(seg[:want], -1, 1)
     try:
-        sf.write(wav_path, seg, SR, subtype="PCM_16")
+        sf.write(wav_path, seg, int(sr), subtype="PCM_16")
         _write_json(meta_path, {"stamp": stamp, "speed": speed, "reverse": rev})
     except OSError as e:
         _log("timeline: cache write failed %s: %s", wav_path, e, level="warning")
@@ -1577,6 +1580,7 @@ def _render_mix(sid, out_path, fmt="wav", only=None, bit_depth=16, quality="stan
     wet_states = {}          # 房间湿声的卷积尾巴
     block = int(SR * BLOCK_SEC)
     written = 0
+    peak_seen = 0.0          # 导出后的真实峰值（>0.99 说明已经贴着上限）
     kwargs = {"samplerate": target, "channels": ch, "subtype": subtype, "format": sfmt}
     if comp is not None:
         kwargs["compression_level"] = float(comp)
@@ -1725,6 +1729,9 @@ def _render_mix(sid, out_path, fmt="wav", only=None, bit_depth=16, quality="stan
                 # 放在所有声源叠完之后，块边界也就不会有台阶。
                 buf = _soft_knee(buf)
                 np.clip(buf, -1.0, 1.0, out=buf)
+                m = float(np.max(np.abs(buf))) if buf.size else 0.0
+                if m > peak_seen:
+                    peak_seen = m
                 arr = buf if ch == 2 else buf.mean(axis=1, keepdims=True)
                 if rstream is not None:
                     arr = rstream.resample_chunk(arr, last=False)
@@ -1744,6 +1751,7 @@ def _render_mix(sid, out_path, fmt="wav", only=None, bit_depth=16, quality="stan
     size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
     dur = written / float(target) if target else 0.0
     return {"duration": round(dur, 3), "clips": len(clips), "size": size,
+            "peak": round(peak_seen, 3),
             "kbps": round(size * 8 / max(0.001, dur) / 1000),
             "format": (fmt or "wav").lower(), "channels": ch, "sample_rate": target,
             "range": [round(rs, 3), round(re_, 3)], "total": round(total, 3)}

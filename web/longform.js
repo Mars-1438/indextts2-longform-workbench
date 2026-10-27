@@ -5454,9 +5454,10 @@ async function clearMatDesk() {
 
 /* 快捷处理预设：右键菜单和面板上的按钮共用同一套参数 */
 function matPresetOps(kind) {
-  if (kind === "vocals") return { separate: { mode: "vocals", strength: 0.65 } };
+  /* 默认 Demucs：效果好一截，代价是慢（后端在 Demucs 不可用时会自动退回中置提取） */
+  if (kind === "vocals") return { separate: { mode: "vocals", strength: 0.65, engine: "demucs" } };
   const ops = {
-    separate: { mode: "vocals", strength: 0.65 },
+    separate: { mode: "vocals", strength: 0.65, engine: "demucs" },
     denoise: 0.5,
     trim_silence: { threshold_db: -45, pad: 0.06 },
     normalize: { mode: "peak", target_db: -1 },

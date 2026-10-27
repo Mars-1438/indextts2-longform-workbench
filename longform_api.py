@@ -787,17 +787,26 @@ def _apply_ops(data, sr, ops):
 
     sp = ops.get("separate") or None
     if sp and sp.get("mode") in ("vocals", "instrumental"):
-        engine = (sp.get("engine") or "dsp").lower()
+        # 默认 Demucs（效果好一截）。不可用/装坏了就退回中置提取，
+        # 不让整条素材处理失败 —— 用户至少还能拿到一版可用的结果。
+        engine = (sp.get("engine") or "demucs").lower()
         t0 = time.time()
+        done = False
         if engine == "demucs":
-            data = _demucs_separate(data, sr, sp["mode"])
-            labels.append("人声" if sp["mode"] == "vocals" else "伴奏")
-            labels.append("Demucs")
-            _log("longform: demucs %s done in %.1fs (%.1fs audio)",
-                 sp["mode"], time.time() - t0, len(data) / float(sr))
-        else:
+            try:
+                data = _demucs_separate(data, sr, sp["mode"])
+                labels.append("人声" if sp["mode"] == "vocals" else "伴奏")
+                labels.append("Demucs")
+                _log("longform: demucs %s done in %.1fs (%.1fs audio)",
+                     sp["mode"], time.time() - t0, len(data) / float(sr))
+                done = True
+            except Exception as e:  # noqa: BLE001
+                _log("longform: demucs failed (%s), fallback to center extract", e, level="warning")
+        if not done:
             data = _separate(data, sr, sp["mode"], float(sp.get("strength") or 0.65))
             labels.append("人声" if sp["mode"] == "vocals" else "伴奏")
+            if engine == "demucs":
+                labels.append("中置提取（Demucs 不可用）")
 
     dn = ops.get("denoise")
     if dn:

@@ -548,16 +548,16 @@
                 <option value="vocals">只要人声</option>
                 <option value="instrumental">只要伴奏</option>
               </select>
-              <select id="opVocalEngine" class="sel" title="分离算法">
+              <select id="opVocalEngine" class="sel" title="分离算法（默认 Demucs：分离更干净，但慢一些）">
+                <option value="demucs" selected>Demucs 高精度</option>
                 <option value="dsp">中置提取（快）</option>
-                <option value="demucs">Demucs 高精度</option>
               </select>
             </div>
             <div class="row2" id="vocalDspOpts">
               <span class="hint">强度 <b id="vVocal" class="mono">0.65</b></span>
               <input id="opVocalStrength" type="range" min="0.2" max="1" step="0.05" value="0.65" style="flex:1">
             </div>
-            <div class="hint" id="vocalEngineHint">中置提取：人声居中、伴奏铺得宽时效果最好；伴奏也居中会残留。需要立体声素材。</div>
+            <div class="hint" id="vocalEngineHint">Demucs：按「人声 / 鼓 / 贝斯 / 其它」分离，伴奏居中也能分开，效果最好（CPU 上比中置提取慢几十倍）；想快可切中置提取。</div>
           </div>
 
           <div class="opcard">
@@ -730,16 +730,16 @@
                 <option value="vocals">只要人声</option>
                 <option value="instrumental">只要伴奏</option>
               </select>
-              <select id="opSSepEngine" class="sel" title="分离算法">
+              <select id="opSSepEngine" class="sel" title="分离算法（默认 Demucs：分离更干净，但慢一些）">
+                <option value="demucs" selected>Demucs 高精度</option>
                 <option value="dsp">中置提取（快）</option>
-                <option value="demucs">Demucs 高精度</option>
               </select>
             </div>
             <div class="row2" id="sepDspOpts">
               <span class="hint">强度 <b id="vSep" class="mono">0.65</b></span>
               <input id="opSSepStrength" type="range" min="0.2" max="1" step="0.05" value="0.65" style="flex:1">
             </div>
-            <div class="hint" id="sepEngineHint">中置提取，需要立体声素材；伴奏也居中时会残留。</div>
+            <div class="hint" id="sepEngineHint">Demucs：分离更干净（尤其中置的鼓/贝斯），代价是慢；中置提取只适合「人声明显居中」的立体声素材。</div>
           </div>
 
           <div class="opcard">

@@ -61,6 +61,24 @@ class HRTFSet:
             if self.dist.size != len(self.az):
                 self.dist = np.full(len(self.az), float(np.median(self.dist) or 1.0),
                                     dtype="float32")
+        # 统一标定：按 **1 kHz 灵敏度** 对齐到 0.5（约 −6 dB）。
+        #
+        # 为什么不用「IR 总能量」：KEMAR 的 IR 有 512 taps（含长尾），能量分散在时间上，
+        # 能量相同的情况下 1 kHz 的响应只有 KU100 的三分之一 —— 同一句话换数据集
+        # 直接差 10 dB，用户只能靠调音量补偿；而 KU100 近场层偏大，近距离再乘
+        # dist_gain 就顶进软限幅，低语/ASMR 听起来是「破音 / 劣质麦克风」。
+        # 人声能量集中在 0.2~4 kHz，按 1 kHz 对齐最接近听感，也顺手抹平了
+        # npz 打包集（以前完全没标定）与 SOFA 之间的口径差。
+        try:
+            _n = 1024
+            _spec = np.abs(np.fft.rfft(self.ir.astype(np.float64), n=_n, axis=2))
+            _fr = np.fft.rfftfreq(_n, 1.0 / self.sr)
+            _k = int(np.argmin(np.abs(_fr - 1000.0)))
+            _resp = float(np.median(_spec[:, :, max(0, _k - 1):_k + 2]))
+            if _resp > 1e-9:
+                self.ir = (self.ir * (0.5 / _resp)).astype(np.float32)
+        except Exception:  # noqa: BLE001
+            pass
         self.dist_layers = np.unique(np.round(self.dist, 3))
         self._layer_idx = {float(v): np.where(np.isclose(self.dist, v, atol=1e-3))[0]
                            for v in self.dist_layers}
@@ -382,7 +400,7 @@ class BinauralRenderer:
             if dd.size != out.shape[1]:
                 dd = np.full(out.shape[1], float(dd[-1]) if dd.size else 1.0,
                              dtype="float32")
-            g = (1.0 / (0.4 + 0.6 * dd)).astype("float32")
+            g = np.minimum(1.25, 1.0 / (0.45 + 0.55 * dd)).astype("float32")
             return out[0] * g, out[1] * g
         g = float(dist_gain(dS))
         return out[0] * g, out[1] * g
@@ -400,16 +418,16 @@ class BinauralRenderer:
 
 
 def dist_gain(dist):
-    """距离 → 增益。
+    """距离 → 增益（1m 处 = 1.0）。
 
-    老公式 `1/(1+0.6·max(0,d-1))` 在 d ≤ 1 时恒等于 1.0（近处完全没变化），
-    所以「0.5m」一直只是个数字。这里换成在 1m 处归一的平滑曲线：
-    0.2m → +5.7dB、0.5m → +3.1dB、1m → 0dB、3m → −7.6dB。
-    下限保护：d 再小也不会超过 +8dB，免得贴耳就削顶。
+    近场封顶 +1.9dB（1.25×）：近场 HRIR 本身已经含「离得近→更响」的能量，
+    再按 1/d 叠加就会两头都算 —— 低语素材本身峰值高，一乘就进软限幅，
+    听感是破音 / 像劣质麦克风。所以近处只做温和提升：
+      0.2m/0.5m → +2.0dB（封顶）、1m → 0dB、2m → −3.8dB、3m → −6.4dB
     """
     d = float(dist if dist is not None else 1.0)
     d = max(0.05, min(30.0, d))
-    return 1.0 / (0.4 + 0.6 * d)
+    return min(1.25, 1.0 / (0.45 + 0.55 * d))
 
 
 class NearField:
@@ -435,14 +453,16 @@ class NearField:
 
     def process(self, seg, az, dist):
         d = max(0.05, min(30.0, float(dist if dist is not None else 1.0)))
-        t = min(1.0, max(0.0, (1.0 - d) / 0.8))      # 1m→0，0.2m→1
+        t = min(1.0, max(0.0, (1.0 - d) / 1.0))      # 1m→0，0.2m→0.8
         if t <= 1e-3:
             return seg
         l = seg[0].astype("float64")
         r = seg[1].astype("float64")
         # ① 低频抬升（一阶低通 + 加回去）
         a = self._a(180.0)
-        k = 0.9 * t
+        # 0.9 → 0.55：+5.6dB 的低频堆积对低语（本身气声多）太过，
+        # 峰值会被顶进限幅器；+3dB 已经能听出「贴耳」，又不会发闷
+        k = 0.55 * t
         for ch, buf in ((0, l), (1, r)):
             out = np.empty_like(buf)
             st = self._lp[ch]

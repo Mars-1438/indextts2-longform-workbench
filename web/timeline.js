@@ -2029,6 +2029,25 @@
   /* ------------------------------ 编辑 ------------------------------ */
   // 重叠分流：优先放到「同类别的空白音轨」，没有才新建一条。
   // 新建时按拖拽方向放在当前轨的上方(dir=-1)或下方(dir=+1)。
+  /* 锁定 / 解锁：多选时作用于整组；选中的片段锁定状态不一致时，**优先全部锁定**。
+     （单段维持原来的「点一下切换」手感） */
+  function lockSelection(c) {
+    const list = (S.multi.size > 1 && S.multi.has(c.id)) ? selClips() : [c].filter(Boolean);
+    if (!list.length) return;
+    const allLocked = list.every((x) => x.locked);
+    const to = !allLocked;
+    list.forEach((x) => {
+      x.locked = to;
+      commitClip(x, to ? "锁定片段" : "解锁片段");
+    });
+    drawInspector(); draw();
+    toast(to ? `已锁定 ${list.length} 段` : `已解锁 ${list.length} 段`);
+  }
+
+  function clipsForBatch(c) {
+    return (S.multi.size > 1 && S.multi.has(c.id)) ? selClips() : [c].filter(Boolean);
+  }
+
   /* 把片段挪到另一条轨（只是搬家，不改时间）。语音/素材类型不匹配时直接拒绝。 */
   function moveClipToTrack(c, target) {
     if (!c || !target || target.id === c.track) return false;
@@ -2852,14 +2871,21 @@
     const zone = c.locked ? "body" : hitZone(c, x);
     /* 多选拖拽：拖其中一段时，选中的其它段一起走（保持相对时间与轨间相对位置）。
        只有「按在多选集合里的片段身上」才整组拖；点选后集合只有它自己，行为不变。 */
+    /* 多选整组拖动：把选中的同伴都收进来（整组视为一个片段）。
+       以前这里排除了 `locked` 的同伴 —— 而音声片段默认就是锁定的，
+       于是「多选拖着走」实际只有被按住那一段会动，其余原地不动。
+       拖动意味着用户明确要挪这一组，所以对锁定的同伴先解锁（服务端不接受
+       修改锁定片段的 start），移动后保持解锁，用户想锁回去按 L 即可。 */
     const comps = [];
     if (!c.locked && zone === "body" && S.multi.size > 1 && inMulti(c.id)) {
+      let unlocked = 0;
       S.multi.forEach((id) => {
         const z = clipById(id);
-        if (z && z.id !== c.id && !z.locked) {
-          comps.push({ c: z, oStart: z.start, oTrack: z.track, oTi: orderedTracks().indexOf(trackOfClip(z)) });
-        }
+        if (!z || z.id === c.id) return;
+        if (z.locked) { z.locked = false; unlocked++; }
+        comps.push({ c: z, oStart: z.start, oTrack: z.track, oTi: orderedTracks().indexOf(trackOfClip(z)) });
       });
+      if (unlocked) toast(`已解开 ${unlocked} 段的锁定，随整组一起移动（想锁回去按 L）`);
     }
     S.drag = {
       type: c.locked ? "moveLocked" : (zone === "body" ? "move" : "trim_" + zone),
@@ -2966,20 +2992,17 @@
         }
         if (target.id !== c.track) {
           // 跨轨移动
-          const newIdx = orderedTracks().indexOf(target);
           moveClipToTrack(c, target);
-          /* 同伴跟着换轨：按同类型轨列表里的序号整体平移同样的格数。
-             同类型轨不够就贴在边上的那条，不会把素材塞进音声轨。 */
-          if (d.comps && d.comps.length && d.oTi != null && newIdx >= 0) {
-            const shift = newIdx - d.oTi;
+          /* 多选整组换轨：同类型的同伴**全部跟到主体这条目标轨**，整组当成一个片段。
+             以前是按「轨序差」各自平移，组内本来就分散在几条轨上的话，
+             平移完仍然分散（哪怕旁边全是空轨，也合不到一条上）。
+             类型不同的同伴（音声 vs 素材）不硬塞，留在原轨。 */
+          if (d.comps && d.comps.length) {
+            const wantVoice2 = target.kind === "voice";
             d.comps.forEach((z) => {
-              const cur = trackOfClip(z.c);
-              if (!cur) return;
-              const sameKind = orderedTracks().filter((t) => t.kind === z.c.kind);
-              const pos = sameKind.findIndex((t) => t.id === cur.id);
-              if (pos < 0) return;
-              const to = sameKind[clamp(pos + shift, 0, sameKind.length - 1)];
-              moveClipToTrack(z.c, to);
+              if ((z.c.kind === "voice") !== wantVoice2) return;
+              if (z.c.track === target.id) return;
+              moveClipToTrack(z.c, target);
             });
           }
           drawInspector();
@@ -3533,8 +3556,12 @@
       b.onclick = (ev) => { ev.stopPropagation(); hideCtx(); fn(); };
       menu.appendChild(b);
     };
-    add(c.locked ? "解锁（可改位置时间）" : "锁定（位置时间固定）", "", () => {
-      c.locked = !c.locked; commitClip(c, c.locked ? "锁定片段" : "解锁片段"); drawInspector();
+    const lockSel = clipsForBatch(c);
+    const allLockedNow = lockSel.length > 0 && lockSel.every((x) => x.locked);
+    add(lockSel.length > 1
+      ? (allLockedNow ? `解锁选中的 ${lockSel.length} 段` : `锁定选中的 ${lockSel.length} 段`)
+      : (c.locked ? "解锁（可改位置时间）" : "锁定（位置时间固定）"), "", () => {
+      lockSelection(c);
     });
     /* 多选时静音也作用于整批（否则「选了 5 段，右键静音只哑了 1 段」） */
     const muteSel = (S.multi.size > 1 && S.multi.has(c.id)) ? selClips() : [c];
@@ -3621,7 +3648,17 @@
     });
     add("🌗 淡入 / 淡出…（按显示区段自动裁）", "", () => fadeDialog(c));
     menu.appendChild(el("div", "ctxsep"));
-    add("删除这段", "Del", () => removeClip(c), true, c.kind === "voice");
+    const delSel = clipsForBatch(c);
+    const delOk = delSel.filter((x) => x.kind === "sfx" && !x.from_tag);
+    add(delSel.length > 1 ? `删除选中的 ${delSel.length} 段` : "删除这段", "Del", () => {
+      if (delSel.length > 1) {
+        const b = $("bkDel");
+        if (b && !b.disabled) b.click();
+        else toast("选中的都是语音片段，跟台本走，删句子请回台本页", true);
+        return;
+      }
+      removeClip(c);
+    }, true, delSel.length > 1 ? delOk.length === 0 : c.kind === "voice");
     document.body.appendChild(menu);
     const r = menu.getBoundingClientRect();
     menu.style.left = Math.min(cx, window.innerWidth - r.width - 8) + "px";
@@ -3680,6 +3717,7 @@
   }
 
   function fadeDialog(c) {
+    const fadeList = clipsForBatch(c);   // 多选时整批套同样的淡入淡出
     if (c.locked) { toast("这段已锁定：先在属性里解锁", true); return; }
     modal("淡入 / 淡出", (box) => {
       box.appendChild(el("div", "phint",
@@ -3722,16 +3760,21 @@
         rOut.rng.value = c.fade_out; rOut.num.value = c.fade_out.toFixed(2);
       };
       box.appendChild(sym);
-      box.__apply = () => { setFade(c, Number(rIn.num.value) || 0, Number(rOut.num.value) || 0); };
+      box.__apply = () => {
+        const fin = Number(rIn.num.value) || 0;
+        const fout = Number(rOut.num.value) || 0;
+        fadeList.forEach((x) => setFade(x, fin, fout));
+      };
     }, "应用", (box) => {
       box.__apply();
-      commitClip(c, "修改淡入淡出");
+      fadeList.forEach((x) => commitClip(x, "修改淡入淡出"));
       drawInspector(); draw();
       box.closest(".mask")?.remove();
       return true;
     });
   }
   function speedDialog(c) {
+    const spdList = clipsForBatch(c);    // 多选时整批按同一速度
     if (c.locked) { toast("这段已锁定：先在属性里解锁", true); return; }
     const oldS = clamp(Number(c.speed) || 1, 0.25, 4);
     const span = Math.max(0.05, c.dur * oldS);
@@ -3786,7 +3829,8 @@
       box.__getSpeed = () => clamp(Number(num.value) || 1, 0.25, 4);
       syncFromSpeed(oldS);
     }, "应用", (box) => {
-      applySpeed(c, box.__getSpeed());
+      const sp = box.__getSpeed();
+      spdList.forEach((x) => applySpeed(x, sp));
       box.closest(".mask")?.remove();
       return true;
     });
@@ -8657,7 +8701,7 @@
     }
     if (key === "v" && !mod) { e.preventDefault(); muteSel(); return; }
     if (key === "l" && !mod && c) {
-      c.locked = !c.locked; commitClip(c, "修改属性"); drawInspector(); draw();
+      lockSelection(c);
       return;
     }
     if (e.key === "Escape") {
@@ -8727,6 +8771,8 @@
     },
     multiCount() { return S.multi.size; },
     markDirtyForTest(label) { markDirty(label || "测试标脏"); },
+    /* 第 i 条轨的中心 y（画布内坐标），测试拖拽换轨用 */
+    trackY(i) { return trackTop(i) + TRACK_H / 2; },
     copyVoiceToTrack(idOrIds) {
       // 传数组 = 批量（多选复制）；传单个 id = 老行为，返回新片段 id
       const many = Array.isArray(idOrIds);

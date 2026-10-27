@@ -1015,6 +1015,25 @@ function updateSelInfo() {
   $("selInfo").textContent = n ? `已选 ${n} 行` : "未选中";
   const total = ((SCRIPT && SCRIPT.lines) || []).length;
   $("selAll").checked = n > 0 && n === total;
+  updateSelHint();
+}
+
+/* 生成页「渲染范围」上方的实时提示：已选几句 / 未选几句 / 共几句。
+   选中行是「跨页签」的状态，之前只有左侧列表角上有「已选 N 行」，
+   切到生成页就看不到自己到底勾了哪些，「生成」按钮按下去心里没底。 */
+function updateSelHint() {
+  const box = $("rSelHint");
+  if (!box || !SCRIPT) return;
+  const rows = (SCRIPT.lines || []).filter((l) => l.kind !== "tag");
+  const total = rows.length;
+  let picked = 0;
+  rows.forEach((l) => { if (SEL.has(l.uid)) picked++; });
+  const rest = total - picked;
+  box.innerHTML = "";
+  box.appendChild(el("b", null, `已选 ${picked} 句`));
+  box.appendChild(el("span", null, ` · 未选 ${rest} 句 · 共 ${total} 句`));
+  box.classList.toggle("none", picked === 0);
+  if (picked === 0) box.appendChild(el("span", "warn", "　「选中行」模式要先在左侧勾几行"));
 }
 
 function handleRangeClick(uid_, e) {
@@ -1107,6 +1126,24 @@ function deleteSelectedText(line, a, b) {
   if (line.status === "done" || line.status === "error") line.status = "stale";
 }
 
+/* 拆分 / 插入 / 复制出来的句子要「继承」原句所在的分组。
+   以前 splitLine 只复制了行级参数（ov），分组 uids 里没有新句子，
+   于是切出来的后半句成了「未分组」——批量生成、按组选中都漏掉它。
+   这里把新 uid 插到原 uid 的**后面**，保持组内顺序跟正文一致。 */
+function inheritBatches(oldUid, newUid) {
+  if (!oldUid || !newUid) return 0;
+  let n = 0;
+  ((SCRIPT && SCRIPT.batches) || []).forEach((b) => {
+    const arr = b.uids || (b.uids = []);
+    const i = arr.indexOf(oldUid);
+    if (i < 0) return;
+    if (arr.includes(newUid)) return;
+    arr.splice(i + 1, 0, newUid);
+    n++;
+  });
+  return n;
+}
+
 function splitLine(line, caret) {
   const at = idxOf(line);
   const text = line.text || "";
@@ -1128,6 +1165,7 @@ function splitLine(line, caret) {
     out: null, dur: null, elapsed: null, err: null, capped: false, sig: null,
   };
   SCRIPT.lines.splice(i + 1, 0, nl);
+  inheritBatches(line.uid, nl.uid);
   commitSnapshot("切分第 " + at + " 行");
   dirty = true; renderCenter(); queueSave();
   focusLine(nl.uid, 0);
@@ -1143,6 +1181,7 @@ function insertLineAfter(line) {
   const i = line ? SCRIPT.lines.indexOf(line) : -1;
   if (i >= 0) SCRIPT.lines.splice(i + 1, 0, nl);
   else SCRIPT.lines.push(nl);
+  if (line) inheritBatches(line.uid, nl.uid);
   commitSnapshot("插入空行");
   dirty = true; renderCenter(); queueSave();
   focusLine(nl.uid, 0);
@@ -1159,6 +1198,7 @@ function duplicateLine(line) {
   nl.out = null; nl.dur = null; nl.elapsed = null; nl.err = null; nl.sig = null;
   nl.gen = null; nl.changes = []; nl.can_revert = false;
   SCRIPT.lines.splice(i + 1, 0, nl);
+  inheritBatches(line.uid, nl.uid);
   commitSnapshot("复制第 " + (i + 1) + " 行");
   dirty = true; renderCenter(); queueSave();
   focusLine(nl.uid, (nl.text || "").length);
@@ -1273,6 +1313,18 @@ async function pasteLines(afterUid) {
   if (first && (first.text || "").length) focusLine(first.uid, 0);
 }
 
+/* 合并两句时，两行各自所属的分组要合到保留的那一行上，
+   否则被吃掉的那句 uid 会永远留在组里（服务端保存时会清洗，但界面上的「N 句」会虚高）。 */
+function mergeBatchUids(keepUid, dropUid) {
+  ((SCRIPT && SCRIPT.batches) || []).forEach((b) => {
+    const arr = b.uids || (b.uids = []);
+    const i = arr.indexOf(dropUid);
+    if (i < 0) return;
+    arr.splice(i, 1);
+    if (!arr.includes(keepUid)) arr.splice(Math.min(i, arr.length), 0, keepUid);
+  });
+}
+
 function mergePrev(line) {
   const i = SCRIPT.lines.indexOf(line);
   if (i <= 0) { toast("已经是第一行"); return; }
@@ -1284,6 +1336,7 @@ function mergePrev(line) {
   if (prev.status === "done" || prev.status === "error") prev.status = "stale";
   SCRIPT.lines.splice(i, 1);
   SEL.delete(line.uid);
+  mergeBatchUids(prev.uid, line.uid);
   commitSnapshot("合并第 " + i + "/" + (i + 1) + " 行");
   dirty = true; renderCenter(); queueSave();
   focusLine(prev.uid, at);
@@ -1300,6 +1353,7 @@ function mergeNext(line) {
   if (line.status === "done" || line.status === "error") line.status = "stale";
   SCRIPT.lines.splice(i + 1, 1);
   SEL.delete(next.uid);
+  mergeBatchUids(line.uid, next.uid);
   commitSnapshot("合并第 " + (i + 1) + "/" + (i + 2) + " 行");
   dirty = true; renderCenter(); queueSave();
   focusLine(line.uid, at);
@@ -2784,6 +2838,43 @@ function batchSummary(b) {
   return bits.join(" · ");
 }
 
+/* 分组勾选（跨两个页签共用一套状态）：
+   - 「批量」页每张分组卡片左上角有勾选框；页面底部有「生成勾选的分组」
+   - 「生成」页「按批量任务」下的列表也绑同一份 BATCH_PICK，勾哪边都一样 */
+const BATCH_PICK = new Set();
+
+function batchPickRows() {
+  const set = new Set();
+  (SCRIPT && SCRIPT.batches || []).forEach((b) => {
+    if (!BATCH_PICK.has(b.id)) return;
+    (b.uids || []).forEach((u) => set.add(u));
+  });
+  return set.size;
+}
+
+function updateBatchPickUI() {
+  const live = new Set(((SCRIPT && SCRIPT.batches) || []).map((b) => b.id));
+  Array.from(BATCH_PICK).forEach((id) => { if (!live.has(id)) BATCH_PICK.delete(id); });
+  const n = BATCH_PICK.size;
+  const btn = $("btnBatchRun");
+  if (btn) {
+    btn.disabled = !n;
+    btn.textContent = n ? `▶ 生成勾选的 ${n} 个分组` : "▶ 生成勾选的分组";
+  }
+  const tip = $("batchPickTip");
+  if (tip) {
+    tip.textContent = n
+      ? `已勾选 ${n} 个分组 · 共 ${batchPickRows()} 句（重叠的句子只跑一次）`
+      : "勾选上面的分组（可多选），然后生成";
+  }
+}
+
+function toggleBatchPick(id, on) {
+  if (on) BATCH_PICK.add(id); else BATCH_PICK.delete(id);
+  updateBatchPickUI();
+  renderRenderBatches();
+}
+
 function renderBatchList() {
   const box = $("batchList");
   if (!box) return;
@@ -2796,6 +2887,13 @@ function renderBatchList() {
   list.forEach((b) => {
     const item = el("div", "batchitem");
     const head = el("div", "batch-head");
+    const pick = document.createElement("input");
+    pick.type = "checkbox";
+    pick.className = "batch-pick";
+    pick.checked = BATCH_PICK.has(b.id);
+    pick.title = "勾选这个分组，用于底部「生成勾选的分组」";
+    pick.onchange = () => toggleBatchPick(b.id, pick.checked);
+    head.appendChild(pick);
     head.appendChild(el("b", null, b.name));
     head.appendChild(el("span", "hint", `${(b.uids || []).length} 句`));
     const del = el("button", "iconbtn", "✕");
@@ -2820,6 +2918,7 @@ function renderBatchList() {
     item.appendChild(act);
     box.appendChild(item);
   });
+  updateBatchPickUI();
 }
 
 function renderBatchStats() {
@@ -2940,6 +3039,11 @@ function openBatchDialog(existing) {
   wrap.appendChild(el("div", "fl", "任务名"));
   wrap.appendChild(nameInp);
 
+  /* 编辑已有分组时，「组内句子」放在最上面：
+     参数区（情感向量 8 轴）很长，放下面的话每次加减句子都要滚到底。 */
+  const listHost = el("div");
+  if (existing) wrap.appendChild(listHost);
+
   const params = batchParamControls(existing);
   wrap.appendChild(params.node);
 
@@ -2984,18 +3088,89 @@ function openBatchDialog(existing) {
     return;
   }
 
-  wrap.appendChild(el("div", "hint", `当前包含 ${(existing.uids || []).length} 句；保存会把参数重新写入这些行。`));
+  /* ---------------- 组内句子：可直接勾选 / 取消 ----------------
+     以前编辑弹窗只能改名字和参数，想加一句话得重新建一个组。
+     这里给一份「全台本句子清单」，勾上 = 属于本组；保存时按正文顺序写回 uids。 */
+  const picked = new Set(existing.uids || []);
+  const rows = (SCRIPT.lines || []).filter((l) => l.kind !== "tag");
+  listHost.appendChild(el("div", "fl", "组内句子"));
+  const tools = el("div", "bpick-tools");
+  const addSelBtn = el("button", "btn mini", "");
+  const addSelBtnTxt = () => {
+    const n = rows.filter((l) => SEL.has(l.uid) && !picked.has(l.uid)).length;
+    addSelBtn.textContent = n ? `＋ 加入选中的 ${n} 句` : "＋ 加入选中的行";
+    addSelBtn.disabled = !n;
+  };
+  addSelBtn.onclick = () => {
+    rows.forEach((l) => { if (SEL.has(l.uid)) picked.add(l.uid); });
+    renderList(); addSelBtnTxt();
+  };
+  const allBtn = el("button", "btn mini ghost", "全选");
+  allBtn.onclick = () => { rows.forEach((l) => picked.add(l.uid)); renderList(); addSelBtnTxt(); };
+  const noneBtn = el("button", "btn mini ghost", "清空");
+  noneBtn.onclick = () => { picked.clear(); renderList(); addSelBtnTxt(); };
+  const cnt = el("span", "hint", "");
+  tools.appendChild(addSelBtn); tools.appendChild(allBtn); tools.appendChild(noneBtn);
+  tools.appendChild(cnt);
+  listHost.appendChild(tools);
+
+  const listBox = el("div", "bpick-list");
+  listHost.appendChild(listBox);
+  listHost.appendChild(el("div", "hint",
+    "勾上 = 这一句属于本组；取消勾选 = 从组里移除（句子本身和已生成的音频都不动）。"));
+
+  function renderList() {
+    listBox.innerHTML = "";
+    rows.forEach((l, i) => {
+      const row = el("label", "bpick-row");
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = picked.has(l.uid);
+      cb.onchange = () => {
+        if (cb.checked) picked.add(l.uid); else picked.delete(l.uid);
+        row.classList.toggle("on", cb.checked);
+        updateCnt();
+      };
+      row.classList.toggle("on", cb.checked);
+      row.appendChild(cb);
+      row.appendChild(el("span", "bpick-idx", String(i + 1)));
+      const tx = el("span", "bpick-tx", (l.text || "").slice(0, 46) || "（空句）");
+      tx.title = l.text || "";
+      row.appendChild(tx);
+      if (l.status === "done") row.appendChild(el("span", "bpick-st ok", "已生成"));
+      else if (l.status === "error") row.appendChild(el("span", "bpick-st err", "失败"));
+      listBox.appendChild(row);
+    });
+    updateCnt();
+  }
+  function updateCnt() {
+    const n = picked.size;
+    cnt.textContent = `已勾 ${n} / 共 ${rows.length} 句`;
+    cnt.className = n ? "hint ok" : "hint warn";
+  }
+  renderList();
+  addSelBtnTxt();
+
   modal("编辑分组 / 批量任务", wrap, async () => {
     const name = nameInp.value.trim();
     if (!name) { toast("任务名不能为空", true); return false; }
+    const uids = rows.filter((l) => picked.has(l.uid)).map((l) => l.uid);
+    if (!uids.length) { toast("这个分组至少要有一句", true); return false; }
+    const before = new Set(existing.uids || []);
     existing.name = name;
+    existing.uids = uids;
     existing.params = params.read();
     applyBatchParams(existing);
+    const added = uids.filter((u) => !before.has(u)).length;
+    const removed = Array.from(before).filter((u) => !uids.includes(u)).length;
     commitSnapshot("编辑分组 " + name);
     dirty = true;
     renderBatchList(); renderBatchStats(); renderRenderBatches(); renderCenter();
     await saveNow();
-    toast("已更新并重新应用到 " + (existing.uids || []).length + " 行");
+    const bits = [];
+    if (added) bits.push(`加入 ${added} 句`);
+    if (removed) bits.push(`移出 ${removed} 句`);
+    toast(`分组「${name}」已更新（${uids.length} 句${bits.length ? "，" + bits.join("、") : ""}）`);
   }, "保存");
 }
 
@@ -3041,7 +3216,18 @@ function renderRenderBatches() {
     const row = el("label", "batchpick-row");
     const cb = document.createElement("input");
     cb.type = "checkbox"; cb.value = b.id;
-    cb.onchange = () => paintRender();
+    cb.checked = BATCH_PICK.has(b.id);
+    cb.onchange = () => {
+      if (cb.checked) BATCH_PICK.add(b.id); else BATCH_PICK.delete(b.id);
+      updateBatchPickUI();
+      // 「批量」页那排卡片的勾选框也要跟着变
+      document.querySelectorAll("#batchList .batchitem").forEach((it, i) => {
+        const src = list[i];
+        const box2 = it.querySelector("input.batch-pick");
+        if (src && box2) box2.checked = BATCH_PICK.has(src.id);
+      });
+      paintRender();
+    };
     row.appendChild(cb);
     row.appendChild(el("span", "grow", b.name));
     row.appendChild(el("span", "hint", `${(b.uids || []).length} 句`));
@@ -3050,8 +3236,8 @@ function renderRenderBatches() {
 }
 
 function selectedBatchIds() {
-  const box = $("rBatchList");
-  return box ? [...box.querySelectorAll("input:checked")].map((cb) => cb.value) : [];
+  const live = new Set(((SCRIPT && SCRIPT.batches) || []).map((b) => b.id));
+  return Array.from(BATCH_PICK).filter((id) => live.has(id));
 }
 
 /* ------------------------------ 默认面板 ------------------------------ */
@@ -6524,6 +6710,21 @@ function initHeader() {
   document.addEventListener("visibilitychange", () => { if (!document.hidden) syncFromTimeline(); });
 
   $("btnNewBatch").onclick = () => openBatchDialog(null);
+  /* 批量页底部：勾选分组 → 直接生成（不用切到「生成」页再选一次） */
+  $("btnBatchRun").onclick = () => {
+    const ids = selectedBatchIds();
+    if (!ids.length) { toast("先勾选要生成的分组", true); return; }
+    startRender("batches", null, ids);
+  };
+  $("btnBatchPickAll").onclick = () => {
+    BATCH_PICK.clear();
+    ((SCRIPT && SCRIPT.batches) || []).forEach((b) => BATCH_PICK.add(b.id));
+    renderBatchList(); renderRenderBatches();
+  };
+  $("btnBatchPickNone").onclick = () => {
+    BATCH_PICK.clear();
+    renderBatchList(); renderRenderBatches();
+  };
   $("btnSelUncovered").onclick = () => {
     const cov = batchCoverage();
     applySel($("btnSelUncovered"), cov.uncovered.map((l) => l.uid), "所有句子都已经分组");
@@ -6556,7 +6757,7 @@ function switchPane(name) {
     refreshExports();
   }
   if (name === "batch") { renderBatchList(); renderBatchStats(); }
-  if (name === "render") renderRenderBatches();
+  if (name === "render") { renderRenderBatches(); updateSelHint(); }
 }
 
 /* ------------------------------ 启动 ------------------------------ */

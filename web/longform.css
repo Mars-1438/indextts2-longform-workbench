@@ -337,6 +337,51 @@ body.resizing .rz::after { opacity: 1; background: var(--primary); }
 .batchpick-row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
 .batchpick-row input { accent-color: var(--primary); }
 
+/* 分组卡片左上角的勾选框（配合底部「生成勾选的分组」） */
+.batch-head .batch-pick {
+  accent-color: var(--primary); flex: none; cursor: pointer;
+  width: 14px; height: 14px; margin: 0 1px 0 0;
+}
+.batchitem:has(.batch-pick:checked) { border-color: var(--primary); box-shadow: 0 0 0 1px rgba(210,55,46,.18) inset; }
+
+/* 批量页底部：勾选分组 → 直接生成 */
+.batchrun { margin-top: 10px; padding: 8px 9px; border: 1px dashed var(--border-2); border-radius: 10px; background: color-mix(in srgb, var(--primary) 4%, var(--surface)); }
+.batchrun-h { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+.batchrun-h .hint { flex: 1 1 auto; min-width: 0; font-size: 11px; line-height: 1.4; }
+.batchrun-h .qbtn { flex: none; white-space: nowrap; }
+.batchrun .btn { width: 100%; }
+
+/* 编辑分组：组内句子清单 */
+.bpick-tools { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; margin-bottom: 5px; }
+.bpick-tools .hint { margin-left: auto; font-size: 11px; }
+.bpick-list {
+  max-height: 180px; overflow: auto; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--inset); padding: 3px;
+}
+.bpick-row {
+  display: flex; align-items: center; gap: 6px; padding: 3px 5px; border-radius: 5px;
+  font-size: 11.5px; color: var(--muted); cursor: pointer;
+}
+.bpick-row:hover { background: rgba(0,0,0,.04); }
+.bpick-row.on { color: var(--ink); }
+.bpick-row input { accent-color: var(--primary); flex: none; }
+.bpick-idx { flex: none; width: 20px; text-align: right; font-family: var(--mono); opacity: .6; }
+.bpick-tx { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bpick-st { flex: none; font-size: 10px; padding: 1px 5px; border-radius: 6px; }
+.bpick-st.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); }
+.bpick-st.err { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+
+/* 生成页：渲染范围上方的「已选 N 句 / 未选 M 句」 */
+.selhint {
+  display: flex; align-items: center; gap: 2px; flex-wrap: wrap;
+  font-size: 11.5px; color: var(--muted); margin: 2px 0 10px;
+  padding: 4px 7px; border-radius: 7px; border: 1px solid var(--border);
+  background: var(--inset);
+}
+.selhint b { color: var(--primary); font-size: 12px; }
+.selhint.none b { color: var(--muted); }
+.selhint .warn { color: var(--warn); font-size: 11px; }
+
 /* 进度 */
 .progresswrap { margin-top: 10px; }
 .prow { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); margin-bottom: 5px; }

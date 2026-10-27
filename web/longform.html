@@ -220,12 +220,25 @@
         <button id="btnSelUncovered" class="btn mini grow" title="选中还没被任何分组包含的句子">选中未分组</button>
         <button id="btnSelOverlap" class="btn mini grow" title="选中同时属于多个分组的句子">选中多组重复</button>
       </div>
+      <!-- 分组勾选 + 一键生成：勾一个或多个组，直接在这里跑，不用切到「生成」页 -->
+      <div class="batchrun">
+        <div class="batchrun-h">
+          <span id="batchPickTip" class="hint">勾选上面的分组（可多选），然后生成</span>
+          <button id="btnBatchPickAll" class="qbtn" type="button" title="勾选全部分组">全选</button>
+          <button id="btnBatchPickNone" class="qbtn" type="button" title="取消全部勾选">清空</button>
+        </div>
+        <button id="btnBatchRun" class="btn primary" disabled>▶ 生成勾选的分组</button>
+      </div>
       <div class="hint">每个分组卡片上还有「选中本组」，用来直接选中这个分组里的全部句子。</div>
     </div>
 
     <!-- ========== 生成 ========== -->
     <div class="ppane" data-pane="render">
       <div class="phead"><span id="rState" class="badge">空闲</span><span id="rModel" class="hint"></span></div>
+
+      <div id="rSelHint" class="selhint" title="这里统计的是左侧列表里勾选的句子">
+        <b>已选 0 句</b> · 未选 0 句
+      </div>
 
       <label class="fl">渲染范围</label>
       <div class="radios">

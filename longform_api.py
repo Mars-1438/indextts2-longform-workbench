@@ -110,22 +110,68 @@ def _safe_title(name: str, fallback="台本") -> str:
     return name[:60] or fallback
 
 
-def _read_json(path, default=None):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return default
-    except Exception as e:
-        _log("longform: read %s failed: %s", path, e, level="warning")
-        return default
+# JSON 落盘：唯一临时名 + 串行化 + 重试
+# ---------------------------------------------------------------
+# 以前的实现是「固定 script.json.tmp + 直接 os.replace」，在 Windows 上偶发
+#   PermissionError: [WinError 5] 拒绝访问: 'script.json.tmp' -> 'script.json'
+# 原因有两类，都在这里兜住：
+#  1) 目标文件正被**另一个线程**打开读取（渲染时前端每 1.2s 轮询 GET /render，
+#     那边 _load_script 正在读 script.json）。Windows 的 rename/replace 需要
+#     目标句柄带 FILE_SHARE_DELETE，而 Python 的 open() 不带 —— 读的瞬间替换就失败；
+#  2) 杀毒 / 索引服务刚写入就扫描，短暂占用目标文件。
+# 处理：写用「唯一 tmp + 全局写锁」避免两个写线程互相踩，替换失败按退避重试
+# （总时长约 1s，足够轮询与扫描让开），读也重试几次避免读到替换中的半成品。
+_JSON_IO_LOCK = threading.RLock()
+_WIN_REPLACE_RETRY = 10
+
+
+def _read_json(path, default=None, tries=4):
+    last = None
+    for i in range(tries):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return default
+        except Exception as e:  # noqa: BLE001
+            last = e
+            time.sleep(0.03 * (i + 1))
+    _log("longform: read %s failed: %s", path, last, level="warning")
+    return default
 
 
 def _write_json(path, data):
-    tmp = f"{path}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=1)
-    os.replace(tmp, path)
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    payload = json.dumps(data, ensure_ascii=False, indent=1)
+    with _JSON_IO_LOCK:
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(payload)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+        except OSError:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
+        last = None
+        for i in range(_WIN_REPLACE_RETRY):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError as e:          # WinError 5 / 32：目标被占用
+                last = e
+                time.sleep(min(0.02 * (i + 1), 0.12))
+        # 实在替换不了：把 tmp 清掉再抛，避免残渣堆在台本目录里
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise last
 
 
 def _now():
@@ -3740,7 +3786,15 @@ def register_longform(app, api, deps):
             if isinstance(req.get("tag_presets"), list):
                 script["tag_presets"] = [str(t)[:40] for t in req["tag_presets"]][:60]
             if isinstance(req.get("batches"), list):
+                # 合法 uid 要算上「本次请求带来的新行」：
+                # 回车拆分 / 插入 / 复制会同时提交「新行 + 新行所属分组」，
+                # 只按旧 lines 校验会把新 uid 当作脏数据过滤掉 ——
+                # 表现就是「拆出来的句子不在原分组里」（前端明明已经加进去了）。
                 valid = {l["uid"] for l in script.get("lines") or []}
+                if isinstance(req.get("lines"), list):
+                    for ln in req["lines"]:
+                        if isinstance(ln, dict) and ln.get("uid"):
+                            valid.add(str(ln["uid"]))
                 batches = []
                 for b in req["batches"]:
                     if not isinstance(b, dict):

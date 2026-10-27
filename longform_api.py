@@ -1751,6 +1751,7 @@ class _Stop(Exception):
 
 class _RenderJob:
     def __init__(self, sid, uids):
+        self.id = uuid.uuid4().hex[:10]   # 前端用它判断「是不是同一轮」，完成后弹汇总
         self.sid = sid
         self.uids = uids
         self.total = len(uids)
@@ -1764,18 +1765,23 @@ class _RenderJob:
         self.started_at = time.time()
         self.finished_at = None
         self.stop_event = threading.Event()
+        self.lock = threading.RLock()
         self.message = ""
         self.errors = []
         self.thread = None
 
     def public(self):
+        with self.lock:
+            uids = list(self.uids)
+            total = self.total
         elapsed = (self.finished_at or time.time()) - self.started_at
         done = self.cursor
         eta = None
         if self.state == "running" and done > 0 and self.total > done:
             eta = round(elapsed / done * (self.total - done))
         return {
-            "state": self.state, "total": self.total, "done": done,
+            "id": self.id, "uids": uids,
+            "state": self.state, "total": total, "done": done,
             "cursor": self.cursor, "cur_uid": self.cur_uid,
             "cur_index": self.cur_index,
             "cur_pos": self.cur_pos, "cur_text": self.cur_text,
@@ -4278,6 +4284,44 @@ def register_longform(app, api, deps):
             raise HTTPException(400, f"不认识的渲染范围：{mode}（可用：sel/uids/missing/batches/all）")
         job = _start_render(sid, uids)
         return {"ok": True, "render": job.public()}
+
+    @lf.post("/lf/scripts/{sid}/render/append")
+    def lf_render_append(sid: str, req: dict | None = Body(default=None)):
+        """把几句追加到**正在跑**的任务队列尾部（用户点别的句子想生成时用）。
+
+        与「等这轮结束再单独跑」的区别：追加的句子混在这一轮里，进度条总数会变大，
+        跑完一次汇总里也一起出现。
+        """
+        sid = _safe_sid(sid)
+        req = req or {}
+        job = _RENDERS.get(sid)
+        if not job or job.state not in ("running", "stopping"):
+            raise HTTPException(409, "当前没有正在跑的任务，直接点「开始生成」就行")
+        if job.state == "stopping":
+            raise HTTPException(409, "任务正在停止，等它停下来再生成")
+        if job.cursor >= len(job.uids):
+            raise HTTPException(409, "这一轮刚跑完，再点一次「开始生成」")
+        wanted = set(req.get("uids") or [])
+        if not wanted:
+            raise HTTPException(400, "没有要追加的句子")
+        script = _load_script(sid)
+        ok_uids = {l["uid"] for l in script["lines"]
+                   if l.get("kind") != "tag" and (l.get("text") or "").strip()}
+        add = [l["uid"] for l in script["lines"]
+               if l["uid"] in wanted and l["uid"] in ok_uids and l["uid"] not in job.uids]
+        if not add:
+            raise HTTPException(400, "这些句子已经在当前队列里了")
+        with _LOCK:
+            script = _load_script(sid)
+            for l in script["lines"]:
+                if l["uid"] in add:
+                    l["status"] = "queued"
+            _save_script(script)
+            with job.lock:
+                job.uids.extend(add)
+                job.total = len(job.uids)
+        _log("longform: render %s append %d lines", sid, len(add))
+        return {"ok": True, "render": job.public(), "added": add}
 
     @lf.get("/lf/scripts/{sid}/render")
     def lf_render_status(sid: str):

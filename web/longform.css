@@ -1423,3 +1423,48 @@ pre.impsample {
   box-shadow: inset 3px 0 0 var(--accent);
 }
 .scard.multi.cur { box-shadow: inset 3px 0 0 var(--accent), inset 5px 0 0 var(--primary); }
+
+/* 分组卡片上的快速 ＋ / － */
+.batch-act .btn.qadd {
+  flex: none; min-width: 26px; padding: 0 6px; font-size: 13px; line-height: 1;
+  color: var(--muted);
+}
+.batch-act .btn.qadd:hover { color: var(--primary); border-color: var(--primary); }
+
+/* 渲染范围每个选项右边的句数 */
+.rmoden {
+  display: inline-block; margin-left: 4px; padding: 0 5px;
+  font-family: var(--mono); font-size: 10.5px; line-height: 16px;
+  color: var(--muted); background: var(--inset);
+  border: 1px solid var(--border); border-radius: 6px;
+}
+.radios label input[type="radio"]:checked ~ .rmoden {
+  color: var(--primary); border-color: color-mix(in srgb, var(--primary) 35%, var(--border));
+  background: color-mix(in srgb, var(--primary) 8%, var(--inset));
+}
+
+/* 生成完成汇总 */
+.rsum-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  font-size: 12px; margin-bottom: 8px; padding: 6px 9px;
+  border-radius: 8px; background: var(--inset); border: 1px solid var(--border);
+}
+.rsum-bar .ok { color: var(--ok); font-weight: 600; }
+.rsum-bar .err { color: var(--danger); font-weight: 600; }
+.rsum-bar .warn { color: var(--warn); }
+.rsum-bar .hint { margin-left: auto; }
+.rsum-list {
+  max-height: 300px; overflow: auto;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--inset);
+}
+.rsum-row {
+  display: flex; align-items: center; gap: 8px; padding: 4px 8px;
+  font-size: 12px; border-bottom: 1px solid var(--border);
+}
+.rsum-row:last-child { border-bottom: none; }
+.rsum-row.bad { background: color-mix(in srgb, var(--warn) 7%, transparent); }
+.rsum-i { flex: none; width: 28px; text-align: right; font-family: var(--mono); color: var(--muted); }
+.rsum-t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rsum-d { flex: none; width: 52px; text-align: right; font-family: var(--mono); color: var(--muted); }
+.rsum-s { flex: none; width: 52px; text-align: right; font-size: 11px; color: var(--muted); }
+.rsum-row.bad .rsum-s { color: var(--danger); }

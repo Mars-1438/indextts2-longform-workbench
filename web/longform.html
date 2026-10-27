@@ -242,10 +242,10 @@
 
       <label class="fl">渲染范围</label>
       <div class="radios">
-        <label><input type="radio" name="rMode" value="sel" checked> 选中行</label>
-        <label><input type="radio" name="rMode" value="missing"> 未生成 / 需重生成</label>
-        <label><input type="radio" name="rMode" value="batches"> 按批量任务</label>
-        <label><input type="radio" name="rMode" value="all"> 全部行</label>
+        <label><input type="radio" name="rMode" value="sel" checked> 选中行 <span class="rmoden" id="rmSelN">0 句</span></label>
+        <label><input type="radio" name="rMode" value="missing"> 未生成 / 需重生成 <span class="rmoden" id="rmMissN">0 句</span></label>
+        <label><input type="radio" name="rMode" value="batches"> 按批量任务 <span class="rmoden" id="rmBatchN">0 组</span></label>
+        <label><input type="radio" name="rMode" value="all"> 全部行 <span class="rmoden" id="rmAllN">0 句</span></label>
       </div>
       <div id="rBatchBox" class="box" hidden>
         <div id="rBatchList" class="batchpick"></div>

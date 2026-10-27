@@ -1034,6 +1034,29 @@ function updateSelHint() {
   box.appendChild(el("span", null, ` · 未选 ${rest} 句 · 共 ${total} 句`));
   box.classList.toggle("none", picked === 0);
   if (picked === 0) box.appendChild(el("span", "warn", "　「选中行」模式要先在左侧勾几行"));
+  updateRenderModeCounts();
+}
+
+/* 四个渲染范围各自会跑多少句——直接标在选项右边，
+   省得每次都要切到别处数一遍才敢点「开始生成」。 */
+function updateRenderModeCounts() {
+  if (!SCRIPT) return;
+  const rows = (SCRIPT.lines || []).filter((l) => l.kind !== "tag");
+  const all = rows.length;
+  const selN = rows.filter((l) => SEL.has(l.uid)).length;
+  const missN = rows.filter((l) => (l.text || "").trim() && l.status !== "done").length;
+  const ids = selectedBatchIds();
+  const inBatch = new Set();
+  ids.forEach((id) => {
+    const b = (SCRIPT.batches || []).find((x) => x.id === id);
+    ((b && b.uids) || []).forEach((u) => inBatch.add(u));
+  });
+  const batchN = rows.filter((l) => inBatch.has(l.uid)).length;
+  const put = (id, txt) => { const n = $(id); if (n) n.textContent = txt; };
+  put("rmSelN", `${selN} 句`);
+  put("rmMissN", `${missN} 句`);
+  put("rmBatchN", ids.length ? `${ids.length} 组 · ${batchN} 句` : "未勾选分组");
+  put("rmAllN", `${all} 句`);
 }
 
 function handleRangeClick(uid_, e) {
@@ -1161,13 +1184,14 @@ function splitLine(line, caret) {
   const i = SCRIPT.lines.indexOf(line);
   const nl = {
     uid: uid(), kind: "speech", text: right, pause: null, tag: null, hold: null,
+    group: line.group || null, note: line.note || null, slow: !!line.slow,
     ov: deepCopy(line.ov || {}), inline: move, status: "pending",
     out: null, dur: null, elapsed: null, err: null, capped: false, sig: null,
   };
   SCRIPT.lines.splice(i + 1, 0, nl);
   inheritBatches(line.uid, nl.uid);
   commitSnapshot("切分第 " + at + " 行");
-  dirty = true; renderCenter(); queueSave();
+  dirty = true; refreshBatchViews(); queueSave();
   focusLine(nl.uid, 0);
 }
 
@@ -1175,6 +1199,7 @@ function splitLine(line, caret) {
 function insertLineAfter(line) {
   const nl = {
     uid: uid(), kind: "speech", text: "", pause: null, tag: null, hold: null,
+    group: (line && line.group) || null, note: (line && line.note) || null,
     ov: deepCopy((line && line.ov) || {}), inline: [], status: "pending",
     out: null, dur: null, elapsed: null, err: null, capped: false, sig: null,
   };
@@ -1183,7 +1208,7 @@ function insertLineAfter(line) {
   else SCRIPT.lines.push(nl);
   if (line) inheritBatches(line.uid, nl.uid);
   commitSnapshot("插入空行");
-  dirty = true; renderCenter(); queueSave();
+  dirty = true; refreshBatchViews(); queueSave();
   focusLine(nl.uid, 0);
   return nl;
 }
@@ -1200,7 +1225,7 @@ function duplicateLine(line) {
   SCRIPT.lines.splice(i + 1, 0, nl);
   inheritBatches(line.uid, nl.uid);
   commitSnapshot("复制第 " + (i + 1) + " 行");
-  dirty = true; renderCenter(); queueSave();
+  dirty = true; refreshBatchViews(); queueSave();
   focusLine(nl.uid, (nl.text || "").length);
   toast("已复制这一句（音频需要重新生成）");
 }
@@ -1338,7 +1363,7 @@ function mergePrev(line) {
   SEL.delete(line.uid);
   mergeBatchUids(prev.uid, line.uid);
   commitSnapshot("合并第 " + i + "/" + (i + 1) + " 行");
-  dirty = true; renderCenter(); queueSave();
+  dirty = true; refreshBatchViews(); queueSave();
   focusLine(prev.uid, at);
 }
 
@@ -1355,7 +1380,7 @@ function mergeNext(line) {
   SEL.delete(next.uid);
   mergeBatchUids(line.uid, next.uid);
   commitSnapshot("合并第 " + (i + 1) + "/" + (i + 2) + " 行");
-  dirty = true; renderCenter(); queueSave();
+  dirty = true; refreshBatchViews(); queueSave();
   focusLine(line.uid, at);
 }
 
@@ -1394,7 +1419,7 @@ function deleteLine(line) {
   SEL.delete(line.uid);
   (SCRIPT.batches || []).forEach((b) => { b.uids = (b.uids || []).filter((u) => u !== line.uid); });
   commitSnapshot("删除第 " + at + " 行");
-  dirty = true; renderCenter(); queueSave(); renderBatchList(); renderBatchStats();
+  dirty = true; refreshBatchViews(); queueSave();
   toast("已删除");
 }
 
@@ -2258,6 +2283,7 @@ function openSmartSplit() {
 
 async function doSmartSplit(mode, scope, maxChars) {
   const next = [];
+  const splitFrom = {};        // 原 uid → 它被分出来的新 uid 列表
   let added = 0, touchedDone = 0;
   (SCRIPT.lines || []).forEach((l) => {
     const eligible = l.kind !== "tag" && (l.text || "").trim() &&
@@ -2269,8 +2295,12 @@ async function doSmartSplit(mode, scope, maxChars) {
     added += parts.length - 1;
     parts.forEach((p, i) => {
       const keepUid = scope !== "all" && i === 0;
+      const nu = keepUid ? l.uid : uid();
+      /* 分行出来的句子记在 splitFrom 下：稍后要把它们一并放进原句所在的分组，
+         否则「分组里的句子被分行」之后就悄悄掉出分组了（和回车拆分同一个坑）。 */
+      if (!keepUid) (splitFrom[l.uid] = splitFrom[l.uid] || []).push(nu);
       next.push(Object.assign({}, l, {
-        uid: keepUid ? l.uid : uid(),
+        uid: nu,
         text: p,
         inline: keepUid ? (l.inline || []).filter((it) => it.pos <= p.length) : [],
         status: "pending",
@@ -2282,10 +2312,18 @@ async function doSmartSplit(mode, scope, maxChars) {
   });
   if (!added) { toast("没有需要分行的内容"); return; }
   SCRIPT.lines = next;
-  (SCRIPT.batches || []).forEach((b) => { b.uids = (b.uids || []).filter((u) => next.some((l) => l.uid === u)); });
+  (SCRIPT.batches || []).forEach((b) => {
+    const out = [];
+    (b.uids || []).forEach((u) => {
+      out.push(u);
+      (splitFrom[u] || []).forEach((nu) => { if (!out.includes(nu)) out.push(nu); });
+    });
+    const alive = new Set(next.map((l) => l.uid));
+    b.uids = out.filter((u) => alive.has(u));
+  });
   commitSnapshot("智能分行（" + (scope === "all" ? "全篇" : "未生成") + "）");
   SEL.clear();
-  dirty = true; renderCenter(); renderStats(); renderBatchList(); renderBatchStats();
+  dirty = true; refreshBatchViews();
   await saveNow();
   toast(`新增 ${added} 行` + (touchedDone ? `，${touchedDone} 行已生成的需重跑` : ""));
 }
@@ -2875,6 +2913,65 @@ function toggleBatchPick(id, on) {
   renderRenderBatches();
 }
 
+/* 行结构 / 分组成员变了之后，所有「跟分组有关的视图」一起刷新。
+   以前每个操作只刷一部分：拆分只 renderCenter（卡片上的「N 句」和分组情况不动），
+   合并只 renderCenter（数量虚高），插入 / 粘贴漏统计 —— 全是同一类「改了数据没刷视图」。
+   现在统一走这里：列表 + 统计 + 生成页的分组列表 + 选中提示（含各范围的句数）。 */
+function refreshBatchViews() {
+  if (!SCRIPT) return;
+  renderCenter();
+  renderStats();
+  renderBatchList();
+  renderBatchStats();
+  renderRenderBatches();
+  updateSelInfo();
+}
+
+/* 把本组的音色 / 情感 / 停顿参数写到「指定几行」上（只写这几行，不动其它已生成的句子）。 */
+function applyBatchParamsTo(batch, lines) {
+  const p = batch.params || {};
+  const patch = {};
+  ["ref", "emo_mode", "emo_weight", "emo_vec", "emo_ref"].forEach((k) => {
+    if (p[k] !== undefined && p[k] !== null && p[k] !== "") patch[k] = p[k];
+  });
+  lines.forEach((l) => {
+    l.ov = Object.assign({}, l.ov || {}, patch);
+    if (p.pause !== undefined && p.pause !== null) l.pause = p.pause;
+    if (l.status === "done") l.status = "stale";
+  });
+}
+
+/* 分组卡片上的 ＋ / －：把左侧当前勾选的句子直接加进 / 移出这个分组。
+   编辑弹窗适合批量调整，这个适合「边听边调」——不用开弹窗、不用滚句子清单。 */
+function quickBatchAdd(b, dir) {
+  const rows = (SCRIPT.lines || []).filter((l) => l.kind !== "tag");
+  const sel = rows.filter((l) => SEL.has(l.uid));
+  if (!sel.length) { toast("先在左侧列表里勾选要加减的句子", true); return; }
+  const set = new Set(b.uids || []);
+  const changed = [];
+  if (dir > 0) {
+    sel.forEach((l) => { if (!set.has(l.uid)) { set.add(l.uid); changed.push(l); } });
+  } else {
+    sel.forEach((l) => { if (set.has(l.uid)) { set.delete(l.uid); changed.push(l); } });
+  }
+  if (!changed.length) {
+    toast(dir > 0 ? "勾选的句子都已经在本组里了" : "勾选的句子都不在本组里", true);
+    return;
+  }
+  if (dir > 0) {
+    /* 顺手补上行上的「▤ 分组」标签，否则加进组了但列表里看不出归属 */
+    changed.forEach((l) => { if (!l.group) l.group = b.name; });
+    applyBatchParamsTo(b, changed);
+  }
+  b.uids = rows.filter((l) => set.has(l.uid)).map((l) => l.uid);
+  commitSnapshot((dir > 0 ? "加入分组 " : "移出分组 ") + b.name);
+  dirty = true;
+  refreshBatchViews();
+  saveNow();
+  toast(dir > 0 ? `已把 ${changed.length} 句加进「${b.name}」`
+    : `已把 ${changed.length} 句移出「${b.name}」`);
+}
+
 function renderBatchList() {
   const box = $("batchList");
   if (!box) return;
@@ -2914,7 +3011,15 @@ function renderBatchList() {
     bRun.onclick = () => startRender("batches", null, [b.id]);
     const bEdit = el("button", "btn mini ghost", "编辑");
     bEdit.onclick = () => openBatchDialog(b);
-    act.appendChild(bSel); act.appendChild(bRun); act.appendChild(bEdit);
+    /* 快速加减：把左侧勾选的句子加进 / 移出本组，不用打开弹窗 */
+    const bAdd = el("button", "btn mini ghost qadd", "＋");
+    bAdd.title = "把左侧勾选的句子加进本组（只加进组，不改已生成的内容）";
+    bAdd.onclick = () => quickBatchAdd(b, 1);
+    const bSub = el("button", "btn mini ghost qadd", "－");
+    bSub.title = "把左侧勾选的句子移出本组（句子和音频都保留）";
+    bSub.onclick = () => quickBatchAdd(b, -1);
+    act.appendChild(bSel); act.appendChild(bAdd); act.appendChild(bSub);
+    act.appendChild(bRun); act.appendChild(bEdit);
     item.appendChild(act);
     box.appendChild(item);
   });
@@ -3445,8 +3550,87 @@ function initRenderPanel() {
   };
 }
 
+/* 正在生成时又点了「生成」：问一句「加进当前队列」还是「等这轮结束再跑」。
+   以前直接撞服务端的 409，只有一个「启动失败」的 toast，用户不知道该怎么办。 */
+let WAIT_QUEUE = null;        // {sid, mode, uids} —— 等这一轮结束再单独跑的那批
+
+/* 把「范围」解析成具体 uid 列表（询问弹窗和追加队列都要用） */
+function resolveTargetUids(mode, uids, batches) {
+  const rows = ((SCRIPT && SCRIPT.lines) || []).filter(
+    (l) => l.kind !== "tag" && (l.text || "").trim());
+  if (mode === "uids" || mode === "sel") return (uids || []).filter(Boolean);
+  if (mode === "all") return rows.map((l) => l.uid);
+  if (mode === "missing") return rows.filter((l) => l.status !== "done").map((l) => l.uid);
+  if (mode === "batches") {
+    const want = new Set(batches || []);
+    const set = new Set();
+    ((SCRIPT && SCRIPT.batches) || []).forEach((b) => {
+      if (want.has(b.id)) (b.uids || []).forEach((u) => set.add(u));
+    });
+    return rows.filter((l) => set.has(l.uid)).map((l) => l.uid);
+  }
+  return [];
+}
+
+function askRenderBusy(mode, uids, batches) {
+  if (!RENDER || !(RENDER.state === "running" || RENDER.state === "stopping")) return;
+  if (RENDER.state === "stopping") { toast("正在停止，等它停下来再点生成", true); return; }
+  const target = resolveTargetUids(mode, uids, batches);
+  if (!target.length) { toast("没有要生成的句子", true); return; }
+  const wrap = el("div");
+  wrap.appendChild(el("div", "hint",
+    `当前任务：第 ${RENDER.cur_pos || "?"} 行（${RENDER.done}/${RENDER.total}）正在生成。`));
+  wrap.appendChild(el("div", "hint", `你这次要生成 ${target.length} 句，可以：`));
+
+  const pick = (label, desc, fn) => {
+    const b = el("button", "btn grow", label);
+    b.style.cssText = "display:block;width:100%;text-align:left;margin-top:6px";
+    b.onclick = fn;
+    wrap.appendChild(b);
+    const d = el("div", "hint", desc);
+    d.style.cssText = "margin:2px 0 6px 2px;font-size:11px";
+    wrap.appendChild(d);
+    return b;
+  };
+  pick("⏳ 等这轮结束，再单独生成这 " + target.length + " 句",
+    "这一轮先跑完（会弹一份完成汇总），然后自动开始你这批。", () => {
+      closeModal();
+      WAIT_QUEUE = { sid: SCRIPT.id, uids: target };
+      toast(`已排队，当前任务结束后自动生成这 ${target.length} 句`);
+    });
+  wrap.appendChild(el("div", "hint",
+    "想混进这一轮就点右下「加入当前队列」：进度总数会变大，跑完在同一份汇总里一起看。"));
+  wrap.lastChild.style.marginTop = "10px";
+
+  modal("当前正在生成", wrap, async () => {
+    // 主按钮 = 加入队列；点右上取消就是「什么也不做」
+    await appendToRender(target);
+  }, "加入当前队列");
+}
+
+async function appendToRender(uids) {
+  if (!SCRIPT) return;
+  try {
+    const r = await api(`/scripts/${SCRIPT.id}/render/append`,
+      { method: "POST", body: { uids } });
+    RENDER = r.render || RENDER;
+    paintRender();
+    logLine(`加入队列：${(r.added || []).length} 句，本轮共 ${RENDER.total} 句`);
+    toast(`已加入队列，本轮共 ${RENDER.total} 句`);
+  } catch (e) {
+    toast("加入队列失败：" + e.message, true);
+  }
+}
+
 async function startRender(mode, uids, batches) {
   if (!SCRIPT) return;
+  /* 已经在跑：不要直接打服务端（只会拿到 409「已有一个台本在渲染」），先问用户 */
+  if (RENDER && (RENDER.state === "running" || RENDER.state === "stopping")) {
+    const want = resolveTargetUids(mode, uids, batches);
+    if (!want.length) { toast("没有要生成的句子", true); return; }
+    askRenderBusy(mode, uids, batches);
+    return;
+  }
   const sid = SCRIPT.id;              // 记住是给哪份台本点的
   if (dirty) await saveNow();
   if (!SCRIPT || SCRIPT.id !== sid) return;   // 等保存的这段时间切了台本，别再发
@@ -3490,6 +3674,7 @@ async function pollRender() {
     /* 请求发出去到回来之间可能已经切了台本：这份状态属于上一个台本，
        写进去会让新台本显示「正在生成 xx%」、甚至提前把轮询停掉。 */
     if (!SCRIPT || SCRIPT.id !== sid) return;
+    const prevState = RENDER ? RENDER.state : null;
     RENDER = r.render; STATS = r.stats;
     if (r.model) MODEL = r.model;
     if (r.statuses) {
@@ -3525,11 +3710,76 @@ async function pollRender() {
         await syncScriptMeta();
         renderCenter();
         renderStats();
+        /* 只在「这一轮刚跑完」时弹：打开页面时看到的历史任务不弹。
+           汇总里列出本轮涉及的每一句 + 结果，顺便给排队的那批一个入口。 */
+        if (prevState === "running" || prevState === "stopping") {
+          showRenderSummary(RENDER);
+        }
       }
     }
   } catch (e) {
     stopPolling();
   }
+}
+
+/* 一轮生成结束后的汇总：生成了哪些句子、各自结果、用时。
+   以前只有一行 toast「全部生成完成」，跑了几十句时根本不知道哪句失败了。 */
+function showRenderSummary(job) {
+  if (!job) return;
+  const ids = job.uids || [];
+  const rows = ids.map((u) => byUid(u)).filter(Boolean);
+  if (!rows.length) return;
+  const done = rows.filter((l) => l.status === "done");
+  const errs = rows.filter((l) => l.status === "error");
+  const skips = rows.filter((l) => l.status === "skipped");
+  const left = rows.length - done.length - errs.length - skips.length;
+
+  const wrap = el("div");
+  const bar = el("div", "rsum-bar");
+  bar.appendChild(el("span", "ok", `成功 ${done.length} 句`));
+  if (errs.length) bar.appendChild(el("span", "err", `失败 ${errs.length} 句`));
+  if (skips.length) bar.appendChild(el("span", "warn", `跳过 ${skips.length} 句`));
+  if (left > 0) bar.appendChild(el("span", "warn", `未跑 ${left} 句`));
+  bar.appendChild(el("span", "hint", `用时 ${Math.round(job.elapsed || 0)} 秒`));
+  wrap.appendChild(bar);
+  if (job.state === "stopped") {
+    wrap.appendChild(el("div", "hint", "（这次是手动停止的，未跑的部分可以再点生成）"));
+  }
+  if (job.state === "error") {
+    wrap.appendChild(el("div", "hint warn", "出错中止：" + (job.message || "未知原因")));
+  }
+
+  const list = el("div", "rsum-list");
+  rows.forEach((l) => {
+    const ok = l.status === "done";
+    const row = el("div", "rsum-row" + (ok ? "" : " bad"));
+    row.appendChild(el("span", "rsum-i", String(idxOf(l))));
+    const tx = el("span", "rsum-t", (l.text || "").slice(0, 42) || "（空句）");
+    tx.title = l.text || "";
+    row.appendChild(tx);
+    row.appendChild(el("span", "rsum-d", l.dur ? Number(l.dur).toFixed(2) + "s" : "—"));
+    const st = ok ? "✓ 完成" : (l.status === "skipped" ? "跳过" : (l.status === "error" ? "失败" : "未跑"));
+    row.appendChild(el("span", "rsum-s", st));
+    if (l.err) row.title = l.err;
+    list.appendChild(row);
+  });
+  wrap.appendChild(list);
+  if (errs.length) {
+    wrap.appendChild(el("div", "hint warn",
+      "失败原因：" + errs.slice(0, 3).map((l) => `第 ${idxOf(l)} 行 ${l.err || ""}`).join("；")));
+  }
+
+  const queued = WAIT_QUEUE && WAIT_QUEUE.sid === SCRIPT.id ? WAIT_QUEUE : null;
+  const title = job.state === "done" ? "本轮生成完成" : (job.state === "stopped" ? "本轮已停止" : "本轮出错中止");
+  modal(title, wrap, async () => {
+    if (queued) {
+      WAIT_QUEUE = null;
+      setTimeout(() => startRender("uids", queued.uids), 120);
+    }
+  }, queued ? `开始排队的 ${queued.uids.length} 句` : "知道了");
+  /* 汇总是个「看完就走」的提示，没有需要取消的操作 */
+  const cancel = $("modalCancel");
+  if (cancel) cancel.hidden = true;
 }
 
 /* 重新拉一次台本，把服务端算好的 changes / gen / status 全量对齐 */
@@ -3598,11 +3848,13 @@ function paintRender() {
   const modeEl = document.querySelector('input[name="rMode"]:checked');
   const isBatchMode = modeEl && modeEl.value === "batches";
   $("rBatchBox").hidden = !isBatchMode;
+  updateRenderModeCounts();
   paintModelState();
 
   if (!RENDER) {
     badge.textContent = "空闲"; badge.className = "badge";
-    $("btnRender").disabled = false; $("btnStop").disabled = true;
+    $("btnRender").disabled = false; $("btnRender").textContent = "开始生成";
+    $("btnStop").disabled = true;
     $("rCount").textContent = "—";
     $("rBar").style.width = "0%"; $("rBarLine").style.width = "0%";
     $("rPct").textContent = "0%";
@@ -3630,7 +3882,10 @@ function paintRender() {
   const map = { running: "生成中", stopping: "正在停止", done: "已完成", stopped: "已停止", error: "出错" };
   badge.textContent = map[RENDER.state] || RENDER.state;
   badge.className = "badge " + (RENDER.state === "error" ? "warn" : RENDER.state === "done" ? "ok" : "");
-  $("btnRender").disabled = running;
+  /* 生成中不再把「开始生成」禁用掉：用户很可能想生成另一句，
+     点下去会弹「加进当前队列 / 等这轮结束」，比点了没反应好。 */
+  $("btnRender").disabled = false;
+  $("btnRender").textContent = running ? "＋ 加进队列 / 排队…" : "开始生成";
   $("btnStop").disabled = !running || RENDER.state === "stopping";
 
   const total = RENDER.total || 0;
@@ -7840,6 +8095,10 @@ window.__lfDebug = {
   get refView() { return REFV.view; },
   setRender(r) { RENDER = r; paintRender(); },
   setModel(m) { MODEL = m; paintRender(); },
+  /* 生成中询问 / 完成汇总：测试里直接调，不用真跑模型 */
+  askBusy(mode, uids) { askRenderBusy(mode || "uids", uids || [], null); },
+  showSummary(job) { showRenderSummary(job); },
+  get waitQueue() { return WAIT_QUEUE; },
   repaint() { renderCenter(); renderStats(); paintRender(); },
 };
 

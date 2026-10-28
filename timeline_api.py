@@ -1261,12 +1261,18 @@ def _peaks_cached(sid, key, path):
 
 # ================================ 变速 / 倒放 =================================
 
+# 变速缓存格式版本。**改过缓存内容的口径就要 +1**：
+# 旧缓存不会因为「源文件没变」而失效，用户会一直听到修复前的问题。
+# v2：缓存按源采样率写（v1 把 22050 的样本标成 44100，音调翻倍 + 后半补零 + 边界啪）。
+PREP_CACHE_VER = 2
+
+
 def _speed_ratio(speed):
     f = Fraction(int(round(1000 / speed)), 1000).limit_denominator(100)
     return f.numerator, f.denominator
 
 
-def _prepared_source(sid, c):
+def _prepared_source(sid, c, stats=None):
     """返回 (音频路径, 片段内起始秒)。
 
     变速/倒放的片段先渲染一份缓存 wav（等于"已经缩放过"的片段内容），
@@ -1283,11 +1289,12 @@ def _prepared_source(sid, c):
         stamp = f"{st.st_size}-{int(st.st_mtime)}"
     except OSError:
         return src, float(c["offset"])
-    key = f"{c['id']}_{speed:.3f}_{int(rev)}"
+    key = f"{c['id']}_{speed:.3f}_{int(rev)}_v{PREP_CACHE_VER}"
     meta_path = os.path.join(_cache_dir(sid), key + ".json")
     wav_path = os.path.join(_cache_dir(sid), key + ".wav")
     meta = _read_json(meta_path, None)
-    if isinstance(meta, dict) and meta.get("stamp") == stamp and os.path.exists(wav_path):
+    if (isinstance(meta, dict) and meta.get("stamp") == stamp
+            and meta.get("ver") == PREP_CACHE_VER and os.path.exists(wav_path)):
         return wav_path, 0.0
 
     try:
@@ -1316,7 +1323,10 @@ def _prepared_source(sid, c):
     seg = np.clip(seg[:want], -1, 1)
     try:
         sf.write(wav_path, seg, int(sr), subtype="PCM_16")
-        _write_json(meta_path, {"stamp": stamp, "speed": speed, "reverse": rev})
+        _write_json(meta_path, {"stamp": stamp, "speed": speed, "reverse": rev,
+                               "ver": PREP_CACHE_VER})
+        if isinstance(stats, dict):
+            stats["rebuilt"] = int(stats.get("rebuilt") or 0) + 1
     except OSError as e:
         _log("timeline: cache write failed %s: %s", wav_path, e, level="warning")
         return src, off
@@ -1450,6 +1460,22 @@ def _mix_est_bytes(seconds, fmt="wav", bit_depth=16, channels=2, quality="standa
     return int(seconds * kbps * 1000 / 8.0) + 4096
 
 
+def _clip_audible_len(c):
+    """片段真正有声音的长度（时间轴秒）。
+
+    `c["dur"]` 是「显示长度」，但它可能比源里剩下的还长：
+    改过速、裁过尾巴、或者素材被替换成更短的文件之后都会这样。
+    混音时如果照 `dur` 读，多出来的部分就是补零 —— 在有声/静音交界处硬切，
+    听起来是一声很轻的「啪」（浏览器试听走 `<audio>`，长度由播放器管，所以听不到）。
+    """
+    dur = float(c.get("dur") or 0)
+    src = float(c.get("src_dur") or dur or 0)
+    off = float(c.get("offset") or 0)
+    rate = max(0.25, min(4.0, float(c.get("speed") or 1)))
+    avail = max(0.0, (src - off) / rate)
+    return min(dur, avail) if avail > 0 else dur
+
+
 def _clip_full_end(c):
     """片段「没被显示出来」的那部分末端（源里还剩多少，按变速折算到时间轴）。"""
     src = float(c.get("src_dur") or c.get("dur") or 0)
@@ -1576,7 +1602,11 @@ def _render_mix(sid, out_path, fmt="wav", only=None, bit_depth=16, quality="stan
 
     readers = {}
     prepared = {}
-    bin_states = {}          # 双耳渲染的跨块状态（延迟历史 / 滤波器）
+    prep_stats = {"rebuilt": 0}
+    # 显示长度比「实际音频」长的片段：这些以前会在交界处补零硬切（啪的一声）
+    trimmed = sum(1 for c in clips if _clip_audible_len(c) < float(c["dur"]) - 1e-3)
+    bin_states = {}          # 双耳渲染器（每个片段/数据集一个）
+    bin_audio = {}           # 双耳整段渲染结果缓存（按片段 id）
     wet_states = {}          # 房间湿声的卷积尾巴
     block = int(SR * BLOCK_SEC)
     written = 0
@@ -1595,16 +1625,17 @@ def _render_mix(sid, out_path, fmt="wav", only=None, bit_depth=16, quality="stan
                     break
                 buf = np.zeros((n, 2), dtype="float32")
                 active_wet, active_bin = set(), set()
-                while idx < n_all and clips[idx]["start"] + clips[idx]["dur"] <= t0:
+                while idx < n_all and clips[idx]["start"] + _clip_audible_len(clips[idx]) <= t0:
                     idx += 1
                 j = idx
                 while j < n_all and clips[j]["start"] < t0 + n / SR:
                     c = clips[j]
+                    c_len = _clip_audible_len(c)
                     a = max(t0, c["start"])
-                    b = min(t0 + n / SR, c["start"] + c["dur"])
+                    b = min(t0 + n / SR, c["start"] + c_len)
                     if b > a:
                         if c["id"] not in prepared:
-                            prepared[c["id"]] = _prepared_source(sid, c)
+                            prepared[c["id"]] = _prepared_source(sid, c, prep_stats)
                         src_path, src_off = prepared[c["id"]]
                         rd = readers.get(src_path)
                         if rd is None:
@@ -1637,18 +1668,20 @@ def _render_mix(sid, out_path, fmt="wav", only=None, bit_depth=16, quality="stan
                                 seg = seg * tg
                             seg = seg * g_env
                         fi, fo = float(c["fade_in"] or 0), float(c["fade_out"] or 0)
+                        # 段落实际有多长（可能比 dur 短）；淡出要落在真正结束的位置
+                        seg_len = c_len
                         # 即使用户没设淡入淡出，也垫 3ms 的「declick」斜坡：
                         # 素材被切在半个波形上（或语音首尾不是从 0 开始）时，
                         # 硬起硬落就是一声很轻的「哒」。
-                        fi_e = max(fi, 0.003 if c["dur"] > 0.02 else 0.0)
-                        fo_e = max(fo, 0.003 if c["dur"] > 0.02 else 0.0)
+                        fi_e = max(fi, 0.003 if seg_len > 0.02 else 0.0)
+                        fo_e = max(fo, 0.003 if seg_len > 0.02 else 0.0)
                         if fi_e > 0 or fo_e > 0:
                             env = np.ones(cnt, dtype="float32")
                             if fi_e > 0:
                                 env = np.minimum(env, np.clip(tt / fi_e, 0, 1))
                             if fo_e > 0:
                                 env = np.minimum(env,
-                                                 np.clip((c["dur"] - tt) / fo_e, 0, 1))
+                                                 np.clip((seg_len - tt) / fo_e, 0, 1))
                             seg = seg * env
                         lo = int(round((a - t0) * SR))
                         hi = min(n, lo + cnt)
@@ -1682,13 +1715,59 @@ def _render_mix(sid, out_path, fmt="wav", only=None, bit_depth=16, quality="stan
                             if st_bin is None:
                                 # 每段片段按自己的 hrtf 数据集建渲染器（空 = 默认）
                                 st_bin = bin_states[key] = _make_binaural(SR, prof or None)
-                            bl, br = st_bin.render(
-                                seg[:hi - lo],
-                                az_env if az_env is not None else c.get("az"),
-                                el_env if el_env is not None else c.get("el"),
-                                d_env if d_env is not None else c.get("dist"))
-                            buf[lo:hi, 0] += bl
-                            buf[lo:hi, 1] += br
+                            if c["id"] not in bin_audio:
+                                # **整段一次渲染**，再按块切片叠加。
+                                # 以前是「每 1 秒调一次 render」：BinauralRenderer 的状态
+                                # 虽然会跨调用保留，但实测每块开头仍有 ~0.05 的相位跳变
+                                # （导出里每秒一声很轻的「嗒」，试听走 WebAudio 没有）。
+                                # 整段渲染绕开这个调用边界，实测与整条 render 逐样本一致。
+                                whole_n = max(1, int(round(c_len * SR)))
+                                s_all = rd.slice(src_off, whole_n)
+                                tt_all = np.arange(s_all.size, dtype="float32") / SR
+                                g_all = _kf_curve(kfg.get("gain"), tt_all,
+                                                  _kf_shape(kfg, "gain"))
+                                tgc = float(c["track_gain"])
+                                if g_all is None:
+                                    gv = tgc * float(c["gain"])
+                                    if gv != 1.0:
+                                        s_all = s_all * gv
+                                else:
+                                    if tgc != 1.0:
+                                        s_all = s_all * tgc
+                                    s_all = s_all * g_all
+                                fi_a, fo_a = float(c["fade_in"] or 0), float(c["fade_out"] or 0)
+                                fi_ae = max(fi_a, 0.003 if c_len > 0.02 else 0.0)
+                                fo_ae = max(fo_a, 0.003 if c_len > 0.02 else 0.0)
+                                if fi_ae > 0 or fo_ae > 0:
+                                    env_all = np.ones(s_all.size, dtype="float32")
+                                    if fi_ae > 0:
+                                        env_all = np.minimum(
+                                            env_all, np.clip(tt_all / fi_ae, 0, 1))
+                                    if fo_ae > 0:
+                                        env_all = np.minimum(
+                                            env_all,
+                                            np.clip((c_len - tt_all) / fo_ae, 0, 1))
+                                    s_all = s_all * env_all
+                                az_all, el_all, d_all = _kf_space_envs(kfg, tt_all, c)
+                                bl_a, br_a = st_bin.render(
+                                    s_all,
+                                    az_all if az_all is not None else c.get("az"),
+                                    el_all if el_all is not None else c.get("el"),
+                                    d_all if d_all is not None else c.get("dist"))
+                                bin_audio[c["id"]] = (bl_a, br_a)
+                                if len(bin_audio) > 24:
+                                    for old_id in list(bin_audio)[:-12]:
+                                        bin_audio.pop(old_id, None)
+                            o0 = int(round((a - c["start"]) * SR))
+                            bl_src, br_src = bin_audio[c["id"]]
+                            seg_l = bl_src[o0:o0 + (hi - lo)]
+                            seg_r = br_src[o0:o0 + (hi - lo)]
+                            if seg_l.size < (hi - lo):
+                                pad_n = (hi - lo) - seg_l.size
+                                seg_l = np.pad(seg_l, (0, pad_n))
+                                seg_r = np.pad(seg_r, (0, pad_n))
+                            buf[lo:hi, 0] += seg_l
+                            buf[lo:hi, 1] += seg_r
                             j += 1
                             continue
                         # 声像：有关键帧就逐样本插值，否则用静态值
@@ -1752,6 +1831,7 @@ def _render_mix(sid, out_path, fmt="wav", only=None, bit_depth=16, quality="stan
     dur = written / float(target) if target else 0.0
     return {"duration": round(dur, 3), "clips": len(clips), "size": size,
             "peak": round(peak_seen, 3),
+            "prepared": prep_stats["rebuilt"], "trimmed": trimmed,
             "kbps": round(size * 8 / max(0.001, dur) / 1000),
             "format": (fmt or "wav").lower(), "channels": ch, "sample_rate": target,
             "range": [round(rs, 3), round(re_, 3)], "total": round(total, 3)}

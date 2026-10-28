@@ -7301,7 +7301,9 @@
           `完成：${fmtShort(d.duration)}，${bytesTxt(d.size)}（${(d.format || "wav").toUpperCase()} ${d.kbps}kbps）` +
           (d.channels === 1 ? "，单声道" : "，立体声") +
           `，${((d.sample_rate || 44100) / 1000).toFixed(1)}kHz，耗时 ${d.seconds}s` +
-          (d.peak > 0.99 ? "，⚠ 峰值已贴上限（整体音量降 2~3dB 更安全）" : "") + "　"));
+          (d.peak > 0.99 ? "，⚠ 峰值已贴上限（整体音量降 2~3dB 更安全）" : "") +
+          (d.trimmed > 0 ? `，${d.trimmed} 段比音频长（已按实际长度收尾）` : "") +
+          (d.prepared > 0 ? `，重建 ${d.prepared} 段变速缓存` : "") + "　"));
         p.appendChild(a);
         toast("混音导出完成");
       } catch (e) { p.textContent = "失败：" + e.message; }

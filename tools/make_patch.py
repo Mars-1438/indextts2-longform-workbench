@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """生成长篇工作台「补丁包」（zip）：纯增量文件 + 安装器，不含模型/音频/测试脚本。
 
-产物：dist/IndexTTS2_全能音声工作台补丁_v0.19.zip
+产物：dist/IndexTTS2_全能音声工作台补丁_v0.20.zip
 内容：
   payload/longform_api.py lf_import.py timeline_api.py hrir.py rooms.py
   payload/web/{longform,timeline}.{html,css,js} emoctl.js
@@ -23,7 +23,7 @@ import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIST = os.path.join(ROOT, "dist")
-NAME = "IndexTTS2_全能音声工作台补丁_v0.19"
+NAME = "IndexTTS2_全能音声工作台补丁_v0.20"
 STAGE = os.path.join(DIST, NAME)
 PAYLOAD = os.path.join(STAGE, "payload")
 

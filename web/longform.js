@@ -862,6 +862,76 @@ function autoGrow(ta) {
   ta.style.height = Math.max(24, ta.scrollHeight) + "px";
 }
 
+/* ------------------------------ 标签跟随 ------------------------------
+   句子被拖动 / 重生成变长之后，标签（句中·句间）在时间轴上的落点怎么算。
+   设置存在工程的 project.tagfollow 里，时间轴与这里共用同一份。 */
+const TAG_FOLLOW_DEF = [
+  ["follow", "跟随句子（默认）",
+   "句子拖动、重生成变长，句中 · 句间标签都跟着移动；挂在这些标签上的音效一起动。"],
+  ["fixed", "固定首版位置",
+   "标签钉在第一次冻结的绝对时间上，句子怎么改都不动（适合「音效点不随台词变」的编排）。"],
+  ["inline", "只跟句中",
+   "句中标签跟着句子走，句间标签固定在首版位置。"],
+  ["between", "只跟句间",
+   "句间标签跟着句子走，句中标签固定在首版位置。"],
+];
+
+async function openTagFollow() {
+  if (!SCRIPT) return;
+  let mode = "follow";
+  let tags = 0;
+  try {
+    const d = await api(`/tl/${SCRIPT.id}`);
+    mode = ((d.project || {}).tagfollow || {}).mode || "follow";
+    tags = ((d.markers || []) || []).filter((m) => m.kind === "tag" || m.kind === "inline").length;
+  } catch (e) { /* 没有工程也能设置：下面照常发请求 */ }
+
+  const wrap = el("div", "tagpanel");
+  wrap.appendChild(el("div", "hint",
+    `当前工程里有 ${tags} 个标签。下面决定「句子变了，标签跟不跟」；`
+    + "标签挂的音效永远跟着标签走，不用单独设。"));
+
+  const name = "tfMode";
+  TAG_FOLLOW_DEF.forEach(([v, label, desc]) => {
+    const row = el("label", "tfopt");
+    const r = document.createElement("input");
+    r.type = "radio"; r.name = name; r.value = v;
+    r.checked = v === mode;
+    row.appendChild(r);
+    const box = el("span", "tftext");
+    box.appendChild(el("b", null, label));
+    box.appendChild(el("i", null, desc));
+    row.appendChild(box);
+    wrap.appendChild(row);
+  });
+
+  const snapWrap = el("label", "tfopt small");
+  const snap = document.createElement("input");
+  snap.type = "checkbox"; snap.checked = false;
+  snapWrap.appendChild(snap);
+  snapWrap.appendChild(el("span", "tftext", "同时按当前位置重新冻结（把现在的落点当作「首版」）"));
+  wrap.appendChild(snapWrap);
+  wrap.appendChild(el("div", "hint",
+    "「固定首版位置 / 只跟句中 / 只跟句间」第一次会记下当前所有标签的落点；"
+    + "之后不满意可以再回来勾上面这项重取一次。"));
+
+  modal("标签跟随", wrap, async () => {
+    const picked = wrap.querySelector(`input[name="${name}"]:checked`);
+    const v = picked ? picked.value : "follow";
+    try {
+      const r = await api(`/tl/${SCRIPT.id}/tagfollow`, {
+        method: "POST", body: { mode: v, resnap: snap.checked },
+      });
+      const label = (TAG_FOLLOW_DEF.find((x) => x[0] === v) || [])[1] || v;
+      toast(`标签跟随：${label}` + (r.frozen ? `（冻结 ${r.frozen} 个标签位置）` : "")
+        + (v === "follow" ? "" : "　进时间轴就能看到落点变化"));
+    } catch (e) {
+      toast("设置失败：" + e.message, true);
+      return false;
+    }
+  }, "保存");
+}
+
 /* ------------------------------ 工作台 ------------------------------ */
 function renderBoard() {
   const box = $("board");
@@ -1657,7 +1727,9 @@ function openInlinePicker(line, ta, forcePos) {
     rememberTag(name);
     const p = posCtl.get();
     line.inline = (line.inline || []).concat([{
-      pos: p, tag: name, hold: hold.get(), sfx: sfx.get(),
+      /* k = 稳定键：时间轴「标签跟随=固定」按它记冻结位置。
+         不能拿下标当键（inline 按 pos 排序，改个位置就串位）。 */
+      k: uid().slice(1, 9), pos: p, tag: name, hold: hold.get(), sfx: sfx.get(),
     }]);
     line.inline.sort((a, b) => a.pos - b.pos);
     commitSnapshot("插入句中标签 " + name);
@@ -6723,6 +6795,7 @@ function initHeader() {
   const bs = $("btnSfxLib");
   if (bs) bs.onclick = () => openDrawer("sfx");
   $("btnPresets").onclick = () => openDrawer("presets");
+  if ($("btnTagFollow")) $("btnTagFollow").onclick = openTagFollow;
   const jr = $("btnJumpRef");
   if (jr) jr.onclick = () => openDrawer("voice");
   const js = $("btnJumpSfx");

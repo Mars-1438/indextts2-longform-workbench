@@ -1666,7 +1666,13 @@ def _normalize_line(ln):
                 except (TypeError, ValueError):
                     igain = 1.0
                 isfx = {"mid": imid, "gain": round(max(0.0, min(4.0, igain)), 3)}
-        inline.append({"pos": pos, "tag": str(it["tag"])[:40],
+        # 句中标签带一个**稳定键** k：时间轴的「标签跟随=固定」按它记冻结位置。
+        # 不能拿下标当键 —— inline 按 pos 排序，改一下位置下标就变了，
+        # 冻结的位置会张冠李戴（标签 A 跑到标签 B 的位置上）。
+        ik = _UIDS_RE.sub("", str(it.get("k") or ""))[:10]
+        if not ik:
+            ik = _new_uid()[:8]
+        inline.append({"pos": pos, "tag": str(it["tag"])[:40], "k": ik,
                        "hold": ihold, "sfx": isfx})
     inline.sort(key=lambda x: (x["pos"], x["tag"]))
     return {

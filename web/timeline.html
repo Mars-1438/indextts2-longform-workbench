@@ -17,7 +17,7 @@
   });
 })();
 </script>
-<link rel="stylesheet" href="/timeline-assets/timeline.css?v=20261027f">
+<link rel="stylesheet" href="/timeline-assets/timeline.css?v=20261029a">
 </head>
 <body>
 <div class="tl-app">
@@ -187,6 +187,18 @@
             <i class="mcount" id="markerCount">0</i></span>
           <button class="sec-toggle" id="tgMarker" title="折叠/展开">▾</button>
         </div>
+        <!-- 标签跟随：句子被拖动 / 重生成变长之后，句中·句间标签要不要跟着挪 -->
+        <div class="tagfollow">
+          <span class="tf-lab" title="标签在时间轴上的落点怎么算：跟着句子走，还是钉在第一次的位置">标签跟随</span>
+          <select class="sel mini" id="tagFollowMode">
+            <option value="follow">跟随句子（默认）</option>
+            <option value="fixed">固定首版位置</option>
+            <option value="inline">只跟句中</option>
+            <option value="between">只跟句间</option>
+          </select>
+          <button class="iconbtn" id="btnTagFollowSnap" type="button"
+                  title="把标签位置按当前句子重新冻结一次（「跟随句子」模式下不需要）">⟳</button>
+        </div>
         <div id="markerList" class="markerlist"></div>
       </div>
     </aside>
@@ -238,6 +250,6 @@
 </div>
 
 <script src="/timeline-assets/emoctl.js"></script>
-<script src="/timeline-assets/timeline.js?v=20261027f"></script>
+<script src="/timeline-assets/timeline.js?v=20261029a"></script>
 </body>
 </html>

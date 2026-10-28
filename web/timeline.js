@@ -2205,7 +2205,10 @@
          但它被搬到哪条轨必须写进 project.tagfx，否则一刷新就被 _build 拉回原来那条轨，
          表现出来就是「别的片段自己挪了位置、还叠上去了」。 */
       p.tagfx = p.tagfx || {};
-      const o = p.tagfx[c.from_tag] || {};
+      /* tfx = 这条派生音效的覆写键：句间标签就是标签行 uid，
+         句中标签是「uid#k」—— 同一句可能挂好几个句中音效，不能共用一个键。 */
+      const tkey = c.tfx || c.from_tag;
+      const o = p.tagfx[tkey] || {};
       o.track = c.track;
       o.gain = c.gain;
       o.mute = !!c.mute;
@@ -2217,7 +2220,7 @@
       o.send = Number(c.send) || 0;
       o.hrtf = c.hrtf || "";
       o.sp_preset = c.sp_preset || "";
-      p.tagfx[c.from_tag] = o;
+      p.tagfx[tkey] = o;
     } else {
       const item = (p.sfx || []).find((s) => s.id === c.id);
       if (item) {
@@ -6416,6 +6419,46 @@
   }
 
   /* ------------------------------ 标记 ------------------------------ */
+  /* ------------------------------ 标签跟随 ------------------------------
+     follow  : 标签跟着句子走（句子拖走 / 重生成变长，标签跟着动）
+     fixed   : 钉在第一次冻结的位置（绝对时间）
+     inline  : 只有句中标签跟着走
+     between : 只有句间标签跟着走
+     标签挂的音效是派生的，位置永远等于标签落点 —— 标签怎么动，音效就怎么动。 */
+  const TAG_FOLLOW_TIP = {
+    follow: "标签跟着句子走：句子拖动 / 重生成变长，句中·句间标签和它们的音效一起移动",
+    fixed: "标签钉在第一次冻结的位置，句子怎么变都不动",
+    inline: "只有句中标签跟着句子走，句间标签固定在首次位置",
+    between: "只有句间标签跟着句子走，句中标签固定在首次位置",
+  };
+
+  function syncTagFollowUI() {
+    const sel = $("tagFollowMode");
+    if (!sel) return;
+    const m = ((S.data && S.data.project && S.data.project.tagfollow) || {}).mode || "follow";
+    sel.value = m;
+    sel.title = TAG_FOLLOW_TIP[m] || "";
+  }
+
+  async function setTagFollow(mode, resnap) {
+    if (!S.data) return;
+    try {
+      const r = await fetch(`${API}/tagfollow`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode, resnap: !!resnap }),
+      });
+      const b = await r.json().catch(() => ({}));
+      if (!r.ok) { toast("设置失败：" + (b.detail || r.status), true); return; }
+      toast(`标签跟随：${b.label || mode}`
+        + (b.frozen ? `（冻结 ${b.frozen} 个标签位置）` : "")
+        + (mode === "follow" ? "" : "　不满意就再选一次「重新取当前位置」"));
+      if (S.dirty) await save();
+      await reload();
+    } catch (e) {
+      toast("设置失败：" + e.message, true);
+    }
+  }
+
   function drawMarkersList() {
     const box = $("markerList");
     box.innerHTML = "";
@@ -6428,13 +6471,20 @@
       return;
     }
     for (const m of S.data.markers) {
-      const row = el("div", "markerrow");
+      const row = el("div", "markerrow" + (m.pinned ? " pinned" : ""));
       row.appendChild(el("span", "mt", fmt(m.time)));
       row.appendChild(el("span", "mg",
         (m.custom ? "〔标记〕" : (m.inline ? "〔句中〕" : "〔句间〕")) + (m.name || "")));
-      if (m.sfx_mid) {
+      if (m.pinned) {
+        const pin = el("span", "mpin", "📌");
+        pin.title = "按「标签跟随」设置，这个标签固定在首次位置，不跟句子走";
+        row.appendChild(pin);
+      }
+      const hasSfx = m.sfx_mid || (m.sfx && m.sfx.mid);
+      if (hasSfx) {
         const b = el("span", "mfromtag", "🔔");
-        b.title = "这个标签挂了音效：已在素材轨上自动放好（位置 = 标签时间 + 留白）";
+        b.title = "这个标签挂了音效：已在素材轨上自动放好（位置 = 标签落点"
+          + (m.inline ? "" : " + 留白") + "），标签怎么动它就怎么动";
         row.appendChild(b);
       }
       const tools = el("span", "mi");
@@ -8341,6 +8391,7 @@
     drawInspector();
     updateZoomTag();
     drawMarkersList();
+    syncTagFollowUI();
     refreshMeterModes();
     loadMedia();
     resize();
@@ -8481,6 +8532,18 @@
     $("btnSnap").classList.toggle("on", S.snap);
     toast(S.snap ? "吸附已开" : "吸附已关");
   };
+  const tfSel = $("tagFollowMode");
+  if (tfSel) {
+    tfSel.onchange = () => setTagFollow(tfSel.value, false);
+  }
+  const tfSnap = $("btnTagFollowSnap");
+  if (tfSnap) {
+    tfSnap.onclick = () => {
+      const m = ((S.data && S.data.project && S.data.project.tagfollow) || {}).mode || "follow";
+      if (m === "follow") { toast("「跟随句子」不需要冻结位置 —— 标签本来就跟着句子走"); return; }
+      setTagFollow(m, true);
+    };
+  }
   const bHov = $("btnHoverInsOn");
   if (bHov) {
     bHov.classList.toggle("on", HOVER_INS_ON);

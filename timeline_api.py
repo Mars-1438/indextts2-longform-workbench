@@ -137,6 +137,14 @@ def _default_project():
         "tagfx": {},
         "kf": {},
         "marks": [],
+        # 标签跟随：标签（句中 / 句间）在时间轴上的落点怎么算
+        #   follow  跟着句子走（默认：句子拖走 / 重生成变长，标签跟着动）
+        #   fixed   固定成第一次冻结的绝对时间
+        #   inline  只有句中标签跟着走，句间标签固定
+        #   between 只有句间标签跟着走，句中标签固定
+        "tagfollow": {"mode": "follow"},
+        # 冻结下来的标签时间：{"t:<uid>": 12.3, "i:<uid>:<k>": 4.5}
+        "tagpos": {},
         "rev": 0,
     }
 
@@ -150,6 +158,15 @@ def _default_project():
 KF_PROPS = {"gain": (0.0, 4.0, 4), "pan": (-1.0, 1.0, 3), "az": (-180.0, 180.0, 2)}
 KF_MAX_POINTS = 1024          # 每个属性的关键帧上限（原来 240，长片段铺细会不够）
 KF_MAX_CLIPS = 2000
+
+# 「标签跟随」的四种口径（见 _default_project 注释）
+TAG_FOLLOW_MODES = ("follow", "fixed", "inline", "between")
+TAG_FOLLOW_LABELS = {
+    "follow": "跟随句子",
+    "fixed": "固定首版位置",
+    "inline": "只跟句中",
+    "between": "只跟句间",
+}
 
 
 def _clean_kf(raw):
@@ -740,9 +757,40 @@ def _load_project(sid):
             item.update(_spatial_of(s))       # 空间位置 / HRIR / 混响
             p["sfx"].append(item)
 
+    tf = raw.get("tagfollow")
+    if isinstance(tf, dict) and tf.get("mode") in TAG_FOLLOW_MODES:
+        p["tagfollow"] = {"mode": tf["mode"]}
+    tp = raw.get("tagpos")
+    if isinstance(tp, dict):
+        clean_tp = {}
+        for k, v in list(tp.items())[:1200]:
+            if not isinstance(k, str) or not k:
+                continue
+            try:
+                clean_tp[k[:60]] = round(max(0.0, min(100000.0, float(v))), 4)
+            except (TypeError, ValueError):
+                continue
+        p["tagpos"] = clean_tp
+
     # 标签音效的位置是「标签时间 + 留白」派生出来的，但「放在哪条素材轨」必须持久化，
     # 否则整理重叠 / 手动换轨之后，一刷新就被 _build 塞回第一条素材轨 —— 表现就是
     # 「删掉一个素材，别的片段自己挪走了，还叠在一起」。
+    tf = raw.get("tagfollow")
+    if isinstance(tf, dict):
+        if tf.get("mode") in TAG_FOLLOW_MODES:
+            p["tagfollow"] = {"mode": tf["mode"]}
+    tp = raw.get("tagpos")
+    if isinstance(tp, dict):
+        clean_tp = {}
+        for k, v in list(tp.items())[:1200]:
+            if not isinstance(k, str) or not k:
+                continue
+            try:
+                clean_tp[k[:60]] = round(max(0.0, min(100000.0, float(v))), 4)
+            except (TypeError, ValueError):
+                continue
+        p["tagpos"] = clean_tp
+
     tfx = raw.get("tagfx")
     if isinstance(tfx, dict):
         for uid, ov in list(tfx.items())[:600]:
@@ -962,68 +1010,111 @@ def _build(sid, script=None, project=None):
                 return tid
         return sfx_track
 
+    # ---- 标签跟随 ----------------------------------------------------------
+    # 标签的落点有两种口径：跟着句子算（derived），或沿用第一次冻结的绝对时间。
+    # 以前一律「跟着台本流位置算」—— 句子被拖走之后，标签还停在原来的流位置上，
+    # 看起来就是「标签钉死不动」。
+    tf = p.get("tagfollow") or {}
+    tf_mode = tf.get("mode") if tf.get("mode") in TAG_FOLLOW_MODES else "follow"
+    tf_pos = p.get("tagpos") or {}
+    tag_cursor = 0.0          # 句间标签的当前落点 = 上一句音频的真实结束（含拖动覆盖）
+
+    def _tag_follows(inline):
+        """这一类标签在当前口径下要不要跟着句子走。"""
+        if tf_mode == "follow":
+            return True
+        return (tf_mode == "inline" and inline) or (tf_mode == "between" and not inline)
+
+    def _tag_time(key, derived, inline):
+        if _tag_follows(inline):
+            return derived
+        v = tf_pos.get(key)
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return derived
+
+    def _tag_sfx_clip(tfx_key, sf, at, tag_name, idx, uid, inline=False):
+        """把一个标签挂的音效做成「派生片段」：位置 = 标签最终落点，不可拖不可删。"""
+        mid = (sf or {}).get("mid")
+        item = sfx_item(mid) if mid else None
+        if not item:
+            return None
+        media_name = os.path.basename(item["file"]) if item.get("file") else ""
+        if not media_name:
+            return None
+        dst = os.path.join(_media_dir(sid), media_name)
+        if not os.path.exists(dst):
+            src = sfx_path_of(mid)
+            if src:
+                try:
+                    shutil.copy2(src, dst)
+                except OSError as e:  # noqa: BLE001
+                    _log("timeline: copy tag sfx failed %s: %s", src, e, level="warning")
+        dur_t = round(max(0.05, float(item.get("dur") or 0.05)), 4)
+        st_t = round(max(0.0, float(at)), 4)
+        ov_t = tfx_ov.get(tfx_key) or tfx_ov.get(uid) or {}
+        tid_t = ov_t.get("track")
+        if tid_t not in sfx_track_ids:
+            tid_t = _free_sfx_track(st_t, st_t + dur_t)
+        sfx_occ.setdefault(tid_t, []).append((st_t, st_t + dur_t))
+        label = ("〔%s〕%s" % (tag_name, item.get("name") or media_name))
+        return {
+            "id": ("tagsfx_i_" if inline else "tagsfx_") + uid
+                  + (("_" + str(tfx_key).split("#")[-1]) if inline else ""),
+            "kind": "sfx", "track": tid_t,
+            "uid": None, "index": idx,
+            "text": label, "name": label,
+            "media": media_name,
+            "start": st_t, "dur": dur_t, "src_dur": dur_t, "offset": 0.0,
+            "gain": float((sf or {}).get("gain") if (sf or {}).get("gain") is not None
+                          else (ov_t.get("gain") if ov_t.get("gain") is not None else 1.0)),
+            "pan": 0.0, "speed": 1, "reverse": False,
+            "az": float(ov_t.get("az") or 0),
+            "el": float(ov_t.get("el") or 0),
+            "dist": float(ov_t.get("dist") if ov_t.get("dist") is not None else 1.0),
+            "binaural": bool(ov_t.get("binaural")),
+            "room": (ov_t.get("room") or ""),
+            "send": float(ov_t.get("send") or 0),
+            "hrtf": (ov_t.get("hrtf") or ""),
+            "sp_preset": (ov_t.get("sp_preset") or ""),
+            "mute": bool(ov_t.get("mute")),
+            "locked": True,
+            "fade_in": 0.0, "fade_out": 0.0,
+            "has_audio": bool(dst) and os.path.exists(dst),
+            "file_rev": (_mtime_int(dst) if dst and os.path.exists(dst) else 0),
+            "playable": bool(dst) and os.path.exists(dst),
+            "stale": False, "status": "done", "moved": True, "changes": [],
+            "from_tag": uid, "from_inline": (tfx_key if inline else None),
+            "tfx": tfx_key, "tag_name": tag_name,
+        }
+
     for idx, line in enumerate(script["lines"], start=1):
         if line.get("kind") == "tag":
             hold = int(line.get("hold") or 0) / 1000.0
-            tag_time = cursor
             sf = line.get("sfx") if isinstance(line.get("sfx"), dict) else None
             sf_mid = (sf or {}).get("mid") or None
-            markers.append({"id": "m_" + line["uid"], "time": round(tag_time, 3),
-                            "name": line.get("tag") or "标签", "kind": "tag",
-                            "uid": line["uid"], "index": idx,
-                            "hold": round(hold, 3), "inline": False,
-                            "sfx_mid": sf_mid})
-            # 标签挂了音效：固定落在「标签时间 + 留白」处，锁死位置（要挪就改留白）
+            tag_name = line.get("tag") or "标签"
+            # 句间标签的落点：默认 = 上一句音频的**真实结束**（含拖动 / 重排后的位置），
+            # 不是台本的流位置 —— 否则句子被拖走之后标签还钉在原地。
+            tk = "t:" + line["uid"]
+            tag_time = _tag_time(tk, tag_cursor, False)
+            marker = {"id": "m_" + line["uid"], "time": round(tag_time, 3),
+                      "name": tag_name, "kind": "tag",
+                      "uid": line["uid"], "index": idx, "key": tk,
+                      "hold": round(hold, 3), "inline": False,
+                      "sfx_mid": sf_mid}
+            # pinned = 「这一类标签被固定住了」（不是「此刻位置刚好和派生值不同」）：
+            # 用户看到 📌 就应该知道「它不会跟句子走」，哪怕现在两者数值一样。
+            if not _tag_follows(False):
+                marker["pinned"] = True
+            markers.append(marker)
+            # 标签挂了音效：落在「标签时间 + 留白」处，跟着标签走（位置由标签决定）
             if sf_mid:
-                item = sfx_item(sf_mid)
-                media_name = os.path.basename(item["file"]) if item else ""
-                dst = os.path.join(_media_dir(sid), media_name) if media_name else ""
-                if dst and not os.path.exists(dst):
-                    src = sfx_path_of(sf_mid)
-                    if src:
-                        try:
-                            shutil.copy2(src, dst)
-                        except OSError as e:  # noqa: BLE001
-                            _log("timeline: copy tag sfx failed %s: %s", src, e, level="warning")
-                if item:
-                    tag_name = line.get("tag") or "标签"
-                    dur_t = round(max(0.05, float(item.get("dur") or 0.05)), 4)
-                    st_t = round(tag_time + hold, 4)
-                    ov_t = tfx_ov.get(line["uid"]) or {}
-                    tid_t = ov_t.get("track")
-                    if tid_t not in sfx_track_ids:
-                        tid_t = _free_sfx_track(st_t, st_t + dur_t)
-                    sfx_occ.setdefault(tid_t, []).append((st_t, st_t + dur_t))
-                    clips.append({
-                        "id": "tagsfx_" + line["uid"], "kind": "sfx", "track": tid_t,
-                        "uid": None, "index": idx,
-                        "text": f"〔{tag_name}〕{item.get('name') or media_name}",
-                        "name": f"〔{tag_name}〕{item.get('name') or media_name}",
-                        "media": media_name,
-                        "start": st_t,
-                        "dur": dur_t,
-                        "src_dur": dur_t,
-                        "offset": 0.0,
-                        "gain": float((sf or {}).get("gain") if (sf or {}).get("gain") is not None
-                                      else (ov_t.get("gain") if ov_t.get("gain") is not None else 1.0)),
-                        "pan": 0.0, "speed": 1, "reverse": False,
-                        "az": float(ov_t.get("az") or 0),
-                        "el": float(ov_t.get("el") or 0),
-                        "dist": float(ov_t.get("dist") if ov_t.get("dist") is not None else 1.0),
-                        "binaural": bool(ov_t.get("binaural")),
-                        "room": (ov_t.get("room") or ""),
-                        "send": float(ov_t.get("send") or 0),
-                        "hrtf": (ov_t.get("hrtf") or ""),
-                        "sp_preset": (ov_t.get("sp_preset") or ""),
-                        "mute": bool(ov_t.get("mute")),
-                        "locked": True,
-                        "fade_in": 0.0, "fade_out": 0.0,
-                        "has_audio": bool(dst) and os.path.exists(dst),
-                        "file_rev": (_mtime_int(dst) if dst and os.path.exists(dst) else 0),
-                        "playable": bool(dst) and os.path.exists(dst),
-                        "stale": False, "status": "done", "moved": True, "changes": [],
-                        "from_tag": line["uid"], "tag_name": tag_name,
-                    })
+                clip = _tag_sfx_clip(line["uid"], sf, tag_time + hold, tag_name, idx, line["uid"])
+                if clip:
+                    clips.append(clip)
+            tag_cursor = tag_time + hold
             cursor += hold
             continue
         text = (line.get("text") or "").strip()
@@ -1111,12 +1202,28 @@ def _build(sid, script=None, project=None):
                 hold_ms = max(0, int(it.get("hold") or 0))
             except (TypeError, ValueError):
                 hold_ms = 0
-            t = start + (pos / max(1, len(text))) * dur + hold_ms / 1000.0
-            markers.append({"id": "i_" + line["uid"] + "_" + str(pos) + "_" + str(i_it),
-                            "time": round(t, 3), "name": it.get("tag") or "标签",
-                            "kind": "inline", "uid": line["uid"], "index": idx,
-                            "hold": round(hold_ms / 1000.0, 3), "inline": True,
-                            "pos": pos, "sfx": it.get("sfx") or None})
+            derived = start + (pos / max(1, len(text))) * dur + hold_ms / 1000.0
+            ik = "i:" + line["uid"] + ":" + str(it.get("k") or i_it)
+            t = _tag_time(ik, derived, True)
+            m2 = {"id": "i_" + line["uid"] + "_" + str(pos) + "_" + str(i_it),
+                  "time": round(t, 3), "name": it.get("tag") or "标签",
+                  "kind": "inline", "uid": line["uid"], "index": idx, "key": ik,
+                  "hold": round(hold_ms / 1000.0, 3), "inline": True,
+                  "pos": pos, "sfx": it.get("sfx") or None}
+            if not _tag_follows(True):
+                m2["pinned"] = True
+            markers.append(m2)
+            isf = it.get("sfx") if isinstance(it.get("sfx"), dict) else None
+            if isf and isf.get("mid"):
+                # 句中标签挂的音效以前只画一条标记线，**不生成片段、混音里也没有** ——
+                # 用户挂了音效却听不到。现在和句间标签一样派生成片段，跟着标签走。
+                ic = _tag_sfx_clip(line["uid"] + "#" + str(it.get("k") or i_it), isf,
+                                   t, it.get("tag") or "标签", idx, line["uid"], inline=True)
+                if ic:
+                    clips.append(ic)
+        # 句间标签的落点基准：这一句的**实际**结束（拖动 / 变速 / 重生成之后都会变）。
+        # 这里直接覆盖、不做 max：句子被往左拖时标签也要跟着回退，否则又会「钉住」。
+        tag_cursor = start + dur
         cursor = base_start + base_dur + int(_eff(line, script)["pause"]) / 1000.0
 
     for s in p.get("sfx") or []:
@@ -2061,6 +2168,55 @@ def register_timeline(app, deps=None):
         with _lock():
             p = _save_project(sid, req or {})
         return {"ok": True, "project": p}
+
+    @_LF.post("/lf/tl/{sid}/tagfollow")
+    def tl_tagfollow(sid: str, req: dict = Body(default={})):
+        """设置「标签跟随」口径。
+
+        mode: follow / fixed / inline / between
+        resnap: 切到固定类口径时，是否用**当前**标签位置重新冻结
+                （不带就只补那些还没冻结过的标签，已有的保持第一次的位置）
+        """
+        sid = _safe_sid(sid)
+        mode = str(req.get("mode") or "follow").lower()
+        if mode not in TAG_FOLLOW_MODES:
+            raise HTTPException(400, "不认识的标签跟随模式：" + mode)
+        resnap = bool(req.get("resnap"))
+        with _lock():
+            p = _load_project(sid)
+            frozen = dict(p.get("tagpos") or {})
+            frozen_n = 0
+            if mode != "follow":
+                # 先用「全部跟随」算一遍当前位置：这就是要冻结的那份值
+                probe = dict(p)
+                probe["tagfollow"] = {"mode": "follow"}
+                probe["tagpos"] = {}
+                built = _build(sid, script=_load_script(sid), project=probe)
+                now = {}
+                for m in built.get("markers") or []:
+                    k = m.get("key")
+                    if not k:
+                        continue
+                    k = str(k)[:60]
+                    inline = bool(m.get("inline"))
+                    # 要冻结的那一类：fixed = 两类都冻；inline = 冻句间；between = 冻句中
+                    want = (mode in ("fixed", "between")) if inline else (mode in ("fixed", "inline"))
+                    if want:
+                        now[k] = round(max(0.0, float(m.get("time") or 0)), 4)
+                for k, v in now.items():
+                    if resnap or k not in frozen:
+                        frozen[k] = v
+                        frozen_n += 1
+            raw = _read_json(_proj_path(sid), {})
+            if not isinstance(raw, dict):
+                raw = {}
+            raw["tagfollow"] = {"mode": mode}
+            raw["tagpos"] = frozen
+            _write_json(_proj_path(sid), raw)
+        _log("timeline: tagfollow %s -> %s (frozen %d)", sid, mode, frozen_n)
+        return {"ok": True, "tagfollow": {"mode": mode},
+                "label": TAG_FOLLOW_LABELS.get(mode, mode),
+                "frozen": frozen_n, "tagpos": len(frozen)}
 
     # ---- 音轨 ---------------------------------------------------------------
     @_LF.post("/lf/tl/{sid}/tracks")

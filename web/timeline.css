@@ -1174,3 +1174,16 @@ html[data-theme="dark"] .bulkbar { box-shadow: 0 8px 24px rgba(0, 0, 0, .5); }
 .propgrid .chkrow .sub { color: var(--faint); font-size: 9.5px; }
 #modalTitle { }
 .mask .modal .field > .fl { margin-top: 8px; }
+
+/* 「标签跟随」一行：放在标记分区标题下面 */
+.tagfollow {
+  display: flex; align-items: center; gap: 5px;
+  padding: 0 0 5px; margin-bottom: 3px;
+  border-bottom: 1px dashed var(--border);
+}
+.tagfollow .tf-lab { font-size: 11px; color: var(--faint); flex: none; }
+.tagfollow .sel { flex: 1; min-width: 0; font-size: 11px; height: 22px; padding: 0 4px; }
+.tagfollow .iconbtn { flex: none; width: 22px; height: 22px; padding: 0; font-size: 11px; }
+/* 被「固定」住的标签：图标换成图钉色，提示它不跟句子走 */
+.markerrow.pinned .mg { color: var(--warn); }
+.markerrow .mpin { font-size: 9.5px; color: var(--warn); margin-left: 3px; }

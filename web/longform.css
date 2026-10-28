@@ -1380,7 +1380,12 @@ pre.impsample {
 }
 .tsbtn:hover { border-color: var(--primary); color: var(--primary); }
 /* 进度块现在挂在面板顶部，跟着走一条分割线 */
-.lf-panel > .progresswrap { flex: none; border-bottom: 1px solid var(--border); }
+/* 顶部状态条下面的进度块：以前没有左右内边距，文字/进度条贴着面板边缘（窄屏时还会被裁掉） */
+.lf-panel > .progresswrap {
+  flex: none; padding-left: 12px; padding-right: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.lf-panel > .topstat { padding-left: 12px; padding-right: 12px; }
 
 /* 空闲时把进度块收起来（模型/依赖状态条仍在上面） */
 .progresswrap.idle .prow,
@@ -1468,3 +1473,17 @@ pre.impsample {
 .rsum-d { flex: none; width: 52px; text-align: right; font-family: var(--mono); color: var(--muted); }
 .rsum-s { flex: none; width: 52px; text-align: right; font-size: 11px; color: var(--muted); }
 .rsum-row.bad .rsum-s { color: var(--danger); }
+
+/* 「标签跟随」弹窗里的四个方案 */
+.tfopt {
+  display: flex; align-items: flex-start; gap: 7px;
+  padding: 6px 8px; margin-bottom: 5px; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
+}
+.tfopt:hover { border-color: var(--primary-line); background: var(--primary-soft); }
+.tfopt input { margin-top: 2px; accent-color: var(--primary); flex: none; }
+.tfopt .tftext { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.tfopt .tftext b { font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.tfopt .tftext i { font-style: normal; font-size: 11.5px; color: var(--muted); line-height: 1.45; }
+.tfopt.small { padding: 5px 8px; align-items: center; }
+.tfopt.small .tftext { font-size: 11.5px; color: var(--muted); }

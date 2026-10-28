@@ -1521,3 +1521,13 @@ pre.impsample {
 .setfold > summary::before { content: "▸"; color: var(--faint); font-size: 11px; }
 .setfold[open] > summary::before { content: "▾"; }
 .setfold[open] > summary { margin-bottom: 6px; }
+
+/* 参数预设：弹窗里的快捷条 + 设置里的列表 */
+.presetrow { gap: 6px; margin: 0 0 8px; align-items: center; }
+.preset-sum {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.presetlist { max-height: 240px; }
+.presetpick { max-height: 320px; }
+.presetpick .refitem { cursor: default; }

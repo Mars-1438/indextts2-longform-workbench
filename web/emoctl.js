@@ -451,6 +451,20 @@
         };
       },
       setMode(m) { modeSel.value = m == null ? "" : String(m); paintMode(); },
+      /* 一次性灌一套参数（参数预设套用）。字段和 read() 对称：
+         emo_mode / emo_weight / emo_vec / emo_text / emo_ref；缺的项不动。 */
+      apply(p) {
+        p = p || {};
+        if (p.emo_mode != null) this.setMode(p.emo_mode);
+        if (p.emo_weight != null) {
+          wt.value = String(p.emo_weight);
+          wt.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        if (Array.isArray(p.emo_vec)) vecBox.set(p.emo_vec);
+        if (p.emo_text != null) txt.value = String(p.emo_text || "");
+        if (p.emo_ref !== undefined) audioBox.set(p.emo_ref || "");
+        paintMode();
+      },
       refreshRefs(list) { refs = (list || []).slice(); audioBox.refreshRefs(refs); },
       stop() { audioBox.stop(); },
       get mode() { return curModeVal(); },

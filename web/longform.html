@@ -45,7 +45,6 @@
     <button id="btnVoiceLib" class="btn" title="音色素材库：参考音频 + 导入台（视频抽音频 / 去伴奏 / 降噪…）">🎙 音色素材库</button>
     <button id="btnSfxLib" class="btn" title="音效素材库：给台本标签挂的音效，可上传 / 处理 / 复制改名">🔔 音效素材库</button>
     <button id="btnTagFollow" class="btn" title="标签跟随：句子拖动 / 重生成之后，句中·句间标签（以及它们挂的音效）要不要跟着走">🏷 标签跟随</button>
-    <button id="btnPresets" class="btn" title="参数预设：把音色+情感+停顿+采样打包记住">参数预设</button>
     <button id="btnStorage" class="btn ghost" title="存储清理：回收站 / 导出产物 / 历史快照 / 波形缓存 / 重复素材，一目了然地看着删">🧹 清理空间</button>
     <button id="btnStopAudio" class="btn ghost" title="停止所有正在播放的音色 / 音效 / 试听（Esc）">⏹ 停止播放</button>
   </div>
@@ -439,6 +438,19 @@
         </div>
         <div class="pfoot"><button id="btnSaveSettings" class="btn primary grow">保存设置</button></div>
         <div class="hint">这些是「这台机器」的偏好，存在 <code>longform/settings.json</code>，所有台本共用。</div>
+
+        <div class="sec-h" style="margin-top:16px">参数预设</div>
+        <div class="hint">
+          预设 = 一套生成参数（音色 / 情感 / 停顿 / Token），跨台本共用。
+          可以套到「台本默认」，也可以在句子的右键菜单、批量改属性、分组、时间轴片段上直接套用。
+        </div>
+        <div class="libacts">
+          <input id="presetName" class="inp grow" placeholder="预设名称（如：哄睡低沉男声）">
+          <button id="btnSavePreset" class="btn" title="把当前「台本默认参数」存成预设">存成预设</button>
+          <button id="btnPresetRefresh" class="iconbtn" title="刷新预设列表">⟳</button>
+        </div>
+        <div id="presetHint" class="libhint"></div>
+        <div id="presetList" class="reflist liblist presetlist"></div>
 
         <details class="setfold" style="margin-top:16px">
           <summary>台本默认参数（音色 / 情感 / 停顿 / 分行 / 采样）</summary>
@@ -870,24 +882,6 @@
       </div>
 
       <!-- 参数预设 -->
-      <div class="ppane" data-pane="presets">
-        <div class="libacts">
-          <input id="presetName" class="inp grow" placeholder="预设名称（如：哄睡低沉男声）">
-          <button id="btnSavePreset" class="btn primary" title="把当前「全局默认参数」存成一个预设">保存当前默认</button>
-        </div>
-        <div class="libbar">
-          <input id="presetSearch" class="inp libsearch" placeholder="搜预设名…" autocomplete="off">
-          <button id="btnPresetRefresh" class="btn mini ghost" type="button" title="刷新预设列表">⟳</button>
-          <span id="presetCount" class="libcount">0 个</span>
-        </div>
-        <div id="presetHint" class="libhint"></div>
-        <div id="presetList" class="reflist liblist"></div>
-        <div class="libfoot">
-          <b>用在哪：</b>点名字或 ✓ 应用，会写入「全局默认参数」——之后新建的行、以及没单独覆盖的行都用它。
-          预设里打包了音色 + 情感模式/权重 + 停顿 + 采样参数。
-        </div>
-      </div>
-
     </div>
   </div>
 </div>
@@ -918,6 +912,7 @@
 <div id="toast" class="toast" hidden></div>
 
 <script src="/longform-assets/emoctl.js?v=20261029c"></script>
+<script src="/longform-assets/genparams.js?v=20261029c"></script>
 <script src="/longform-assets/longform.js?v=20261029c"></script>
 </body>
 </html>

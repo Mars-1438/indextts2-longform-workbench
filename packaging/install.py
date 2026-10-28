@@ -350,7 +350,7 @@ def do_restore(root):
     log(f"已从备份 {stamp} 还原 {n} 个文件（server.py / index.html 回到补丁前）。")
     log("注意：补丁**新增**的文件不会被删除。要彻底撤掉，请删掉 longform_api.py、"
         "lf_import.py、timeline_api.py、hrir.py、rooms.py、web\\longform.*、"
-        "web\\timeline.*、web\\emoctl.js（assets\\hrir、_vendor、vendor2 可留可删）。")
+        "web\\timeline.*、web\\emoctl.js、web\\genparams.js（assets\\hrir、_vendor、vendor2 可留可删）。")
     return True
 
 

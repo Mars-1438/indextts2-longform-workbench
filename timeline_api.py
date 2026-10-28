@@ -3316,7 +3316,7 @@ def register_timeline(app, deps=None):
     def tl_asset(name: str):
         base = os.path.basename(name)
         # 时间轴页用到的前端资源：自己的 timeline.*，以及与台本页共用的 emoctl.js
-        if not (base.startswith("timeline.") or base == "emoctl.js"):
+        if not (base.startswith("timeline.") or base in ("emoctl.js", "genparams.js")):
             raise HTTPException(404, "not found")
         path = os.path.join(web_dir, base)
         if not os.path.exists(path):

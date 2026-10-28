@@ -1908,6 +1908,36 @@ def _render_statuses(script):
             for l in script["lines"]}
 
 
+# ============================ 移植点：引擎入参映射 ============================
+# 这套工作台要移植到别的整合包时，**只改这一个函数**（外加 _DEFAULT_PARAMS /
+# _DEFAULT_SAMPLING 的字段名、web/genparams.js 的字段表）。
+# 输入是「中立参数」（台本里的 defaults + 行覆盖），输出是宿主模型的 infer() 关键字；
+# 字段含义见 web/genparams.js，参数校验见 _clean_line()。
+def _engine_kwargs(params, sampling, ref_path, emo_ref_path, vec, verbose=False):
+    """中立参数 → 宿主引擎的 infer(**kwargs)。换模型时改这里，别动调用点。"""
+    mode = int(params.get("emo_mode") or 0)
+    return dict(
+        spk_audio_prompt=ref_path,                 # 音色参考音频
+        emo_audio_prompt=emo_ref_path,             # 情感参考音频（模式 1）
+        emo_alpha=float(params.get("emo_weight") or 0.65),
+        emo_vector=vec,                            # 8 轴向量（模式 2，已归一化）
+        use_emo_text=(mode == 3),                  # 情感描述（模式 3）
+        emo_text=((params.get("emo_text") or "").strip() or None),
+        use_random=False,
+        verbose=bool(verbose),
+        max_text_tokens_per_segment=int(params.get("seg_tokens") or 120),
+        do_sample=bool(sampling["do_sample"]),
+        top_p=float(sampling["top_p"]),
+        top_k=int(sampling["top_k"]) if int(sampling["top_k"]) > 0 else None,
+        temperature=float(sampling["temperature"]),
+        length_penalty=float(sampling["length_penalty"]),
+        num_beams=int(sampling["num_beams"]),
+        repetition_penalty=float(sampling["repetition_penalty"]),
+        max_mel_tokens=int(sampling["max_mel_tokens"]),
+        interval_silence=int(sampling["interval_silence"]),
+    )
+
+
 def _render_one(job, script, line, out_path):
     deps = _D
     tts = deps["tts"]
@@ -1950,26 +1980,10 @@ def _render_one(job, script, line, out_path):
     t0 = time.time()
     try:
         result = model.infer(
-            spk_audio_prompt=ref_path,
             text=line["text"],
             output_path=out_path,
-            emo_audio_prompt=emo_ref_path,
-            emo_alpha=float(params.get("emo_weight") or 0.65),
-            emo_vector=vec,
-            use_emo_text=(mode == 3),
-            emo_text=emo_text,
-            use_random=False,
-            verbose=bool(deps.get("verbose")),
-            max_text_tokens_per_segment=int(params.get("seg_tokens") or 120),
-            do_sample=bool(sampling["do_sample"]),
-            top_p=float(sampling["top_p"]),
-            top_k=int(sampling["top_k"]) if int(sampling["top_k"]) > 0 else None,
-            temperature=float(sampling["temperature"]),
-            length_penalty=float(sampling["length_penalty"]),
-            num_beams=int(sampling["num_beams"]),
-            repetition_penalty=float(sampling["repetition_penalty"]),
-            max_mel_tokens=int(sampling["max_mel_tokens"]),
-            interval_silence=int(sampling["interval_silence"]),
+            **_engine_kwargs(params, sampling, ref_path, emo_ref_path, vec,
+                             bool(deps.get("verbose"))),
         )
         elapsed = round(time.time() - t0, 2)
         if result is None or not os.path.exists(out_path):
@@ -2945,7 +2959,7 @@ def register_longform(app, api, deps):
     @app.get("/longform-assets/{name}", include_in_schema=False)
     def longform_asset(name: str):
         safe = os.path.basename(name)
-        if safe not in ("longform.js", "longform.css", "emoctl.js"):
+        if safe not in ("longform.js", "longform.css", "emoctl.js", "genparams.js"):
             raise HTTPException(404, "Not found")
         return FileResponse(os.path.join(web_dir, safe),
                             headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"})

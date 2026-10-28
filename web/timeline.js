@@ -8327,6 +8327,19 @@
     return r ? r.name : rid.slice(0, 6);
   }
 
+  /* 参数预设（跨台本）：时间轴改属性弹窗里可以直接套。
+     只用来**填控件**，最后仍然走「应用」那一步（能看见改了哪些项）。 */
+  let TPRESETS = null;
+  async function loadTPresets() {
+    if (TPRESETS) return TPRESETS;
+    try {
+      const r = await fetch("/api/v1/lf/presets");
+      const d = await r.json();
+      TPRESETS = d.presets || [];
+    } catch (e) { TPRESETS = []; }
+    return TPRESETS;
+  }
+
   async function openGenProps(uids, oneClip) {
     if (!uids || !uids.length) return;
     const single = uids.length === 1;
@@ -8379,6 +8392,26 @@
       body.appendChild(row);
       return { row, chk, body: bodyEl };
     };
+
+    /* 预设：选一个 → 把下面这些控件填好，用户看一眼再点「应用」 */
+    const presets = await loadTPresets();
+    let presetSel = null;
+    if (presets.length && typeof GenParams !== "undefined") {
+      const prow = el("div", "rowline presetrow");
+      prow.appendChild(el("span", "bulklab", "预设"));
+      const psel = document.createElement("select");
+      psel.className = "sel grow";
+      psel.innerHTML = '<option value="">套用参数预设…（只填入下面的控件）</option>';
+      presets.forEach((p) => {
+        const o = document.createElement("option");
+        o.value = p.id; o.textContent = p.name;
+        o.title = GenParams.summary(p.params, (id) => refNameOf(id));
+        psel.appendChild(o);
+      });
+      presetSel = psel;
+      prow.appendChild(psel);
+      body.appendChild(prow);
+    }
 
     // 音色
     const refSel = document.createElement("select");
@@ -8465,6 +8498,22 @@
     slLab.appendChild(sl);
     slLab.appendChild(el("span", null, "慢语速标记（不影响生成，供导出参考）"));
     const rowSl = mkRow("语速", slLab);
+
+    if (presetSel) {
+      presetSel.onchange = () => {
+        const p = presets.find((x) => x.id === presetSel.value);
+        if (!p) return;
+        const np = GenParams.normalize(p.params);
+        if (np.ref !== undefined) refSel.value = np.ref || "";
+        emoCtl.apply(np);
+        if (np.pause != null) {
+          pa.value = String(np.pause);
+          delete pa.dataset.def;
+        }
+        if (np.slow != null) sl.checked = !!np.slow;
+        toast(`已填入预设「${p.name}」：看完点「应用」才生效`);
+      };
+    }
 
     // 选项
     const opt = el("div", "genopt");

@@ -30,7 +30,7 @@ PAYLOAD = os.path.join(STAGE, "payload")
 CORE_PY = ["longform_api.py", "lf_import.py", "timeline_api.py", "hrir.py", "rooms.py"]
 WEB = ["web/longform.html", "web/longform.css", "web/longform.js",
        "web/timeline.html", "web/timeline.css", "web/timeline.js",
-       "web/emoctl.js", "web/guide.html"]
+       "web/emoctl.js", "web/genparams.js", "web/guide.html"]
 BIN = ["bin/ffmpeg.exe"]
 HRIR = ["assets/hrir/MIT_KEMAR_normal_pinna.sofa",
         "assets/hrir/KU100_near.npz",

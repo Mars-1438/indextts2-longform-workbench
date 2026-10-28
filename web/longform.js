@@ -1966,6 +1966,30 @@ function openBulkProps() {
   if (!targets.length && !tagTargets.length) { toast("选中的内容没有可改的属性", true); return; }
 
   const wrap = el("div");
+  /* 先给一条「套用预设」的快捷通道：预设直接写进这些行，再点开下方的细项微调 */
+  const preRow = el("div", "rowline presetrow");
+  if (PRESETS.length && targets.length) {
+    const psel = document.createElement("select");
+    psel.className = "sel grow";
+    psel.innerHTML = '<option value="">套用参数预设…</option>';
+    PRESETS.forEach((p) => {
+      const o = document.createElement("option");
+      o.value = p.id;
+      o.textContent = p.name;
+      o.title = window.GenParams ? GenParams.summary(p.params, (id) => refName(id)) : "";
+      psel.appendChild(o);
+    });
+    const go = el("button", "btn mini", "套用");
+    go.type = "button";
+    go.onclick = async () => {
+      const p = PRESETS.find((x) => x.id === psel.value);
+      if (!p) { toast("先在下拉里选一个预设", true); return; }
+      closeModal();
+      await applyPresetToLines(p, targets.map((l) => l.uid));
+    };
+    preRow.appendChild(psel); preRow.appendChild(go);
+    wrap.appendChild(preRow);
+  }
   wrap.appendChild(el("div", "hint",
     (targets.length ? `将作用于选中的 ${targets.length} 句语音` : "已选中 " + tagTargets.length + " 个句间标签") +
     (targets.length && tagTargets.length ? ` + ${tagTargets.length} 个句间标签` : "") +
@@ -2270,6 +2294,9 @@ function openLineCtx(line, x, y) {
   }
 
   items.push({ label: "编辑属性（音色 / 情感 / 停顿 / 备注）…", fn: () => openLineProps(line) });
+  /* 套用预设：多选时作用于整组，否则只看这一句 */
+  const presetTargets = (SEL.has(line.uid) && SEL.size > 1) ? [...SEL] : [line.uid];
+  items.push(...presetCtxItems(presetTargets));
   items.push({
     label: line.note ? "✎ 改备注…" : "✎ 加备注…",
     fn: () => openLineProps(line),
@@ -3204,6 +3231,19 @@ function batchParamControls(existing) {
       if (params.emo_mode === 2 && v.some((x) => x > 0)) params.emo_vec = v.slice();
       return params;
     },
+    /* 把一套参数（预设）填进这些控件，供用户再看一眼 / 微调 */
+    set(params) {
+      const q = params || {};
+      if (q.ref !== undefined) refSel.value = q.ref || "";
+      if (q.emo_mode != null) modeSel.value = String(q.emo_mode);
+      if (q.emo_weight != null) {
+        weight.value = String(q.emo_weight);
+        wlab.textContent = "情感权重 " + Number(weight.value).toFixed(2);
+      }
+      if (Array.isArray(q.emo_vec)) vecCtl.set(q.emo_vec);
+      if (q.emo_ref !== undefined && emoAudio && emoAudio.set) emoAudio.set(q.emo_ref || "");
+      if (q.pause !== undefined) pauseInp.value = q.pause == null ? "" : String(q.pause);
+    },
   };
 }
 
@@ -3220,6 +3260,38 @@ function openBatchDialog(existing) {
      参数区（情感向量 8 轴）很长，放下面的话每次加减句子都要滚到底。 */
   const listHost = el("div");
   if (existing) wrap.appendChild(listHost);
+
+  /* 预设：编辑已有分组时可以直接「套到本组这些句子」；
+     新建时先把预设灌进下面的参数控件，再按需微调（保存时才写进句子）。 */
+  if (PRESETS.length) {
+    const preRow = el("div", "rowline presetrow");
+    const psel = document.createElement("select");
+    psel.className = "sel grow";
+    psel.innerHTML = '<option value="">套用参数预设…</option>';
+    PRESETS.forEach((p) => {
+      const o = document.createElement("option");
+      o.value = p.id; o.textContent = p.name;
+      o.title = window.GenParams ? GenParams.summary(p.params, (id) => refName(id)) : "";
+      psel.appendChild(o);
+    });
+    const go = el("button", "btn mini", existing ? "套到本组" : "填入参数");
+    go.type = "button";
+    go.onclick = () => {
+      const p = PRESETS.find((x) => x.id === psel.value);
+      if (!p) { toast("先在下拉里选一个预设", true); return; }
+      if (existing) {
+        closeModal();
+        applyPresetToLines(p, existing.uids || []);
+      } else if (params && typeof params.set === "function") {
+        params.set(presetParamsOf(p));
+        toast(`已把「${p.name}」填进下面的参数，可继续微调`);
+      } else {
+        toast("这个弹窗暂时不支持填入，可以直接在句子右键菜单里套用", true);
+      }
+    };
+    preRow.appendChild(psel); preRow.appendChild(go);
+    wrap.appendChild(preRow);
+  }
 
   const params = batchParamControls(existing);
   wrap.appendChild(params.node);
@@ -4933,8 +5005,12 @@ function renderPresets() {
     name.title = "点击应用（写入「全局默认参数」）";
     name.onclick = () => applyPreset(p);
     item.appendChild(name);
-    const refId = (p.params || {}).ref;
-    item.appendChild(el("span", "hint", refId ? refName(refId).slice(0, 10) : "无音色"));
+    const sum = window.GenParams
+      ? GenParams.summary(p.params, (id) => refName(id))
+      : ((p.params || {}).ref ? refName(p.params.ref) : "无音色");
+    const sumEl = el("span", "hint preset-sum", sum);
+    sumEl.title = sum;
+    item.appendChild(sumEl);
     const apply = el("button", "iconbtn", "✓");
     apply.title = "应用为默认";
     apply.onclick = () => applyPreset(p);
@@ -4955,7 +5031,11 @@ async function savePreset() {
   try {
     const r = await api("/presets", {
       method: "POST",
-      body: JSON.stringify({ name, params: SCRIPT.defaults, sampling: SCRIPT.sampling }),
+      body: JSON.stringify({
+        name,
+        params: window.GenParams ? GenParams.normalize(SCRIPT.defaults) : SCRIPT.defaults,
+        sampling: window.GenParams ? GenParams.normalizeSampling(SCRIPT.sampling) : SCRIPT.sampling,
+      }),
     });
     PRESETS.unshift(r.preset);
     $("presetName").value = "";
@@ -4999,11 +5079,98 @@ function guardDefaultChange(label, apply, rollback) {
   }, "确认修改");
 }
 
+/* ------------------------------ 参数预设：套到具体句子 / 分组 / 时间轴 ------------------------------
+   以前预设只能「写进台本默认」，等于整篇都跟着变，实际没什么人敢用。
+   现在预设可以套到任意一组句子（右键菜单 / 批量改属性 / 分组 / 时间轴片段），
+   只改这些行的 ov，不动其它行。字段清洗统一走 GenParams（移植时只改那一个文件）。 */
+function presetParamsOf(p) {
+  const raw = (p && p.params) || {};
+  return window.GenParams ? GenParams.normalize(raw) : raw;
+}
+
+function applyPresetToLines(preset, uids, opts) {
+  if (!SCRIPT || !preset) return 0;
+  const set = new Set(uids || []);
+  const targets = (SCRIPT.lines || []).filter((l) => set.has(l.uid) && l.kind !== "tag");
+  if (!targets.length) { toast("选中的都是标签，没有可以套用预设的句子", true); return 0; }
+  const p = presetParamsOf(preset);
+  const keys = Object.keys(p).filter((k) => k !== "slow");
+  targets.forEach((l) => {
+    l.ov = l.ov || {};
+    keys.forEach((k) => {
+      const v = p[k];
+      if (v == null) delete l.ov[k];
+      else if (k === "emo_vec") l.ov.emo_vec = v.slice();
+      else l.ov[k] = v;
+    });
+    if (p.slow != null) l.slow = !!p.slow;
+    if (l.out) l.status = "stale";
+  });
+  commitSnapshot(`套用预设「${preset.name}」到 ${targets.length} 句`);
+  dirty = true;
+  renderCenter(); renderStats();
+  if (typeof refreshBatchViews === "function") refreshBatchViews();
+  else { renderBatchList(); renderBatchStats(); }
+  queueSave();
+  if (!opts || !opts.quiet) {
+    toast(`已把预设「${preset.name}」套到 ${targets.length} 句`
+      + (targets.some((l) => l.out) ? "，记得重生成" : ""));
+  }
+  return targets.length;
+}
+
+/* 预设多的时候给一个挑选弹窗（右键菜单最多列 8 个，多了走这里） */
+function openPresetPick(uids, title) {
+  if (!PRESETS.length) { toast("还没有预设：先去「⚙ 设置 → 参数预设」建一个", true); return; }
+  const wrap = el("div");
+  wrap.appendChild(el("div", "hint", `将套用到选中的 ${uids.length} 句；只改这几行的生成属性。`));
+  const list = el("div", "reflist presetpick");
+  PRESETS.forEach((p) => {
+    const item = el("div", "refitem");
+    const name = el("span", "refname", p.name);
+    const sum = el("span", "hint", window.GenParams
+      ? GenParams.summary(p.params, (id) => refName(id)) : "");
+    name.title = sum;
+    name.onclick = () => {
+      closeModal();
+      applyPresetToLines(p, uids);
+    };
+    item.appendChild(name); item.appendChild(sum);
+    const go = el("button", "iconbtn", "✓");
+    go.title = "套用";
+    go.onclick = () => { closeModal(); applyPresetToLines(p, uids); };
+    item.appendChild(go);
+    list.appendChild(item);
+  });
+  wrap.appendChild(list);
+  modal(title || "套用参数预设", wrap, async () => {}, "关闭");
+}
+
+/* 右键菜单里的一段：套用预设 */
+function presetCtxItems(uids) {
+  const list = (uids || []).slice();
+  const items = [{ head: `套用参数预设（${list.length} 句）` }];
+  if (!PRESETS.length) {
+    items.push({ label: "（还没有预设：去「⚙ 设置 → 参数预设」建一个）", disabled: true, fn: () => {} });
+    return items;
+  }
+  PRESETS.slice(0, 8).forEach((p) => {
+    const sum = window.GenParams
+      ? GenParams.summary(p.params, (id) => refName(id), { brief: true }) : "";
+    items.push({ label: p.name + (sum ? ` · ${sum}` : ""), fn: () => applyPresetToLines(p, list) });
+  });
+  if (PRESETS.length > 8) {
+    items.push({ label: `更多（共 ${PRESETS.length} 个）…`, fn: () => openPresetPick(list) });
+  }
+  return items;
+}
+
 async function applyPreset(p) {
   if (!SCRIPT) return;
   guardDefaultChange(`应用预设「${p.name}」`, () => {
-    SCRIPT.defaults = Object.assign({}, SCRIPT.defaults, p.params || {});
-    SCRIPT.sampling = Object.assign({}, SCRIPT.sampling, p.sampling || {});
+    SCRIPT.defaults = Object.assign({}, SCRIPT.defaults, presetParamsOf(p));
+    SCRIPT.sampling = Object.assign({}, SCRIPT.sampling,
+      window.GenParams ? GenParams.normalizeSampling(p.sampling) : (p.sampling || {}));
     commitSnapshot("应用预设 " + p.name);
     saveNow();
     renderCenter();
@@ -6751,7 +6918,6 @@ function openDrawer(pane, opt) {
   if (pane === "voice") { renderRefList(); }
   if (pane === "sfx") { initSfxPanel(); }
   if (pane === "media") { initMediaPanel(target || MAT.target); }
-  if (pane === "presets") { loadPresets(); }
   if (pane === "default") {
     syncDefaultPanel();
     loadSettings(true).then(syncSettingsPanel);
@@ -6855,7 +7021,9 @@ function initHeader() {
   $("btnVoiceLib").onclick = () => openDrawer("voice");
   const bs = $("btnSfxLib");
   if (bs) bs.onclick = () => openDrawer("sfx");
-  $("btnPresets").onclick = () => openDrawer("presets");
+  /* 参数预设已并入「⚙ 设置」：这里只留一个刷新 + 保存入口 */
+  if ($("btnPresetRefresh")) $("btnPresetRefresh").onclick = () => loadPresets(true);
+  if ($("btnSavePreset")) $("btnSavePreset").onclick = () => savePreset();
   if ($("btnTagFollow")) $("btnTagFollow").onclick = openTagFollow;
   const jr = $("btnJumpRef");
   if (jr) jr.onclick = () => openDrawer("voice");
@@ -8235,6 +8403,12 @@ window.__lfDebug = {
   askBusy(mode, uids) { askRenderBusy(mode || "uids", uids || [], null); },
   showSummary(job) { showRenderSummary(job); },
   get waitQueue() { return WAIT_QUEUE; },
+  /* 参数预设：测试要能确认「菜单里有、点了能写进去」 */
+  get presets() { return PRESETS.map((p) => ({ id: p.id, name: p.name })); },
+  applyPresetToLines(id, uids) {
+    const p = PRESETS.find((x) => x.id === id);
+    return p ? applyPresetToLines(p, uids) : 0;
+  },
   repaint() { renderCenter(); renderStats(); paintRender(); },
 };
 

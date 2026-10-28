@@ -3487,6 +3487,63 @@ function syncDefaultPanel() {
   $("sMaxMel").value = s.max_mel_tokens ?? 1500;
 }
 
+/* ------------------------------ 全局设置（跨台本） ------------------------------
+   时间轴默认（锁定 / 标签跟随 / 吸附 / 悬浮窗）+ 混音导出默认。
+   存 longform/settings.json，时间轴页开页面时也会读它。 */
+let GSETTINGS = null;
+
+async function loadSettings(force) {
+  if (GSETTINGS && !force) return GSETTINGS;
+  try {
+    const d = await api("/settings");
+    GSETTINGS = d.settings || null;
+  } catch (e) {
+    GSETTINGS = GSETTINGS || {};
+  }
+  return GSETTINGS;
+}
+
+function syncSettingsPanel() {
+  const s = GSETTINGS || {};
+  const tl = s.tl || {};
+  const mx = s.mix || {};
+  const setChk = (id, v, dflt) => { const n = $(id); if (n) n.checked = v == null ? !!dflt : !!v; };
+  setChk("sLockVoice", tl.lockVoice, true);
+  setChk("sSnap", tl.snap, true);
+  setChk("sHoverIns", tl.hoverIns, true);
+  const setSel = (id, v, dflt) => { const n = $(id); if (n) n.value = v == null ? dflt : String(v); };
+  setSel("sTagFollow", tl.tagFollow, "follow");
+  setSel("sMixFmt", mx.format, "wav");
+  setSel("sMixRate", mx.rate, "44100");
+  setSel("sMixCh", mx.channels, "2");
+  setSel("sMixDmode", mx.dmode, "visible");
+}
+
+async function saveSettings() {
+  const body = {
+    tl: {
+      lockVoice: !!($("sLockVoice") || {}).checked,
+      snap: !!($("sSnap") || {}).checked,
+      hoverIns: !!($("sHoverIns") || {}).checked,
+      tagFollow: $("sTagFollow") ? $("sTagFollow").value : "follow",
+    },
+    mix: {
+      format: $("sMixFmt") ? $("sMixFmt").value : "wav",
+      rate: $("sMixRate") ? $("sMixRate").value : "44100",
+      channels: parseInt(($("sMixCh") || {}).value, 10) || 2,
+      dmode: $("sMixDmode") ? $("sMixDmode").value : "visible",
+    },
+  };
+  try {
+    const d = await api("/settings", { method: "PATCH", body });
+    GSETTINGS = d.settings || body;
+    syncSettingsPanel();
+    toast("设置已保存（时间轴下次打开生效）");
+  } catch (e) {
+    toast("保存设置失败：" + e.message, true);
+  }
+}
+
 function initDefaultPanel() {
   /* 每一项都单独走一遍「确认 → 应用」：控件先回读旧值，确认后才写进 SCRIPT.defaults，
      取消/关弹窗都不会留下改了一半的状态。 */
@@ -3528,7 +3585,8 @@ function initDefaultPanel() {
   $("sTemp").oninput = () => { $("sTempOut").textContent = Number($("sTemp").value).toFixed(2); bindS(); };
   $("sTopP").oninput = () => { $("sTopPOut").textContent = Number($("sTopP").value).toFixed(2); bindS(); };
   ["sTopK", "sBeams", "sRep", "sMaxMel"].forEach((id) => ($(id).onchange = bindS));
-  $("btnSaveDefault").onclick = async () => { await saveNow(); toast("全局默认参数已保存"); };
+  $("btnSaveDefault").onclick = async () => { await saveNow(); toast("台本默认参数已保存"); };
+  if ($("btnSaveSettings")) $("btnSaveSettings").onclick = saveSettings;
 }
 
 /* ------------------------------ 分句工具 ------------------------------ */
@@ -6658,7 +6716,7 @@ function initPopcard() {
 }
 
 const DRAWER_TITLES = {
-  default: "全局默认参数",
+  default: "⚙ 设置",
   voice: "🎙 音色素材库",
   sfx: "🔔 音效素材库",
   media: "📥 素材导入台",
@@ -6668,7 +6726,7 @@ const DRAWER_TITLES = {
 // 抽屉副标题：一句话说清「这个库是干什么的、文件从哪来、存到哪去」，
 // 面板里就不用再放一遍大标题了。
 const DRAWER_SUBS = {
-  default: "整份台本的默认音色 / 情感 / 停顿 / 采样，没有单独覆盖的行都继承这里",
+  default: "时间轴 / 导出 / 界面偏好（跨台本）；台本默认参数（音色 · 情感 · 停顿 · 采样）收在最后",
   voice: "参考音频 → 喂给模型生成语音（导入台存进来，固定 22.05k 单声道）",
   sfx: "给句间标签挂的音效素材（导入台存进来，44.1k 保留声道）",
   presets: "音色 + 情感 + 停顿 + 采样打包成一套，一键套用",
@@ -6694,7 +6752,10 @@ function openDrawer(pane, opt) {
   if (pane === "sfx") { initSfxPanel(); }
   if (pane === "media") { initMediaPanel(target || MAT.target); }
   if (pane === "presets") { loadPresets(); }
-  if (pane === "default") syncDefaultPanel();
+  if (pane === "default") {
+    syncDefaultPanel();
+    loadSettings(true).then(syncSettingsPanel);
+  }
 }
 function closeDrawer() {
   stopAllAudio();   // 关掉素材库，正在试听的也一起停
@@ -8078,6 +8139,7 @@ async function boot() {
   initHeader();
   initFilters();
   initDefaultPanel();
+  loadSettings().then(syncSettingsPanel);
   initRenderPanel();
   initExportPanel();
   initRefsPanel();

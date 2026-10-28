@@ -17,7 +17,7 @@
   });
 })();
 </script>
-<link rel="stylesheet" href="/timeline-assets/timeline.css?v=20261029a">
+<link rel="stylesheet" href="/timeline-assets/timeline.css?v=20261029c">
 </head>
 <body>
 <div class="tl-app">
@@ -199,6 +199,25 @@
           <button class="iconbtn" id="btnTagFollowSnap" type="button"
                   title="把标签位置按当前句子重新冻结一次（「跟随句子」模式下不需要）">⟳</button>
         </div>
+        <!-- 筛选：三种标记 + 只有音效的 -->
+        <div class="mfilters" id="mFilters">
+          <button class="chip on" data-mf="all" data-label="全部" type="button">全部</button>
+          <button class="chip" data-mf="inline" data-label="句中" type="button" title="台本里的句中标签">句中</button>
+          <button class="chip" data-mf="tag" data-label="句间" type="button" title="台本里的句间标签">句间</button>
+          <button class="chip" data-mf="mark" data-label="普通" type="button" title="M 键手加的标记（跟句子无关，不跟随）">普通</button>
+          <button class="chip" data-mf="sfx" data-label="🔔" type="button" title="只看挂了音效的">🔔</button>
+        </div>
+        <!-- 多选后的批量操作条 -->
+        <div class="mbulk" id="mBulk" hidden>
+          <span id="mSelTip" class="hint">已选 0 个标记</span>
+          <div class="mbulk-btns">
+            <button class="btn mini" id="mBkSfx" type="button">挂音效</button>
+            <button class="btn mini ghost" id="mBkMute" type="button">静音</button>
+            <button class="btn mini ghost" id="mBkUnmute" type="button">取消静音</button>
+            <button class="btn mini ghost" id="mBkDrop" type="button">移除音效</button>
+            <button class="btn mini ghost danger" id="mBkDel" type="button">删除</button>
+          </div>
+        </div>
         <div id="markerList" class="markerlist"></div>
       </div>
     </aside>
@@ -250,6 +269,6 @@
 </div>
 
 <script src="/timeline-assets/emoctl.js"></script>
-<script src="/timeline-assets/timeline.js?v=20261029a"></script>
+<script src="/timeline-assets/timeline.js?v=20261029c"></script>
 </body>
 </html>

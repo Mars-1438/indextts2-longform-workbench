@@ -521,6 +521,101 @@ def sfx_path_of(mid):
     return p if os.path.exists(p) else None
 
 
+# ---------------------------- 全局设置 ----------------------------
+# 与「台本默认参数」分开：这份是**跨台本**的偏好（时间轴 / 导出 / 界面），
+# 台本默认参数还是存在 script.defaults 里（每个台本一份）。
+# 存 longform/settings.json，键名固定，改结构时只做「缺的补默认、多的忽略」。
+SETTINGS_DEFAULT = {
+    "tl": {
+        "lockVoice": True,       # 语音片段落到时间轴时默认锁定（位置跟台本走）
+        "tagFollow": "follow",   # 新建工程的标签跟随默认口径
+        "snap": True,            # 时间轴默认开吸附
+        "hoverIns": True,        # 标记处「＋ 插入素材」悬浮窗默认显示
+    },
+    "mix": {
+        "format": "wav", "bitDepth": "16", "rate": "44100",
+        "channels": 2, "dmode": "visible",
+    },
+}
+_SETTINGS_CACHE = {"mtime": None, "data": None}
+
+
+def _settings_path() -> str:
+    return os.path.join(_lf_root(), "settings.json")
+
+
+def _load_settings():
+    """读全局设置：缺的键补默认，值做类型/范围收敛（坏数据不会把 UI 弄崩）。"""
+    path = _settings_path()
+    try:
+        mt = os.path.getmtime(path)
+    except OSError:
+        mt = None
+    if _SETTINGS_CACHE["mtime"] == mt and _SETTINGS_CACHE["data"] is not None:
+        return _SETTINGS_CACHE["data"]
+    raw = _read_json(path, {}) if mt is not None else {}
+    if not isinstance(raw, dict):
+        raw = {}
+    out = {"tl": dict(SETTINGS_DEFAULT["tl"]), "mix": dict(SETTINGS_DEFAULT["mix"])}
+
+    tl = raw.get("tl") if isinstance(raw.get("tl"), dict) else {}
+    for k in ("lockVoice", "snap", "hoverIns"):
+        if k in tl:
+            out["tl"][k] = bool(tl[k])
+    if tl.get("tagFollow") in ("follow", "fixed", "inline", "between"):
+        out["tl"]["tagFollow"] = tl["tagFollow"]
+
+    mx = raw.get("mix") if isinstance(raw.get("mix"), dict) else {}
+    if mx.get("format") in ("wav", "flac", "mp3", "ogg"):
+        out["mix"]["format"] = mx["format"]
+    if str(mx.get("bitDepth") or "") in ("16", "24", "32", "high", "standard", "small"):
+        out["mix"]["bitDepth"] = str(mx["bitDepth"])
+    if str(mx.get("rate") or "") in ("16000", "22050", "32000", "44100", "48000", "96000"):
+        out["mix"]["rate"] = str(mx["rate"])
+    if mx.get("channels") in (1, 2, "1", "2"):
+        out["mix"]["channels"] = int(mx["channels"])
+    if mx.get("dmode") in ("visible", "full"):
+        out["mix"]["dmode"] = mx["dmode"]
+
+    _SETTINGS_CACHE["mtime"] = mt
+    _SETTINGS_CACHE["data"] = out
+    return out
+
+
+SETTINGS_CHOICES = {
+    ("tl", "tagFollow"): ("follow", "fixed", "inline", "between"),
+    ("mix", "format"): ("wav", "flac", "mp3", "ogg"),
+    ("mix", "bitDepth"): ("16", "24", "32", "high", "standard", "small"),
+    ("mix", "rate"): ("16000", "22050", "32000", "44100", "48000", "96000"),
+    ("mix", "dmode"): ("visible", "full"),
+}
+
+
+def _save_settings(patch):
+    """只接受认识的键 + 合法值；非法值**保持原样**（不是退回默认）。"""
+    cur = _load_settings()
+    if isinstance(patch, dict):
+        for sec in ("tl", "mix"):
+            sub = patch.get(sec)
+            if not isinstance(sub, dict):
+                continue
+            for k, v in sub.items():
+                if k in ("lockVoice", "snap", "hoverIns"):
+                    cur[sec][k] = bool(v)
+                elif (sec, k) in SETTINGS_CHOICES:
+                    val = str(v)
+                    if val in SETTINGS_CHOICES[(sec, k)]:
+                        cur[sec][k] = int(val) if k == "channels" else val
+                elif (sec, k) == ("mix", "channels"):
+                    if v in (1, 2, "1", "2"):
+                        cur[sec][k] = int(v)
+    tmp = {"tl": cur["tl"], "mix": cur["mix"]}
+    _write_json(_settings_path(), tmp)
+    _SETTINGS_CACHE["mtime"] = None
+    _SETTINGS_CACHE["data"] = None
+    return _load_settings()
+
+
 def _read_audio_any(path):
     """读任意音频 → (float32 (n, ch), sr)。soundfile 读不了就用 ffmpeg 转一次。"""
     try:
@@ -3715,6 +3810,16 @@ def register_longform(app, api, deps):
                       "source": it.get("source"), "op": "",
                       "created": it.get("created")})
         return {"ok": True, "info": props}
+
+    # ---- 全局设置（时间轴 / 导出 / 界面偏好，跨台本共用） -------------------
+    @lf.get("/lf/settings")
+    def lf_settings_get():
+        return {"ok": True, "settings": _load_settings(), "defaults": SETTINGS_DEFAULT}
+
+    @lf.patch("/lf/settings")
+    def lf_settings_patch(req: dict = Body(default={})):
+        with _LOCK:
+            return {"ok": True, "settings": _save_settings(req or {})}
 
     # ---- 台本 ---------------------------------------------------------------
     @lf.get("/lf/scripts")

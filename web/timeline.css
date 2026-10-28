@@ -1187,3 +1187,37 @@ html[data-theme="dark"] .bulkbar { box-shadow: 0 8px 24px rgba(0, 0, 0, .5); }
 /* 被「固定」住的标签：图标换成图钉色，提示它不跟句子走 */
 .markerrow.pinned .mg { color: var(--warn); }
 .markerrow .mpin { font-size: 9.5px; color: var(--warn); margin-left: 3px; }
+
+/* 标记：筛选 chips + 批量条 */
+.mfilters { display: flex; flex-wrap: wrap; gap: 3px; padding: 0 0 5px; }
+.mfilters .chip {
+  font: inherit; font-size: 10.5px; line-height: 18px; padding: 0 6px;
+  border: 1px solid var(--border); border-radius: 9px; cursor: pointer;
+  background: var(--surface); color: var(--muted);
+}
+.mfilters .chip:hover { border-color: var(--primary-line); color: var(--ink); }
+.mfilters .chip.on {
+  background: var(--primary-soft); color: var(--primary);
+  border-color: var(--primary-line); font-weight: 600;
+}
+.mbulk {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 5px 6px; margin-bottom: 5px;
+  border: 1px solid var(--primary-line); border-radius: 8px;
+  background: var(--primary-soft);
+}
+.mbulk .hint { font-size: 10.5px; color: var(--primary); }
+.mbulk-btns { display: flex; flex-wrap: wrap; gap: 4px; }
+.mbulk-btns .btn { font-size: 10.5px; padding: 2px 6px; }
+.mbulk-btns .btn.danger { color: var(--danger); border-color: var(--danger-line); }
+.markerrow.sel {
+  background: var(--primary-soft);
+  border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
+}
+/* 名字太长就省略号：以前「〔标记〕镜头切换」这种会被工具按钮挤到换行，行高翻倍 */
+.markerrow .mg {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.markerrow .mi, .markerrow .mt, .markerrow .mpin, .markerrow .mfromtag { flex: none; }
+.mbulk-btns .btn { white-space: nowrap; }

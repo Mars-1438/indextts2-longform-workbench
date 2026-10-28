@@ -3203,6 +3203,33 @@
   let HOVER_INS_ON = true;
   try { HOVER_INS_ON = localStorage.getItem("tl.hoverins") !== "0"; } catch (e) { HOVER_INS_ON = true; }
 
+  /* 全局设置（工作台「⚙ 设置」里改的）：吸附 / 标记悬浮窗 / 混音导出默认值。
+     本机手动切过开关的，以本机为准（localStorage 优先），否则用设置里的默认。 */
+  let GSET = null;
+
+  async function loadGlobalSettings() {
+    try {
+      const r = await fetch("/api/v1/lf/settings");
+      const b = await r.json();
+      GSET = (b && b.settings) || null;
+    } catch (e) { GSET = null; }
+  }
+
+  function applyGlobalDefaults() {
+    if (!GSET) return;
+    const tl = GSET.tl || {};
+    let v = null;
+    try { v = localStorage.getItem("tl.snap"); } catch (e) { v = null; }
+    S.snap = v == null ? !!tl.snap : v === "1";
+    const bSnap = $("btnSnap");
+    if (bSnap) bSnap.classList.toggle("on", S.snap);
+    let h = null;
+    try { h = localStorage.getItem("tl.hoverins"); } catch (e) { h = null; }
+    HOVER_INS_ON = h == null ? !!tl.hoverIns : h !== "0";
+    const bHov = $("btnHoverInsOn");
+    if (bHov) bHov.classList.toggle("on", HOVER_INS_ON);
+  }
+
   function hoverInsertPoint(x, y, ti, clip) {
     const box = $("hoverIns");
     if (!HOVER_INS_ON) { hideHoverIns(); return; }
@@ -3290,6 +3317,10 @@
     const x = e.clientX - r.left, y = e.clientY - r.top;
     const ti = trackIndexAtY(y);
     const at = clamp(tOf(x), 0, S.data.duration);
+    /* 右键落在标记线上（±6px）→ 开「标记」菜单：挂音效 / 静音 / 删除…
+       标记线很细，先判它再判片段，否则永远点不到 */
+    const nearMark = (S.data.markers || []).find((m) => Math.abs(xOf(m.time) - x) <= 6);
+    if (nearMark) { openMarkerMenu(nearMark, e.clientX, e.clientY); return; }
     const tr = ti >= 0 ? orderedTracks()[ti] : null;
     const c = tr ? clipAt(tr, x) : null;
     if (!c) {
@@ -3446,31 +3477,46 @@
   }
 
   /* ---------------- 标记点（M）：存在工程里，不动台本 ---------------- */
+  /* 普通标记走**独立接口**（后端只动 project.marks）。
+     以前加一个标记 = PATCH 整份工程 + reload：只要还有没落盘的改动（静音 / 换轨 / 音量
+     在 700ms 防抖里），就可能被服务端快照盖回去 —— 用户看到的就是
+     「按 M 加标注，某段音频自己解除静音了」。 */
   function addMarkAt(t, name) {
     if (!S.data) return;
-    const p = S.data.project;
-    p.marks = p.marks || [];
     const at = Math.round(clamp(t, 0, S.data.duration) * 1000) / 1000;
-    // 同一位置不重复加
-    if (p.marks.some((m) => Math.abs(m.time - at) < 0.02)) {
-      toast("这里已经有标记了");
-      return;
-    }
-    p.marks.push({ id: "mk_" + uid(), time: at, name: name || "标记" });
-    p.marks.sort((a, b) => a.time - b.time);
-    markDirty("添加标记点");
-    persist("添加标记点").then(() => {
-      drawInspector();
-      draw();
+    const dup = (S.data.markers || []).some((m) => m.custom && Math.abs(m.time - at) < 0.02);
+    if (dup) { toast("这里已经有标记了"); return; }
+    const body = JSON.stringify({ time: at, name: name || "标记" });
+    fetch(`${API}/marks`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body,
+    }).then(async (r) => {
+      const b = await r.json().catch(() => ({}));
+      if (!r.ok) { toast(b.detail || "加标记失败", true); return; }
+      const mk = (b.marks || []).find((x) => Math.abs(Number(x.time) - at) < 0.001) || {};
+      S.data.markers.push({
+        id: mk.id || ("mk_" + uid()), time: at, name: mk.name || "标记",
+        kind: "mark", uid: "", index: 0, hold: 0, inline: false, custom: true,
+      });
+      S.data.markers.sort((a, b2) => a.time - b2.time);
+      undoMark("添加标记点");
+      drawMarkersList(); drawInspector(); draw();
       toast(`已在 ${fmt(at)} 加了标记点（Shift+M 往下跳）`);
-    });
+    }).catch((e) => toast("加标记失败：" + e.message, true));
   }
 
   function delMark(id) {
-    const p = S.data.project;
-    p.marks = (p.marks || []).filter((m) => m.id !== id);
-    markDirty("删除标记点");
-    persist("删除标记点").then(() => { drawInspector(); draw(); toast("已删除标记点"); });
+    fetch(`${API}/marks/${id}`, { method: "DELETE" }).then(async (r) => {
+      if (!r.ok) {
+        const b = await r.json().catch(() => ({}));
+        toast(b.detail || "删标记失败", true);
+        return;
+      }
+      S.data.markers = (S.data.markers || []).filter((m) => m.id !== id);
+      MSEL.delete(id);
+      undoMark("删除标记点");
+      drawMarkersList(); drawInspector(); draw();
+      toast("已删除标记点");
+    }).catch((e) => toast("删标记失败：" + e.message, true));
   }
 
   /* ---------------- 空白音轨右键菜单 ---------------- */
@@ -3629,8 +3675,10 @@
       ? (allMuted ? `取消静音（${muteSel.length} 段）` : `静音选中的 ${muteSel.length} 段`)
       : (c.mute ? "取消静音" : "静音这段"), "", () => {
       const toMute = !allMuted;
-      muteSel.forEach((x) => { x.mute = toMute; commitClip(x, toMute ? "静音片段" : "取消静音"); });
-      drawInspector();
+      const list = muteSel;
+      list.forEach((x) => { x.mute = toMute; writeClipOverride(x); });
+      drawInspector(); draw(); updateBulkBar();
+      persist(toMute ? "静音片段" : "取消静音");   // 立刻落盘，别留在防抖里
     });
     if (c.kind === "voice" && c.uid) {
       add("🎛 改属性并重生成…（音色 / 情感 / 停顿）", "", () => openGenProps([c.uid], c));
@@ -6459,19 +6507,246 @@
     }
   }
 
+  /* ------------------------------ 标记：筛选 / 多选 / 批量 / 右键 ------------------------------
+     三种标记：
+       句中（台本 line.inline）· 句间（台本里的标签行）· 普通（M 键手加，存在 project.marks）
+     后两种都能被「标签跟随」挪位置，普通标记跟句子无关，永远钉在绝对时间上。 */
+  const MFILTER = { kind: "all", sfxOnly: false };
+  const MSEL = new Set();          // 选中的标记 key（标签用 marker.key，普通标记用 id）
+  let MSEL_ANCHOR = null;          // Shift 连选的锚点
+
+  function markerKeyOf(m) { return m.key || m.id; }
+  function markerKindOf(m) { return m.custom ? "mark" : (m.inline ? "inline" : "tag"); }
+  function markerHasSfx(m) { return !!(m.sfx_mid || (m.sfx && m.sfx.mid)); }
+  function markersOf(kind) {
+    return (S.data && S.data.markers) || [];
+  }
+  function markersVisible() {
+    return markersOf().filter((m) => {
+      if (MFILTER.kind !== "all" && markerKindOf(m) !== MFILTER.kind) return false;
+      if (MFILTER.sfxOnly && !markerHasSfx(m)) return false;
+      return true;
+    });
+  }
+  function selMarkers() {
+    const all = markersOf();
+    return all.filter((m) => MSEL.has(markerKeyOf(m)));
+  }
+  function markerRangeSelect(m) {
+    const list = markersVisible();
+    const a = list.findIndex((x) => markerKeyOf(x) === MSEL_ANCHOR);
+    const b = list.findIndex((x) => markerKeyOf(x) === markerKeyOf(m));
+    if (a < 0 || b < 0) { MSEL.add(markerKeyOf(m)); return; }
+    const [lo, hi] = a <= b ? [a, b] : [b, a];
+    for (let i = lo; i <= hi; i++) MSEL.add(markerKeyOf(list[i]));
+  }
+  function updateMarkerBar() {
+    const bar = $("mBulk");
+    const tip = $("mSelTip");
+    const n = MSEL.size;
+    if (!bar) return;
+    bar.hidden = n === 0;
+    if (tip) tip.textContent = `已选 ${n} 个标记`;
+    const hasTag = selMarkers().some((m) => !m.custom);
+    const hasMark = selMarkers().some((m) => m.custom);
+    const hasSfx = selMarkers().some(markerHasSfx);
+    const set = (id, on, why) => {
+      const b = $(id);
+      if (!b) return;
+      b.disabled = !on;
+      b.title = on ? (why || "") : "选中的标记里没有可以这么做的";
+    };
+    set("mBkSfx", hasTag, "给选中的标签/标记挂一个音效（普通标记会变成普通音效片段）");
+    set("mBkDrop", hasSfx, "摘掉选中标记上挂的音效");
+    set("mBkMute", hasSfx, "把选中标记挂的音效静音");
+    set("mBkUnmute", hasSfx, "取消静音");
+    set("mBkDel", hasMark, "只删普通标记（台本标签请回台本页删）");
+  }
+
+  /* 批量：把选中标记挂上同一个音效 / 摘掉 / 静音 */
+  function tagKeysOf(list) {
+    return list.filter((m) => !m.custom).map((m) => markerKeyOf(m));
+  }
+  async function tagSfxApply(list, mid) {
+    const keys = tagKeysOf(list);
+    if (!keys.length) { toast("选中的普通标记没有「挂音效」这个属性：请用 ＋♪ 插素材", true); return; }
+    try {
+      const r = await fetch(`${API}/tags/sfx`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keys, mid, gain: 1.0 }),
+      });
+      const b = await r.json().catch(() => ({}));
+      if (!r.ok) { toast(b.detail || "挂音效失败", true); return; }
+      toast(mid ? `已给 ${b.changed} 个标签挂上音效` : `已摘掉 ${b.changed} 个标签的音效`);
+      await reload();
+    } catch (e) { toast("挂音效失败：" + e.message, true); }
+  }
+  async function tagMuteApply(list, mute) {
+    const keys = tagKeysOf(list);
+    if (!keys.length) { toast("普通标记没有音效可以静音", true); return; }
+    try {
+      const r = await fetch(`${API}/tags/mute`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keys, mute }),
+      });
+      const b = await r.json().catch(() => ({}));
+      if (!r.ok) { toast(b.detail || "操作失败", true); return; }
+      toast(mute ? `已静音 ${b.changed} 个标签音效` : `已取消静音 ${b.changed} 个`);
+      await reload();
+    } catch (e) { toast("操作失败：" + e.message, true); }
+  }
+
+  /* 音效库挑一个（给标签挂音效用；插入素材仍走 openInsertPicker） */
+  function pickSfxForTags(list) {
+    const box = el("div");
+    const q = document.createElement("input");
+    q.className = "inp"; q.placeholder = "搜音效名…";
+    box.appendChild(q);
+    const info = el("div", "hint", `将给选中的 ${tagKeysOf(list).length} 个标签挂同一个音效。`);
+    box.appendChild(info);
+    const listBox = el("div", "picklist");
+    box.appendChild(listBox);
+    let sel = null;
+    const draw = () => {
+      listBox.innerHTML = "";
+      const kw = (q.value || "").trim().toLowerCase();
+      const rows = SFXLIB.filter((x) => !kw
+        || ((x.name || "") + " " + (x.source || "") + " " + (x.file || "")).toLowerCase().includes(kw));
+      if (!rows.length) {
+        listBox.appendChild(el("div", "hint mempty",
+          SFXLIB.length ? "没有匹配的音效" : "音效库是空的，先去「📥 导入台」存一段。"));
+        return;
+      }
+      rows.forEach((it) => {
+        const row = el("div", "pickrow" + (sel === it.id ? " cur" : ""));
+        row.appendChild(el("span", "pn", it.name || it.file));
+        row.appendChild(el("span", "pm", matMetaText(it)));
+        row.onclick = () => { sel = it.id; draw(); };
+        row.ondblclick = () => {
+          sel = it.id;
+          const ok = box.parentNode && box.parentNode.querySelector(".foot .btn.primary");
+          if (ok) ok.click();
+        };
+        listBox.appendChild(row);
+      });
+    };
+    q.oninput = draw;
+    draw();
+    q.focus();
+    modal("给标签挂音效", box, async () => {
+      if (!sel) { toast("先在下面挑一个音效", true); return false; }
+      await tagSfxApply(list, sel);
+    }, "挂上");
+  }
+
+  /* 标记的右键菜单（列表行 + 画布上的标记线都开这个） */
+  function openMarkerMenu(m, cx, cy) {
+    hideCtx();
+    const key = markerKeyOf(m);
+    if (!MSEL.has(key)) { MSEL.clear(); MSEL.add(key); MSEL_ANCHOR = key; drawMarkersList(); }
+    const list = selMarkers().length ? selMarkers() : [m];
+    const n = list.length;
+    const tags = list.filter((x) => !x.custom);
+    const marks = list.filter((x) => x.custom);
+    const withSfx = list.filter(markerHasSfx);
+    const menu = el("div", "ctxmenu");
+    const add = (label, sub, fn, danger, disabled) => {
+      const b = el("button", "ctxitem" + (danger ? " danger" : ""));
+      b.appendChild(el("span", null, label));
+      if (sub) b.appendChild(el("span", "k", sub));
+      b.disabled = !!disabled;
+      if (disabled) b.style.opacity = ".45";
+      b.onclick = (ev) => { ev.stopPropagation(); hideCtx(); if (!disabled) fn(); };
+      menu.appendChild(b);
+    };
+    add("跳到 " + fmt(m.time), "", () => seek(m.time));
+    /* 右键落在标记线上时，也想把刚才复制的素材贴到这个时刻 —— 顺手带上，
+       否则「标记正好在要贴的位置」反而贴不了（只能挪开半个像素再右键）。 */
+    add("粘贴到这里", "Ctrl+V", async () => {
+      if (!S.clipboard) { toast("剪贴板是空的：先 Ctrl+C 复制一段", true); return; }
+      const tid = (sfxTracks()[0] || tracks()[0] || {}).id;
+      const made = await pasteClipboard(m.time, tid);
+      if (!made.length) return;
+      persist("插入片段").then(() => {
+        setMulti(made.map((x) => x.id));
+        S.sel = made[made.length - 1].id;
+        drawInspector(); draw();
+        toast(`已粘贴到 ${fmt(m.time)}`);
+      });
+    }, false, !S.clipboard);
+    menu.appendChild(el("div", "ctxsep"));
+    add(`🔔 挂音效…${n > 1 ? `（${n} 个）` : ""}`, "", () => pickSfxForTags(list), false, !tags.length);
+    add("✕ 移除音效", "", () => tagSfxApply(list, null), false, !withSfx.length);
+    add("🔇 音效静音", "", () => tagMuteApply(list, true), false, !withSfx.length);
+    add("🔊 取消音效静音", "", () => tagMuteApply(list, false), false, !withSfx.length);
+    menu.appendChild(el("div", "ctxsep"));
+    add("＋♪ 在此插入素材…", "", () => openInsertPicker(m.time, null, "sfx"));
+    if (m.custom) {
+      add("重命名…", "", () => renameMark(m));
+      add(`🗑 删除标记${n > 1 && marks.length > 1 ? `（${marks.length} 个）` : ""}`, "Del",
+        () => { marks.forEach((x) => delMarkOrQueue(x)); }, true, !marks.length);
+    } else {
+      add("标签要在台本页改 / 删", "", () => {}, false, true);
+    }
+    document.body.appendChild(menu);
+    const w = menu.offsetWidth, h = menu.offsetHeight;
+    menu.style.left = Math.min(cx, window.innerWidth - w - 8) + "px";
+    menu.style.top = Math.min(cy, window.innerHeight - h - 8) + "px";
+  }
+
+  function delMarkOrQueue(m) { delMark(m.id); }
+
+  function renameMark(m) {
+    const v = prompt("标记名称", m.name || "标记");
+    if (v == null) return;
+    const name = v.trim();
+    if (!name) return;
+    fetch(`${API}/marks/${m.id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    }).then(async (r) => {
+      if (!r.ok) { toast("改名失败", true); return; }
+      m.name = name;
+      drawMarkersList(); draw();
+      toast("已改名");
+    });
+  }
+
   function drawMarkersList() {
     const box = $("markerList");
     box.innerHTML = "";
+    const all = markersOf();
     const mc = $("markerCount");
-    if (mc) mc.textContent = (S.data.markers || []).length;
-    if (!S.data.markers.length) {
+    if (mc) mc.textContent = String(all.length);
+    if (!all.length) {
       box.appendChild(el("div", "hint",
         "还没有标记点。台本里可以用「＋ 句间标签」加；时间轴上在播放头按 M "
         + "（或空白处右键「添加标记点」）也能加。"));
+      updateMarkerBar();
       return;
     }
-    for (const m of S.data.markers) {
-      const row = el("div", "markerrow" + (m.pinned ? " pinned" : ""));
+    // 筛选项上的数字
+    const cnt = { all: all.length, inline: 0, tag: 0, mark: 0, sfx: 0 };
+    all.forEach((m) => {
+      cnt[markerKindOf(m)] += 1;
+      if (markerHasSfx(m)) cnt.sfx += 1;
+    });
+    document.querySelectorAll("#mFilters .chip").forEach((b) => {
+      const k = b.dataset.mf;
+      b.classList.toggle("on", k === "sfx" ? MFILTER.sfxOnly : (MFILTER.kind === k && !MFILTER.sfxOnly));
+      const n = k === "sfx" ? cnt.sfx : cnt[k];
+      b.textContent = b.dataset.label + (n ? ` ${n}` : "");
+    });
+    const rows = markersVisible();
+    if (!rows.length) {
+      box.appendChild(el("div", "hint", "这个筛选条件下没有标记（点「全部」看看）"));
+      updateMarkerBar();
+      return;
+    }
+    rows.forEach((m) => {
+      const key = markerKeyOf(m);
+      const row = el("div", "markerrow" + (m.pinned ? " pinned" : "") + (MSEL.has(key) ? " sel" : ""));
+      row.dataset.mk = key;
       row.appendChild(el("span", "mt", fmt(m.time)));
       row.appendChild(el("span", "mg",
         (m.custom ? "〔标记〕" : (m.inline ? "〔句中〕" : "〔句间〕")) + (m.name || "")));
@@ -6480,8 +6755,7 @@
         pin.title = "按「标签跟随」设置，这个标签固定在首次位置，不跟句子走";
         row.appendChild(pin);
       }
-      const hasSfx = m.sfx_mid || (m.sfx && m.sfx.mid);
-      if (hasSfx) {
+      if (markerHasSfx(m)) {
         const b = el("span", "mfromtag", "🔔");
         b.title = "这个标签挂了音效：已在素材轨上自动放好（位置 = 标签落点"
           + (m.inline ? "" : " + 留白") + "），标签怎么动它就怎么动";
@@ -6502,9 +6776,26 @@
         tools.appendChild(bDel);
       }
       row.appendChild(tools);
-      row.onclick = () => seek(m.time);
+      row.onclick = (e) => {
+        if (e.ctrlKey || e.metaKey) {
+          if (MSEL.has(key)) MSEL.delete(key); else MSEL.add(key);
+          MSEL_ANCHOR = key;
+        } else if (e.shiftKey && MSEL_ANCHOR) {
+          markerRangeSelect(m);
+        } else {
+          MSEL.clear(); MSEL.add(key); MSEL_ANCHOR = key;
+          seek(m.time);
+        }
+        drawMarkersList();
+      };
+      row.oncontextmenu = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openMarkerMenu(m, e.clientX, e.clientY);
+      };
       box.appendChild(row);
-    }
+    });
+    updateMarkerBar();
   }
 
   /* ------------------------------ 素材库 ------------------------------
@@ -7253,7 +7544,8 @@
         const o = document.createElement("option");
         o.value = v; o.textContent = t; rate.appendChild(o);
       });
-      rate.value = "44100";
+      const MX = (GSET && GSET.mix) || {};
+      rate.value = MX.rate || "44100";
       f25.appendChild(rate);
       box.appendChild(f25);
 
@@ -7265,6 +7557,7 @@
         const o = document.createElement("option");
         o.value = v; o.textContent = t; ch.appendChild(o);
       });
+      if (MX.channels) ch.value = String(MX.channels);
       f3.appendChild(ch);
       f3.appendChild(el("span", null,
         "开了「空间音频」的片段会按 HRTF 双耳渲染，房间混响一并混进这两轨——"
@@ -7299,6 +7592,7 @@
           const o = document.createElement("option");
           o.value = v; o.textContent = t; dmode.appendChild(o);
         });
+      if (MX.dmode) dmode.value = MX.dmode;
       f45.appendChild(dmode);
       f45.appendChild(el("span", null,
         "收尾有混响尾巴时会再多留一点，避免把余响切掉。"));
@@ -7316,6 +7610,9 @@
       estBox.el = est;
       box.appendChild(el("div", "progress", ""));
 
+      const MXF = (GSET && GSET.mix) || {};
+      if (MXF.format) fmt.value = MXF.format;
+      if (MXF.bitDepth) q.value = String(MXF.bitDepth);
       box._fmt = fmt; box._q = q; box._ch = ch; box._rate = rate;
       box._from = from; box._to = to; box._tracks = cares; box._dmode = dmode;
       syncQ(box);
@@ -8530,8 +8827,35 @@
   $("btnSnap").onclick = () => {
     S.snap = !S.snap;
     $("btnSnap").classList.toggle("on", S.snap);
+    try { localStorage.setItem("tl.snap", S.snap ? "1" : "0"); } catch (e) { /* 忽略 */ }
     toast(S.snap ? "吸附已开" : "吸附已关");
   };
+  document.querySelectorAll("#mFilters .chip").forEach((b) => {
+    b.onclick = () => {
+      const k = b.dataset.mf;
+      if (k === "sfx") {
+        MFILTER.sfxOnly = !MFILTER.sfxOnly;
+      } else {
+        MFILTER.kind = k;
+        MFILTER.sfxOnly = false;
+      }
+      MSEL.clear(); MSEL_ANCHOR = null;
+      drawMarkersList();
+    };
+  });
+  const mBkSfx = $("mBkSfx");
+  if (mBkSfx) {
+    mBkSfx.onclick = () => pickSfxForTags(selMarkers());
+    $("mBkDrop").onclick = () => tagSfxApply(selMarkers(), null);
+    $("mBkMute").onclick = () => tagMuteApply(selMarkers(), true);
+    $("mBkUnmute").onclick = () => tagMuteApply(selMarkers(), false);
+    $("mBkDel").onclick = () => {
+      const ms = selMarkers().filter((m) => m.custom);
+      if (!ms.length) return;
+      if (!confirm(`删除选中的 ${ms.length} 个普通标记？（台本标签不受影响）`)) return;
+      ms.forEach((m) => delMark(m.id));
+    };
+  }
   const tfSel = $("tagFollowMode");
   if (tfSel) {
     tfSel.onchange = () => setTagFollow(tfSel.value, false);
@@ -8710,8 +9034,11 @@
       : (S.sel ? [clipById(S.sel)].filter(Boolean) : []);
     if (!list.length) { toast("先选一段（或多段）再按 V", true); return; }
     const want = !list.every((z) => z.mute);       // 全都静音了 → 一起取消
-    list.forEach((z) => { z.mute = want; });
-    bulkCommit(list, want ? "静音片段" : "取消静音");
+    list.forEach((z) => { z.mute = want; writeClipOverride(z); });
+    drawInspector(); draw(); updateBulkBar();
+    /* 立刻落盘：静音/取消静音是最容易被「后面的某个 reload」吃掉的状态之一，
+       留在 700ms 防抖里就会变成「过一会儿自己恢复了」。 */
+    persist(want ? "静音片段" : "取消静音");
     toast(want ? `已静音 ${list.length} 段` : `已取消静音 ${list.length} 段`);
   }
 
@@ -8977,6 +9304,17 @@
     },
   };
 
-  if (!SID) toast("没有指定台本", true);
-  else reload().catch((e) => toast("加载失败：" + e.message, true));
+  /* 启动顺序：先拿全局设置（吸附 / 悬浮窗 / 导出默认），再拉工程。
+     设置接口挂了也不影响打开页面（GSET 为 null 时全用内置默认）。 */
+  (async () => {
+    await loadGlobalSettings();
+    applyGlobalDefaults();
+    if (!SID) { toast("没有指定台本", true); return; }
+    try {
+      await reload();
+      applyGlobalDefaults();
+    } catch (e) {
+      toast("加载失败：" + e.message, true);
+    }
+  })();
 })();

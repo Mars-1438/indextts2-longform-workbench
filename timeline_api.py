@@ -39,10 +39,10 @@ import rooms as rooms_mod
 
 from longform_api import (
     AUDIO_SR, PAUSE_MAX, PAUSE_MIN, _LOCK as _LF_LOCK, _audio_props, _eff,
-    _load_materials, _load_script, _log, _lf_root, _mat_add_from_audio, _mat_dir,
+    _load_materials, _load_script, _load_settings, _log, _lf_root, _mat_add_from_audio, _mat_dir,
     _merge_runtime, _new_uid, _normalize_line, _now, _read_audio_any, _read_json,
     _safe_sid, _safe_title, _save_script, _script_dir, _start_render, _usable,
-    _write_json, resolve_ref, sfx_item, sfx_path_of,
+    _UIDS_RE, _write_json, resolve_ref, sfx_item, sfx_path_of,
 )
 
 try:
@@ -128,6 +128,14 @@ def _snapshot_project(sid, label):
     return name
 
 
+def _settings_tl(key, default=None):
+    """读全局设置里 tl 段的某一项（读不到就用调用方给的默认）。"""
+    try:
+        return (_load_settings().get("tl") or {}).get(key, default)
+    except Exception:  # noqa: BLE001
+        return default
+
+
 def _default_project():
     return {
         "version": 2,
@@ -142,7 +150,7 @@ def _default_project():
         #   fixed   固定成第一次冻结的绝对时间
         #   inline  只有句中标签跟着走，句间标签固定
         #   between 只有句间标签跟着走，句中标签固定
-        "tagfollow": {"mode": "follow"},
+        "tagfollow": {"mode": _settings_tl("tagFollow") or "follow"},
         # 冻结下来的标签时间：{"t:<uid>": 12.3, "i:<uid>:<k>": 4.5}
         "tagpos": {},
         "rev": 0,
@@ -806,7 +814,7 @@ def _load_project(sid):
                 item["mute"] = bool(ov["mute"])
             item.update(_spatial_of(ov))
             if item:
-                p["tagfx"][str(uid)[:20]] = item
+                p["tagfx"][str(uid)[:40]] = item
 
     try:
         p["duration"] = max(0.0, float(raw.get("duration") or 0))
@@ -907,7 +915,7 @@ def _save_project(sid, data):
                 item["mute"] = bool(ov["mute"])
             item.update(_spatial_of(ov))
             if item:
-                out[str(uid)[:20]] = item
+                out[str(uid)[:40]] = item     # 句中标签的键是 uid#k（21 位），别截成 20
         p["tagfx"] = out
 
     if isinstance(data.get("marks"), list):
@@ -980,6 +988,8 @@ def _build(sid, script=None, project=None):
     clips, markers, cursor = [], [], 0.0
     init_tc = _initial_timeline(sid)
     gen_defaults = script.get("defaults") or {}
+    # 新语音片段默认锁不锁（锁定 = 位置跟台本走，拖动要先解锁）
+    lock_default = bool(_settings_tl("lockVoice", True))
 
     sfx_track_ids = [t["id"] for t in tracks if t.get("kind") == "sfx"] or ["sfx"]
     sfx_track = sfx_track_ids[0]
@@ -1176,7 +1186,7 @@ def _build(sid, script=None, project=None):
             "speed": float(o.get("speed") or 1),
             "reverse": False,
             "mute": bool(o.get("mute")),
-            "locked": bool(o.get("locked", True)),
+            "locked": bool(o.get("locked", lock_default)),
             "fade_in": float(o.get("fade_in") or 0),
             "fade_out": float(o.get("fade_out") or 0),
             "has_audio": has_file,
@@ -2168,6 +2178,185 @@ def register_timeline(app, deps=None):
         with _lock():
             p = _save_project(sid, req or {})
         return {"ok": True, "project": p}
+
+    # ---- 普通标记（M）：只改 project.marks ---------------------------------
+    # 以前前端加一个标记会 PATCH 整份工程再 reload。只要还有没落盘的改动
+    # （静音、换轨、音量…在 700ms 防抖里），就可能被服务端快照盖回去 ——
+    # 用户看到的就是「按 M 加标注，某段音频自己解除静音了」。
+    # 现在标记有独立接口：谁都不碰，只碰 marks。
+    def _marks_write(sid, fn):
+        path = _proj_path(sid)
+        raw = _read_json(path, {})
+        if not isinstance(raw, dict):
+            raw = {}
+        marks = raw.get("marks") if isinstance(raw.get("marks"), list) else []
+        marks = fn([m for m in marks if isinstance(m, dict)])
+        raw["marks"] = _clean_marks(marks)
+        _write_json(path, raw)
+        return raw["marks"]
+
+    @_LF.post("/lf/tl/{sid}/marks")
+    def tl_mark_add(sid: str, req: dict = Body(default={})):
+        sid = _safe_sid(sid)
+        at = round(max(0.0, float(req.get("time") or 0)), 3)
+        name = _safe_title(req.get("name") or "标记", "标记")[:40]
+
+        def fn(marks):
+            if any(abs(float(m.get("time") or 0) - at) < 0.02 for m in marks):
+                raise HTTPException(409, "这里已经有标记了")
+            marks.append({"id": "mk_" + uuid.uuid4().hex[:8], "time": at, "name": name})
+            return marks
+
+        with _lock():
+            marks = _marks_write(sid, fn)
+        return {"ok": True, "marks": marks}
+
+    @_LF.patch("/lf/tl/{sid}/marks/{mid}")
+    def tl_mark_patch(sid: str, mid: str, req: dict = Body(default={})):
+        sid = _safe_sid(sid)
+        hit = []
+
+        def fn(marks):
+            for m in marks:
+                if m.get("id") != mid:
+                    continue
+                if req.get("time") is not None:
+                    m["time"] = round(max(0.0, float(req["time"])), 3)
+                if req.get("name"):
+                    m["name"] = _safe_title(req["name"], "标记")[:40]
+                hit.append(m)
+            if not hit:
+                raise HTTPException(404, "没有这个标记")
+            return marks
+
+        with _lock():
+            marks = _marks_write(sid, fn)
+        return {"ok": True, "mark": hit[0], "marks": marks}
+
+    @_LF.delete("/lf/tl/{sid}/marks/{mid}")
+    def tl_mark_del(sid: str, mid: str):
+        sid = _safe_sid(sid)
+        removed = []
+
+        def fn(marks):
+            keep = []
+            for m in marks:
+                if m.get("id") == mid:
+                    removed.append(m)
+                else:
+                    keep.append(m)
+            if not removed:
+                raise HTTPException(404, "没有这个标记")
+            return keep
+
+        with _lock():
+            marks = _marks_write(sid, fn)
+        return {"ok": True, "marks": marks}
+
+    # ---- 标记挂的音效：批量挂 / 换 / 摘 / 静音 -------------------------------
+    def _tag_key_parts(key):
+        """'t:<uid>' / 'i:<uid>:<k>' → (uid, k or None)。"""
+        key = str(key or "")
+        if key.startswith("t:"):
+            return key[2:], None
+        if key.startswith("i:"):
+            body = key[2:]
+            uid, _, k = body.partition(":")
+            return uid, k
+        return "", None
+
+    @_LF.post("/lf/tl/{sid}/tags/sfx")
+    def tl_tag_sfx(sid: str, req: dict = Body(default={})):
+        """给一批标签挂 / 换 / 摘音效（mid 为 null 表示摘掉）。
+
+        改的是**台本**里标签的 sfx 字段（和台本页面板同一份数据），
+        时间轴下次 _build 就会生成 / 丢掉对应的派生片段。
+        """
+        sid = _safe_sid(sid)
+        keys = [str(k) for k in (req.get("keys") or [])][:200]
+        if not keys:
+            raise HTTPException(400, "没有选中标签")
+        mid = req.get("mid") or None
+        if mid:
+            mid = _UIDS_RE.sub("", str(mid))[:20]
+            if not sfx_item(mid):
+                raise HTTPException(404, "音效库里没有这个音效")
+        try:
+            gain = float(req.get("gain")) if req.get("gain") is not None else 1.0
+        except (TypeError, ValueError):
+            gain = 1.0
+        gain = round(max(0.0, min(4.0, gain)), 3)
+
+        with _lock():
+            script = _load_script(sid)
+            by_uid = {l.get("uid"): l for l in script.get("lines") or []}
+            hit = 0
+            for key in keys:
+                uid, k = _tag_key_parts(key)
+                line = by_uid.get(uid)
+                if not line:
+                    continue
+                if k is None:
+                    if line.get("kind") != "tag":
+                        continue
+                    if mid:
+                        line["sfx"] = {"mid": mid, "gain": gain}
+                        hit += 1
+                    elif line.get("sfx"):
+                        line["sfx"] = None
+                        hit += 1
+                else:
+                    for it in line.get("inline") or []:
+                        if str(it.get("k") or "") != k:
+                            continue
+                        if mid:
+                            it["sfx"] = {"mid": mid, "gain": gain}
+                            hit += 1
+                        elif it.get("sfx"):
+                            it.pop("sfx", None)
+                            hit += 1
+                        break
+            if not hit:
+                raise HTTPException(400, "这些标签没有可改的音效")
+            _save_script(script)
+        _log("timeline: tag sfx %s -> %s (%d)", sid, mid, hit)
+        return {"ok": True, "changed": hit, "mid": mid}
+
+    def _tfx_key_of(marker_key):
+        """标记 key（t:uid / i:uid:k）→ project.tagfx 的覆写键。
+
+        _build 里句间标签的音效覆写键就是**标签行 uid**（兼容老工程），
+        句中标签是 **uid#k**（同一句可能挂好几个）。这里必须同样换算，
+        否则写进去的 key 永远对不上，静音 / 换轨一刷新就丢。
+        """
+        uid, k = _tag_key_parts(marker_key)
+        if not uid:
+            return ""
+        return uid if k is None else (uid + "#" + k)
+
+    @_LF.post("/lf/tl/{sid}/tags/mute")
+    def tl_tag_mute(sid: str, req: dict = Body(default={})):
+        """批量静音 / 取消静音「标签挂的音效」（存在 project.tagfx[key].mute）。"""
+        sid = _safe_sid(sid)
+        raw_keys = [str(k)[:40] for k in (req.get("keys") or [])][:200]
+        keys = [k for k in (_tfx_key_of(x) for x in raw_keys) if k]
+        if not keys:
+            raise HTTPException(400, "没有选中标签")
+        mute = bool(req.get("mute"))
+        with _lock():
+            raw = _read_json(_proj_path(sid), {})
+            if not isinstance(raw, dict):
+                raw = {}
+            tfx = raw.get("tagfx") if isinstance(raw.get("tagfx"), dict) else {}
+            hit = 0
+            for key in keys:
+                ov = tfx.get(key) if isinstance(tfx.get(key), dict) else {}
+                ov["mute"] = mute
+                tfx[key] = ov
+                hit += 1
+            raw["tagfx"] = tfx
+            _write_json(_proj_path(sid), raw)
+        return {"ok": True, "changed": hit, "mute": mute}
 
     @_LF.post("/lf/tl/{sid}/tagfollow")
     def tl_tagfollow(sid: str, req: dict = Body(default={})):

@@ -13,7 +13,7 @@
 })();
 </script>
 <link rel="icon" href="/assets/favicon.svg">
-<link rel="stylesheet" href="/longform-assets/longform.css?v=20261029a">
+<link rel="stylesheet" href="/longform-assets/longform.css?v=20261029c">
 </head>
 <body>
 
@@ -32,6 +32,7 @@
     <button id="btnTimeline" class="btn cta" title="保存当前台本 → 新建工程副本 → 进入多轨时间轴编辑（Ctrl+Alt+T）">
       <span class="cta-ico">⏱</span><span class="cta-txt">保存并进入时间轴</span>
     </button>
+    <button id="btnDefaults" class="btn set" title="设置：时间轴默认（锁定 / 标签跟随 / 吸附）、混音导出默认、台本默认（音色 / 情感 / 停顿 / 采样）">⚙ 设置</button>
     <button id="btnLfTheme" class="btn ghost" title="切换日间 / 夜间模式（时间轴页会跟随）">🌙 夜间</button>
     <a class="back" href="/" title="回到原来的语音合成页面">返回主界面</a>
   </div>
@@ -41,7 +42,6 @@
     <div class="spacer"></div>
     <button id="btnGuide" class="btn guide" title="第一次用？这里有一份带截图的最短流程（导入台本 → 提取音色 → 生成 → 加音效 → 时间轴 → 导出混音）">🎓 第一次用？看看这里</button>
     <button id="btnImportDesk" class="btn" title="导入台素材库：批量导入音频/视频（未处理/未标记）→ 处理 → 存入音色库或音效库">📥 素材导入台</button>
-    <button id="btnDefaults" class="btn" title="全局默认参数：音色 / 情感 / 停顿 / 采样，对所有未单独覆盖的行生效">全局默认参数</button>
     <button id="btnVoiceLib" class="btn" title="音色素材库：参考音频 + 导入台（视频抽音频 / 去伴奏 / 降噪…）">🎙 音色素材库</button>
     <button id="btnSfxLib" class="btn" title="音效素材库：给台本标签挂的音效，可上传 / 处理 / 复制改名">🔔 音效素材库</button>
     <button id="btnTagFollow" class="btn" title="标签跟随：句子拖动 / 重生成之后，句中·句间标签（以及它们挂的音效）要不要跟着走">🏷 标签跟随</button>
@@ -375,53 +375,122 @@
       <button id="drawerClose" class="iconbtn" title="关闭（Esc）">✕</button>
     </div>
     <div class="drawer-body">
-      <!-- 全局默认参数 -->
+      <!-- 设置：全局偏好（时间轴 / 导出）+ 台本默认（音色 / 情感 / 停顿 / 采样） -->
       <div class="ppane" data-pane="default">
-        <div class="phead"><span class="badge">全局默认</span><span class="hint">作用范围是整个台本：新行、以及没有单独覆盖的行都继承这里</span></div>
-        <label class="fl">默认音色</label>
-        <select id="dRef" class="sel"></select>
-        <label class="fl">默认情感模式</label>
-        <select id="dEmoMode" class="sel">
-          <option value="0">与音色参考音频相同</option>
-          <option value="1">情感参考音频</option>
-          <option value="2">情感向量</option>
-          <option value="3">情感描述文本（实验）</option>
+        <div class="phead">
+          <span class="badge">设置</span>
+          <span class="hint">上半部分是<b>整台机器通用</b>的偏好（跨台本、跨工程）；台本默认参数收在最后。</span>
+        </div>
+
+        <div class="sec-h">时间轴与工作台</div>
+        <label class="setrow">
+          <input type="checkbox" id="sLockVoice">
+          <span><b>新语音片段默认锁定</b>
+            <i>锁定 = 位置和时间跟着台本走，要拖动得先解锁（L 键 / 右键）。关掉之后新片段可以直接拖。</i></span>
+        </label>
+        <label class="setrow">
+          <input type="checkbox" id="sSnap">
+          <span><b>时间轴默认开吸附</b>
+            <i>拖动片段时吸附到标记 / 其它片段边缘。时间轴顶栏可以临时关掉。</i></span>
+        </label>
+        <label class="setrow">
+          <input type="checkbox" id="sHoverIns">
+          <span><b>标记悬浮窗默认显示</b>
+            <i>鼠标扫过标记线时弹出「＋ 插入素材」。关掉后仍可从右键菜单插入。</i></span>
+        </label>
+        <label class="fl">标签跟随默认 <span class="hint">新建工程用；已有工程在时间轴「标记」区单独设</span></label>
+        <select id="sTagFollow" class="sel">
+          <option value="follow">跟随句子（默认）— 句中 / 句间标签都跟着句子走</option>
+          <option value="fixed">固定首版位置 — 标签钉在第一次的位置</option>
+          <option value="inline">只跟句中 — 句间标签固定</option>
+          <option value="between">只跟句间 — 句中标签固定</option>
         </select>
-        <label class="fl">默认情感参考音频 <span class="hint">模式 1 用</span></label>
-        <div id="dEmoRefHost"></div>
-        <label class="fl">默认情感向量 <span class="hint">模式 2 用</span></label>
-        <div id="dEmoVecHost"></div>
-        <label class="fl">情感权重 <span id="dWeightOut" class="mono">0.65</span></label>
-        <input id="dWeight" type="range" min="0" max="1" step="0.01" value="0.65">
-        <label class="fl">默认行间停顿 <span class="hint">毫秒</span></label>
-        <input id="dPause" class="inp" type="number" min="0" max="30000" step="10" value="200">
-        <label class="fl">每段最大 Token <span class="hint">120 ≈ 90 字</span></label>
-        <input id="dSeg" class="inp" type="number" min="20" max="600" step="10" value="120">
 
-        <div class="phead" style="margin-top:14px"><span class="badge">分句</span></div>
-        <label class="fl">每行字数上限</label>
+        <div class="sec-h" style="margin-top:16px">混音导出默认</div>
         <div class="row2">
-          <input id="dMaxChars" class="inp" type="number" min="10" max="400" step="5" value="70">
-          <select id="dSplitMode" class="sel">
-            <option value="packed">按长度合并</option>
-            <option value="sentence">一句一行</option>
+          <div><label class="fl">格式</label>
+            <select id="sMixFmt" class="sel">
+              <option value="wav">WAV — 无损，最通用</option>
+              <option value="flac">FLAC — 无损压缩</option>
+              <option value="mp3">MP3 — 体积小</option>
+              <option value="ogg">OGG — 体积小</option>
+            </select></div>
+          <div><label class="fl">采样率</label>
+            <select id="sMixRate" class="sel">
+              <option value="16000">16000 Hz</option>
+              <option value="22050">22050 Hz</option>
+              <option value="32000">32000 Hz</option>
+              <option value="44100">44100 Hz</option>
+              <option value="48000">48000 Hz</option>
+              <option value="96000">96000 Hz</option>
+            </select></div>
+        </div>
+        <div class="row2">
+          <div><label class="fl">声道</label>
+            <select id="sMixCh" class="sel">
+              <option value="2">立体声（保留声像）</option>
+              <option value="1">单声道（体积减半）</option>
+            </select></div>
+          <div><label class="fl">总时长口径</label>
+            <select id="sMixDmode" class="sel">
+              <option value="visible">显示末端（和眼睛看到的一致）</option>
+              <option value="full">源末端（含被裁掉的部分）</option>
+            </select></div>
+        </div>
+        <div class="pfoot"><button id="btnSaveSettings" class="btn primary grow">保存设置</button></div>
+        <div class="hint">这些是「这台机器」的偏好，存在 <code>longform/settings.json</code>，所有台本共用。</div>
+
+        <details class="setfold" style="margin-top:16px">
+          <summary>台本默认参数（音色 / 情感 / 停顿 / 分行 / 采样）</summary>
+          <div class="phead" style="margin-top:8px">
+            <span class="badge">台本默认</span>
+            <span class="hint">只作用于当前台本：新行、以及没有单独覆盖的行都继承这里</span>
+          </div>
+          <label class="fl">默认音色</label>
+          <select id="dRef" class="sel"></select>
+          <label class="fl">默认情感模式</label>
+          <select id="dEmoMode" class="sel">
+            <option value="0">与音色参考音频相同</option>
+            <option value="1">情感参考音频</option>
+            <option value="2">情感向量</option>
+            <option value="3">情感描述文本（实验）</option>
           </select>
-        </div>
+          <label class="fl">默认情感参考音频 <span class="hint">模式 1 用</span></label>
+          <div id="dEmoRefHost"></div>
+          <label class="fl">默认情感向量 <span class="hint">模式 2 用</span></label>
+          <div id="dEmoVecHost"></div>
+          <label class="fl">情感权重 <span id="dWeightOut" class="mono">0.65</span></label>
+          <input id="dWeight" type="range" min="0" max="1" step="0.01" value="0.65">
+          <label class="fl">默认行间停顿 <span class="hint">毫秒</span></label>
+          <input id="dPause" class="inp" type="number" min="0" max="30000" step="10" value="200">
+          <label class="fl">每段最大 Token <span class="hint">120 ≈ 90 字</span></label>
+          <input id="dSeg" class="inp" type="number" min="20" max="600" step="10" value="120">
 
-        <div class="phead" style="margin-top:14px"><span class="badge">采样参数</span></div>
-        <label class="fl">temperature <span id="sTempOut" class="mono">0.80</span></label>
-        <input id="sTemp" type="range" min="0.1" max="2" step="0.05" value="0.8">
-        <label class="fl">top_p <span id="sTopPOut" class="mono">0.80</span></label>
-        <input id="sTopP" type="range" min="0" max="1" step="0.01" value="0.8">
-        <div class="row2">
-          <div><label class="fl">top_k</label><input id="sTopK" class="inp" type="number" min="1" max="100" value="30"></div>
-          <div><label class="fl">num_beams</label><input id="sBeams" class="inp" type="number" min="1" max="10" value="3"></div>
-        </div>
-        <div class="row2">
-          <div><label class="fl">rep_penalty</label><input id="sRep" class="inp" type="number" min="0.1" max="20" step="0.1" value="10"></div>
-          <div><label class="fl">max_mel</label><input id="sMaxMel" class="inp" type="number" min="50" max="1815" step="10" value="1500"></div>
-        </div>
-        <div class="pfoot"><button id="btnSaveDefault" class="btn primary grow">保存全局默认</button></div>
+          <div class="phead" style="margin-top:14px"><span class="badge">分句</span></div>
+          <label class="fl">每行字数上限</label>
+          <div class="row2">
+            <input id="dMaxChars" class="inp" type="number" min="10" max="400" step="5" value="70">
+            <select id="dSplitMode" class="sel">
+              <option value="packed">按长度合并</option>
+              <option value="sentence">一句一行</option>
+            </select>
+          </div>
+
+          <div class="phead" style="margin-top:14px"><span class="badge">采样参数</span></div>
+          <label class="fl">temperature <span id="sTempOut" class="mono">0.80</span></label>
+          <input id="sTemp" type="range" min="0.1" max="2" step="0.05" value="0.8">
+          <label class="fl">top_p <span id="sTopPOut" class="mono">0.80</span></label>
+          <input id="sTopP" type="range" min="0" max="1" step="0.01" value="0.8">
+          <div class="row2">
+            <div><label class="fl">top_k</label><input id="sTopK" class="inp" type="number" min="1" max="100" value="30"></div>
+            <div><label class="fl">num_beams</label><input id="sBeams" class="inp" type="number" min="1" max="10" value="3"></div>
+          </div>
+          <div class="row2">
+            <div><label class="fl">rep_penalty</label><input id="sRep" class="inp" type="number" min="0.1" max="20" step="0.1" value="10"></div>
+            <div><label class="fl">max_mel</label><input id="sMaxMel" class="inp" type="number" min="50" max="1815" step="10" value="1500"></div>
+          </div>
+          <div class="pfoot"><button id="btnSaveDefault" class="btn primary grow">保存台本默认</button></div>
+        </details>
       </div>
 
       <!-- 音色库 -->
@@ -848,7 +917,7 @@
 </div>
 <div id="toast" class="toast" hidden></div>
 
-<script src="/longform-assets/emoctl.js?v=20261029a"></script>
-<script src="/longform-assets/longform.js?v=20261029a"></script>
+<script src="/longform-assets/emoctl.js?v=20261029c"></script>
+<script src="/longform-assets/longform.js?v=20261029c"></script>
 </body>
 </html>

@@ -1531,3 +1531,23 @@ pre.impsample {
 .presetlist { max-height: 240px; }
 .presetpick { max-height: 320px; }
 .presetpick .refitem { cursor: default; }
+
+/* 设置里「这段会改到当前台本」的警示条（和「只存方案」的预设区区分开） */
+.hint.warnbox {
+  padding: 6px 8px; border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--warn, #c68a1a) 38%, var(--border));
+  background: color-mix(in srgb, var(--warn, #c68a1a) 9%, var(--surface));
+  color: var(--muted); line-height: 1.5;
+}
+.hint.warnbox b { color: var(--ink); }
+
+/* 设置面板顶部的「运行环境 / 能力」一行 */
+.envline {
+  display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center;
+  font-size: 11px; color: var(--muted); line-height: 1.5;
+  padding: 5px 8px; margin: 0 0 10px;
+  border: 1px dashed var(--border); border-radius: 8px; background: var(--inset);
+}
+.envline b { color: var(--ink); font-weight: 600; }
+.envline .eno { color: var(--faint); }
+.envline .eoff { color: var(--warn, #c68a1a); }

@@ -7515,8 +7515,12 @@
       const f1 = el("div", "field");
       f1.appendChild(fieldLabel("格式", "fmt"));
       const fmt = document.createElement("select");
+      /* 格式按后端能力过滤：mp3 / ogg 要靠 ffmpeg，没装就不该让用户选
+         （以前能选，导出时才报错）。能力清单 GET /lf/manifest。 */
       [["wav", "WAV — 无损，最通用"], ["flac", "FLAC — 无损压缩，约省 40%"],
        ["mp3", "MP3 — 体积小（内置编码器，码率偏低）"], ["ogg", "OGG — 体积小"]]
+        .filter(([v]) => v === "wav" || v === "flac"
+          || !window.GenParams || GenParams.can("ffmpeg"))
         .forEach(([v, t]) => {
           const o = document.createElement("option");
           o.value = v; o.textContent = t; fmt.appendChild(o);
@@ -8393,24 +8397,21 @@
       return { row, chk, body: bodyEl };
     };
 
-    /* 预设：选一个 → 把下面这些控件填好，用户看一眼再点「应用」 */
-    const presets = await loadTPresets();
-    let presetSel = null;
-    if (presets.length && typeof GenParams !== "undefined") {
-      const prow = el("div", "rowline presetrow");
-      prow.appendChild(el("span", "bulklab", "预设"));
-      const psel = document.createElement("select");
-      psel.className = "sel grow";
-      psel.innerHTML = '<option value="">套用参数预设…（只填入下面的控件）</option>';
-      presets.forEach((p) => {
-        const o = document.createElement("option");
-        o.value = p.id; o.textContent = p.name;
-        o.title = GenParams.summary(p.params, (id) => refNameOf(id));
-        psel.appendChild(o);
-      });
-      presetSel = psel;
-      prow.appendChild(psel);
-      body.appendChild(prow);
+    /* 预设条常驻（两页共用 GenParams.presetBar）：
+       · 「填入」把参数灌进下面的控件，仍然要点「应用」—— 弹窗里有
+         「立即重生成 / 保持位置」两个开关，直接生效会绕过它们；
+       · 「＋ 存为预设」用当前这套控件值新建方案，不碰任何句子。 */
+    await loadTPresets();
+    if (typeof GenParams !== "undefined") {
+      body.appendChild(GenParams.presetBar({
+        presets: () => TPRESETS || [],
+        label: "预设",
+        refName: (id) => refNameOf(id),
+        toast,
+        onFill: (p) => fillFromPreset(p),
+        onSave: (name) => savePanelAsPreset(name),
+        onManage: () => toast("在台本页顶栏「⚙ 设置 → 参数预设」里新建 / 改名 / 删除"),
+      }));
     }
 
     // 音色
@@ -8499,20 +8500,43 @@
     slLab.appendChild(el("span", null, "慢语速标记（不影响生成，供导出参考）"));
     const rowSl = mkRow("语速", slLab);
 
-    if (presetSel) {
-      presetSel.onchange = () => {
-        const p = presets.find((x) => x.id === presetSel.value);
-        if (!p) return;
-        const np = GenParams.normalize(p.params);
-        if (np.ref !== undefined) refSel.value = np.ref || "";
-        emoCtl.apply(np);
-        if (np.pause != null) {
-          pa.value = String(np.pause);
-          delete pa.dataset.def;
-        }
-        if (np.slow != null) sl.checked = !!np.slow;
-        toast(`已填入预设「${p.name}」：看完点「应用」才生效`);
+    /* 预设 → 控件 / 控件 → 预设（声明在这两个函数里，靠闭包拿 refSel / emoCtl / pa / sl） */
+    function fillFromPreset(p) {
+      const np = GenParams.normalize(p.params);
+      if (np.ref !== undefined) refSel.value = np.ref || "";
+      emoCtl.apply(np);
+      if (np.pause != null) { pa.value = String(np.pause); delete pa.dataset.def; }
+      if (np.slow != null) sl.checked = !!np.slow;
+      toast(`已填入预设「${p.name}」：看完点「应用」才生效`);
+    }
+
+    function readPanelParams() {
+      const em = emoCtl.read();
+      const out = {
+        ref: refSel.value || "",
+        emo_mode: em.emo_mode,
+        emo_weight: em.emo_weight,
+        emo_vec: em.emo_vec,
+        emo_text: em.emo_text,
+        emo_ref: em.emo_ref,
       };
+      const pv = (pa.value || "").trim();
+      if (pv !== "") out.pause = Math.max(0, Math.min(30000, parseInt(pv, 10) || 0));
+      if (sl.checked) out.slow = true;
+      return out;
+    }
+
+    async function savePanelAsPreset(name) {
+      const r = await fetch("/api/v1/lf/presets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, params: readPanelParams() }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.detail || "保存失败");
+      TPRESETS = (TPRESETS || []).concat([d.preset]);
+      toast(`预设「${name}」已保存：只新增了方案，没有改任何句子`);
+      return d.preset;
     }
 
     // 选项
@@ -9357,6 +9381,9 @@
      设置接口挂了也不影响打开页面（GSET 为 null 时全用内置默认）。 */
   (async () => {
     await loadGlobalSettings();
+    /* 能力清单：决定哪些按钮该显示（导出格式 / Demucs / 空间音频）。
+       读不到就当全支持，不影响打开页面。 */
+    if (window.GenParams) await GenParams.manifest();
     applyGlobalDefaults();
     if (!SID) { toast("没有指定台本", true); return; }
     try {

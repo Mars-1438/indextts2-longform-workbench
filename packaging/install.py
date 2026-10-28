@@ -37,7 +37,8 @@ PATCH_VERSION = "0.20 / 2026-10-28"
 BACKUP_NAME = "_patch_backup"
 
 # 这几个模块是本补丁的「主体」；version 用文件大小+哈希做粗校验
-CORE_FILES = ["longform_api.py", "lf_import.py", "timeline_api.py", "hrir.py", "rooms.py"]
+CORE_FILES = ["longform_api.py", "lf_import.py", "timeline_api.py", "hrir.py", "rooms.py",
+              "lf_static.py"]
 
 DATA_DIRS = [
     "longform", "longform/refs", "longform/scripts", "longform/sfx",
@@ -349,7 +350,7 @@ def do_restore(root):
             log(f"  还原 {rel}")
     log(f"已从备份 {stamp} 还原 {n} 个文件（server.py / index.html 回到补丁前）。")
     log("注意：补丁**新增**的文件不会被删除。要彻底撤掉，请删掉 longform_api.py、"
-        "lf_import.py、timeline_api.py、hrir.py、rooms.py、web\\longform.*、"
+        "lf_import.py、timeline_api.py、hrir.py、rooms.py、lf_static.py、web\\longform.*、"
         "web\\timeline.*、web\\emoctl.js、web\\genparams.js（assets\\hrir、_vendor、vendor2 可留可删）。")
     return True
 

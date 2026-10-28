@@ -27,10 +27,35 @@ NAME = "IndexTTS2_全能音声工作台补丁_v0.20"
 STAGE = os.path.join(DIST, NAME)
 PAYLOAD = os.path.join(STAGE, "payload")
 
-CORE_PY = ["longform_api.py", "lf_import.py", "timeline_api.py", "hrir.py", "rooms.py"]
-WEB = ["web/longform.html", "web/longform.css", "web/longform.js",
-       "web/timeline.html", "web/timeline.css", "web/timeline.js",
-       "web/emoctl.js", "web/genparams.js", "web/guide.html"]
+# lf_static.py 里放静态资源白名单（两个页面共用一份），必须一起打包
+CORE_PY = ["longform_api.py", "lf_import.py", "timeline_api.py", "hrir.py", "rooms.py",
+           "lf_static.py"]
+
+
+def _web_files():
+    """前端清单从 lf_static.py 的白名单生成 —— 加一个共用脚本只改那一处，
+    不用再回来改这份列表（漏一次就是线上 404 / 装完缺文件）。"""
+    try:
+        import sys as _sys
+        if ROOT not in _sys.path:
+            _sys.path.insert(0, ROOT)
+        from lf_static import asset_files
+        out = []
+        for page in ("longform", "timeline"):
+            for fn in asset_files(os.path.join(ROOT, "web"), page):
+                rel = "web/" + fn
+                if rel not in out:
+                    out.append(rel)
+        out.append("web/guide.html")
+        return out or ["web/longform.html"]
+    except Exception as e:  # noqa: BLE001
+        print(f"  ! 读 lf_static 失败（{e}），退回内置清单")
+        return ["web/longform.html", "web/longform.css", "web/longform.js",
+                "web/timeline.html", "web/timeline.css", "web/timeline.js",
+                "web/emoctl.js", "web/genparams.js", "web/guide.html"]
+
+
+WEB = _web_files()
 BIN = ["bin/ffmpeg.exe"]
 HRIR = ["assets/hrir/MIT_KEMAR_normal_pinna.sofa",
         "assets/hrir/KU100_near.npz",

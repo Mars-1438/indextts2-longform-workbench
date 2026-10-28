@@ -52,6 +52,10 @@ except Exception:  # noqa: BLE001
     _lfilter = None
 
 SR = 44100
+
+# 导出能力（manifest 与校验共用一份，免得「界面能选、后端不认」）
+MIX_FORMATS = ("wav", "flac", "mp3", "ogg")
+MIX_RATES = (16000, 22050, 32000, 44100, 48000, 96000)
 PEAK_POINTS = 640
 BLOCK_SEC = 1.0
 MAX_PEAK_UIDS = 80
@@ -2976,7 +2980,7 @@ def register_timeline(app, deps=None):
         if not uid:
             raise HTTPException(400, "缺少 uid")
         fmt = (req.get("format") or "wav").lower()
-        if fmt not in ("wav", "flac", "mp3", "ogg"):
+        if fmt not in MIX_FORMATS:
             raise HTTPException(400, "只支持 wav / flac / mp3 / ogg")
         script = _load_script(sid)
         project = _load_project(sid)
@@ -3032,7 +3036,7 @@ def register_timeline(app, deps=None):
     def tl_mix(sid: str, req: dict = Body(default={})):
         sid = _safe_sid(sid)
         fmt = (req.get("format") or "wav").lower()
-        if fmt not in ("wav", "mp3", "flac", "ogg"):
+        if fmt not in MIX_FORMATS:
             raise HTTPException(400, "只支持 wav / flac / mp3 / ogg")
         only = req.get("tracks")
         only = [t for t in only if isinstance(t, str)] if isinstance(only, list) else None
@@ -3314,16 +3318,8 @@ def register_timeline(app, deps=None):
 
     @app.get("/timeline-assets/{name}")
     def tl_asset(name: str):
-        base = os.path.basename(name)
-        # 时间轴页用到的前端资源：自己的 timeline.*，以及与台本页共用的 emoctl.js
-        if not (base.startswith("timeline.") or base in ("emoctl.js", "genparams.js")):
-            raise HTTPException(404, "not found")
-        path = os.path.join(web_dir, base)
-        if not os.path.exists(path):
-            raise HTTPException(404, "not found")
-        mt = "text/css" if base.endswith(".css") else "application/javascript"
-        if base.endswith(".html"):
-            mt = "text/html; charset=utf-8"
-        return FileResponse(path, media_type=mt, headers=_NO_CACHE)
+        # 白名单在 lf_static.py（两页共用一份，加新脚本只改那里）
+        from lf_static import serve_asset
+        return serve_asset(web_dir, "timeline", name)
 
     app.include_router(_LF)

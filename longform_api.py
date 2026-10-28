@@ -373,6 +373,12 @@ def _lf_cfg_set(key: str, val):
     return d
 
 
+# 工作台自身的标识（manifest 会带出去；移植到别的整合包时改这两行即可）
+APP_NAME = "全能音声工作台"
+APP_VERSION = "0.21-dev"
+API_PREFIX = "/api/v1/lf"
+
+
 def _ffmpeg_candidates() -> list:
     """按优先级列出所有可能的位置（给人看的「探测结果」也是这份）。"""
     root = _D.get("project_dir") or os.getcwd()
@@ -2958,11 +2964,9 @@ def register_longform(app, api, deps):
 
     @app.get("/longform-assets/{name}", include_in_schema=False)
     def longform_asset(name: str):
-        safe = os.path.basename(name)
-        if safe not in ("longform.js", "longform.css", "emoctl.js", "genparams.js"):
-            raise HTTPException(404, "Not found")
-        return FileResponse(os.path.join(web_dir, safe),
-                            headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"})
+        # 白名单在 lf_static.py（两页共用一份，加新脚本只改那里）
+        from lf_static import serve_asset
+        return serve_asset(web_dir, "longform", name)
 
     # ---- 存储清理 -----------------------------------------------------------
     @lf.get("/lf/storage/scan")
@@ -3824,6 +3828,73 @@ def register_longform(app, api, deps):
                       "source": it.get("source"), "op": "",
                       "created": it.get("created")})
         return {"ok": True, "info": props}
+
+    # ---- 能力清单（移植 / 前端降级用） --------------------------------------
+    @lf.get("/lf/manifest")
+    def lf_manifest():
+        """这台机器上「能用什么」：引擎、参数表、可选能力。
+
+        为什么要有这个接口：工作台要移植到别的整合包里，而不同包能提供的东西
+        不一样（有没有 Demucs、有没有 HRTF、ffmpeg 在不在）。前端拿它决定
+        「按钮显示 / 灰掉」，而不是像以前那样点了才报错。
+
+        移植时**不用改这个接口**，只要：
+          · 改 APP_NAME / APP_VERSION；
+          · 把不适用的能力在下面 capabilities 里写成 False（或让对应 import 失败，
+            这里已经用 try/except 兜住了）。
+        """
+        caps = {
+            "presets": True,            # 参数预设（longform/presets/*.json）
+            "tagFollow": True,          # 标签跟随（4 种口径）
+            "marks": True,              # 普通标记
+            "tagSfx": True,             # 标签挂音效
+            "spatial": False,           # 空间音频（HRTF）
+            "rooms": [],                # 房间脉冲（没有就是空数组 = 前端不显示）
+            "hrtfProfiles": [],
+            "demucs": False,            # 人声分离的另一条路
+            "ffmpeg": False,            # 内置 ffmpeg（导出 mp3 / 工程包体检用）
+            "exportFormats": ["wav"],
+            "mixRates": [44100],
+            "tagFollowModes": ["follow", "fixed", "inline", "between"],
+        }
+        try:  # 空间音频是可选的：没有 hrir.py 就当作不支持
+            import hrir as _hrir
+            caps["spatial"] = True
+            caps["hrtfProfiles"] = [p.get("id") for p in (_hrir.profiles() or [])]
+            try:
+                import rooms as _rooms
+                caps["rooms"] = list(_rooms.ROOM_MAP.keys())
+            except Exception:  # noqa: BLE001
+                caps["rooms"] = []
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            st = _demucs_state()
+            caps["demucs"] = bool(st.get("ok"))      # 字段名是 ok（老代码里没有 available/ready）
+            caps["demucsDevice"] = st.get("device") or ""
+        except Exception:  # noqa: BLE001
+            caps["demucs"] = False
+        try:
+            fs = _ffmpeg_state()
+            caps["ffmpeg"] = bool(fs.get("ok"))
+        except Exception:  # noqa: BLE001
+            caps["ffmpeg"] = False
+        try:
+            from timeline_api import MIX_FORMATS, MIX_RATES
+            caps["exportFormats"] = list(MIX_FORMATS)
+            caps["mixRates"] = list(MIX_RATES)
+        except Exception:  # noqa: BLE001
+            pass
+        return {
+            "ok": True,
+            "app": {"name": APP_NAME, "version": APP_VERSION, "api": API_PREFIX},
+            "engine": {"id": "indextts2", "adapter": "_engine_kwargs"},
+            "params": {
+                "fields": sorted(_DEFAULT_PARAMS.keys()),
+                "sampling": sorted(_DEFAULT_SAMPLING.keys()),
+            },
+            "capabilities": caps,
+        }
 
     # ---- 全局设置（时间轴 / 导出 / 界面偏好，跨台本共用） -------------------
     @lf.get("/lf/settings")

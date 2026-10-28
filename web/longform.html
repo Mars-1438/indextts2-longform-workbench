@@ -13,7 +13,7 @@
 })();
 </script>
 <link rel="icon" href="/assets/favicon.svg">
-<link rel="stylesheet" href="/longform-assets/longform.css?v=20261029c">
+<link rel="stylesheet" href="/longform-assets/longform.css?v=20261029d">
 </head>
 <body>
 
@@ -380,6 +380,8 @@
           <span class="badge">设置</span>
           <span class="hint">上半部分是<b>整台机器通用</b>的偏好（跨台本、跨工程）；台本默认参数收在最后。</span>
         </div>
+        <!-- 运行环境 / 能力：来自 GET /lf/manifest（移植时前端据此隐藏做不到的功能） -->
+        <div id="envLine" class="envline"></div>
 
         <div class="sec-h">时间轴与工作台</div>
         <label class="setrow">
@@ -439,24 +441,30 @@
         <div class="pfoot"><button id="btnSaveSettings" class="btn primary grow">保存设置</button></div>
         <div class="hint">这些是「这台机器」的偏好，存在 <code>longform/settings.json</code>，所有台本共用。</div>
 
-        <div class="sec-h" style="margin-top:16px">参数预设</div>
+        <div class="sec-h" style="margin-top:16px">参数预设
+          <span class="hint" style="font-weight:400">跨台本 · 只存方案</span></div>
         <div class="hint">
-          预设 = 一套生成参数（音色 / 情感 / 停顿 / Token），跨台本共用。
-          可以套到「台本默认」，也可以在句子的右键菜单、批量改属性、分组、时间轴片段上直接套用。
+          预设 = 一套生成参数（音色 / 情感 / 停顿 / Token），存在 <code>longform/presets/</code>，所有台本共用。
+          <b>「存成预设」只新增一个方案</b>：不改台本默认、不动任何句子。
+          要用的时候，在句子右键菜单、批量改属性、编辑分组、时间轴「改属性并重生成」里套用。
         </div>
         <div class="libacts">
           <input id="presetName" class="inp grow" placeholder="预设名称（如：哄睡低沉男声）">
-          <button id="btnSavePreset" class="btn" title="把当前「台本默认参数」存成预设">存成预设</button>
+          <button id="btnSavePreset" class="btn" title="只新增一个方案：不改台本默认、不动任何句子">存成预设</button>
           <button id="btnPresetRefresh" class="iconbtn" title="刷新预设列表">⟳</button>
         </div>
         <div id="presetHint" class="libhint"></div>
         <div id="presetList" class="reflist liblist presetlist"></div>
 
         <details class="setfold" style="margin-top:16px">
-          <summary>台本默认参数（音色 / 情感 / 停顿 / 分行 / 采样）</summary>
+          <summary>台本默认参数（改当前台本 · 会影响没单独设置的行）</summary>
           <div class="phead" style="margin-top:8px">
             <span class="badge">台本默认</span>
             <span class="hint">只作用于当前台本：新行、以及没有单独覆盖的行都继承这里</span>
+          </div>
+          <div class="hint warnbox" style="margin-bottom:8px">
+            这一段是<b>改当前台本</b>：点下面的「保存台本默认」之后，所有<b>没有单独设置</b>的行会立刻跟着变
+            （已有音频的标成「需重生成」，重跑才替换）。只想存一套方案、不改变任何句子 → 用上面的「存成预设」。
           </div>
           <label class="fl">默认音色</label>
           <select id="dRef" class="sel"></select>
@@ -501,7 +509,7 @@
             <div><label class="fl">rep_penalty</label><input id="sRep" class="inp" type="number" min="0.1" max="20" step="0.1" value="10"></div>
             <div><label class="fl">max_mel</label><input id="sMaxMel" class="inp" type="number" min="50" max="1815" step="10" value="1500"></div>
           </div>
-          <div class="pfoot"><button id="btnSaveDefault" class="btn primary grow">保存台本默认</button></div>
+          <div class="pfoot"><button id="btnSaveDefault" class="btn grow">保存台本默认（改这份台本）</button></div>
         </details>
       </div>
 
@@ -911,8 +919,8 @@
 </div>
 <div id="toast" class="toast" hidden></div>
 
-<script src="/longform-assets/emoctl.js?v=20261029c"></script>
-<script src="/longform-assets/genparams.js?v=20261029c"></script>
-<script src="/longform-assets/longform.js?v=20261029c"></script>
+<script src="/longform-assets/emoctl.js?v=20261029d"></script>
+<script src="/longform-assets/genparams.js?v=20261029d"></script>
+<script src="/longform-assets/longform.js?v=20261029d"></script>
 </body>
 </html>

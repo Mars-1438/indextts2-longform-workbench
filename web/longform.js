@@ -1966,29 +1966,21 @@ function openBulkProps() {
   if (!targets.length && !tagTargets.length) { toast("选中的内容没有可改的属性", true); return; }
 
   const wrap = el("div");
-  /* 先给一条「套用预设」的快捷通道：预设直接写进这些行，再点开下方的细项微调 */
-  const preRow = el("div", "rowline presetrow");
-  if (PRESETS.length && targets.length) {
-    const psel = document.createElement("select");
-    psel.className = "sel grow";
-    psel.innerHTML = '<option value="">套用参数预设…</option>';
-    PRESETS.forEach((p) => {
-      const o = document.createElement("option");
-      o.value = p.id;
-      o.textContent = p.name;
-      o.title = window.GenParams ? GenParams.summary(p.params, (id) => refName(id)) : "";
-      psel.appendChild(o);
-    });
-    const go = el("button", "btn mini", "套用");
-    go.type = "button";
-    go.onclick = async () => {
-      const p = PRESETS.find((x) => x.id === psel.value);
-      if (!p) { toast("先在下拉里选一个预设", true); return; }
-      closeModal();
-      await applyPresetToLines(p, targets.map((l) => l.uid));
-    };
-    preRow.appendChild(psel); preRow.appendChild(go);
-    wrap.appendChild(preRow);
+  /* 预设条：放在最上面。以前这里写了 `if (PRESETS.length)`，一个预设都没有时
+     整块不渲染 —— 用户根本不知道这个面板支持预设。现在常驻：
+     有预设就选，没有就点「＋ 存为预设」把下面勾选的这套参数存起来。 */
+  if (window.GenParams && targets.length) {
+    wrap.appendChild(GenParams.presetBar({
+      presets: () => PRESETS,
+      label: "预设",
+      refName: (id) => refName(id),
+      toast,
+      onApply: async (p) => {
+        closeModal();
+        await applyPresetToLines(p, targets.map((l) => l.uid));
+      },
+      onManage: () => { closeModal(); openDrawer("default"); },
+    }));
   }
   wrap.appendChild(el("div", "hint",
     (targets.length ? `将作用于选中的 ${targets.length} 句语音` : "已选中 " + tagTargets.length + " 个句间标签") +
@@ -3261,39 +3253,34 @@ function openBatchDialog(existing) {
   const listHost = el("div");
   if (existing) wrap.appendChild(listHost);
 
-  /* 预设：编辑已有分组时可以直接「套到本组这些句子」；
-     新建时先把预设灌进下面的参数控件，再按需微调（保存时才写进句子）。 */
-  if (PRESETS.length) {
-    const preRow = el("div", "rowline presetrow");
-    const psel = document.createElement("select");
-    psel.className = "sel grow";
-    psel.innerHTML = '<option value="">套用参数预设…</option>';
-    PRESETS.forEach((p) => {
-      const o = document.createElement("option");
-      o.value = p.id; o.textContent = p.name;
-      o.title = window.GenParams ? GenParams.summary(p.params, (id) => refName(id)) : "";
-      psel.appendChild(o);
-    });
-    const go = el("button", "btn mini", existing ? "套到本组" : "填入参数");
-    go.type = "button";
-    go.onclick = () => {
-      const p = PRESETS.find((x) => x.id === psel.value);
-      if (!p) { toast("先在下拉里选一个预设", true); return; }
-      if (existing) {
-        closeModal();
-        applyPresetToLines(p, existing.uids || []);
-      } else if (params && typeof params.set === "function") {
+  const params = batchParamControls(existing);
+  /* 预设条常驻（没有预设时也能用「＋ 存为预设」把下面这套参数存成方案）：
+     · 编辑已有分组：「套到本组」直接写进该组这些句子；「填入」只改控件；
+     · 新建分组：「套用」隐藏，只能「填入」—— 此时还没有组，写句子没有对象。 */
+  if (window.GenParams) {
+    wrap.appendChild(GenParams.presetBar({
+      presets: () => PRESETS,
+      label: "预设",
+      refName: (id) => refName(id),
+      toast,
+      applyLabel: "套到本组",
+      fillLabel: "填入参数",
+      onFill: (p) => {
         params.set(presetParamsOf(p));
         toast(`已把「${p.name}」填进下面的参数，可继续微调`);
-      } else {
-        toast("这个弹窗暂时不支持填入，可以直接在句子右键菜单里套用", true);
-      }
-    };
-    preRow.appendChild(psel); preRow.appendChild(go);
-    wrap.appendChild(preRow);
+      },
+      onApply: existing ? (p) => {
+        closeModal();
+        applyPresetToLines(p, existing.uids || []);
+      } : null,
+      onSave: async (name) => {
+        const made = await createPreset(name, params.read(), null);
+        toast(`预设「${made.name}」已保存（只新增一个方案，没有改任何句子）`);
+        return made;
+      },
+      onManage: () => { closeModal(); openDrawer("default"); },
+    }));
   }
-
-  const params = batchParamControls(existing);
   wrap.appendChild(params.node);
 
   if (!existing) {
@@ -3573,6 +3560,56 @@ async function loadSettings(force) {
     GSETTINGS = GSETTINGS || {};
   }
   return GSETTINGS;
+}
+
+/* 运行环境 / 能力（GET /lf/manifest）：摊在设置面板顶部，并按能力收选项。
+   移植到别的整合包时，这里不用改 —— 后端少什么能力，这里就自动显示 ✗、
+   并把做不到的选项摘掉（比如没有 ffmpeg 就不给 mp3 / ogg）。 */
+async function syncEnvLine() {
+  const host = $("envLine");
+  if (!host || !window.GenParams) return;
+  let d = {};
+  try { d = await GenParams.manifest(); } catch (e) { return; }
+  const app = d.app || {};
+  const eng = d.engine || {};
+  const c = d.capabilities || {};
+  host.innerHTML = "";
+  const mk = (txt, cls, title) => {
+    const s = document.createElement("span");
+    if (cls) s.className = cls;
+    s.textContent = txt;
+    if (title) s.title = title;
+    host.appendChild(s);
+    return s;
+  };
+  const b = mk(`引擎 ${eng.id || "未知"}`);
+  b.innerHTML = `引擎 <b>${eng.id || "未知"}</b>`;
+  mk(`工作台 ${app.version || "?"}`, "eno");
+  const chip = (label, on, title) => {
+    const s = mk(`${label} ${on ? "✓" : "✗"}`, on ? "" : "eoff", title);
+    return s;
+  };
+  if ("spatial" in c) chip("空间音频", !!c.spatial);
+  if ("ffmpeg" in c) chip("ffmpeg", !!c.ffmpeg, c.ffmpeg ? "" : "没装的话只能导出 wav / flac");
+  if ("demucs" in c) chip("Demucs", !!c.demucs, c.demucs ? "" : "没装的话人声分离自动退回中置提取");
+  if (Array.isArray(c.exportFormats) && c.exportFormats.length) {
+    mk(`导出 ${c.exportFormats.join(" / ")}`, "eno");
+    const fmt = $("sMixFmt");
+    if (fmt) {
+      [...fmt.options].forEach((o) => {
+        if (!c.exportFormats.includes(o.value)) o.remove();
+      });
+    }
+  }
+  if (Array.isArray(c.mixRates) && c.mixRates.length) {
+    const rate = $("sMixRate");
+    if (rate) {
+      const keep = String(c.mixRates.map((x) => parseInt(x, 10)).join(","));
+      [...rate.options].forEach((o) => {
+        if (!keep.split(",").includes(o.value)) o.remove();
+      });
+    }
+  }
 }
 
 function syncSettingsPanel() {
@@ -4988,11 +5025,11 @@ function renderPresets() {
   if ($("presetHint")) {
     const cur = (SCRIPT && SCRIPT.defaults && SCRIPT.defaults.ref) || "";
     $("presetHint").textContent = PRESETS.length
-      ? `当前默认音色：${cur ? refName(cur) : "跟随内置"} · 点名字直接应用`
-      : "还没有预设。调好「全局默认参数」后，在上面填个名字点「保存当前默认」。";
+      ? `${PRESETS.length} 个预设 · 点名字 = 应用为「台本默认」（会确认）；✎ 只改预设本身`
+      : "还没有预设：填个名字点「存成预设」就行（只新增方案，不会改任何句子）。";
   }
   if (!PRESETS.length) {
-    box.appendChild(el("div", "hint", "还没有预设"));
+    box.appendChild(el("div", "hint", "还没有预设 —— 也可以在「批量改属性 / 编辑分组 / 时间轴改属性」里直接「＋ 存为预设」。"));
     return;
   }
   if (!shown.length) {
@@ -5012,36 +5049,79 @@ function renderPresets() {
     sumEl.title = sum;
     item.appendChild(sumEl);
     const apply = el("button", "iconbtn", "✓");
-    apply.title = "应用为默认";
+    apply.title = "应用为「台本默认」（会改变所有没单独设置的行，会先让你确认）";
     apply.onclick = () => applyPreset(p);
-    const ren = el("button", "iconbtn", "✎");
-    ren.title = "重命名预设";
-    ren.onclick = (e) => renamePreset(p, ...xyOf(e));
+    const edit = el("button", "iconbtn", "✎");
+    edit.title = "编辑这个预设的参数（只改预设，不动句子）";
+    edit.onclick = () => editPreset(p);
     const del = el("button", "iconbtn", "✕");
     del.title = "删除预设";
     del.onclick = () => deletePreset(p);
-    item.appendChild(apply); item.appendChild(ren); item.appendChild(del);
+    item.appendChild(apply); item.appendChild(edit); item.appendChild(del);
     box.appendChild(item);
   });
+}
+
+/* 存预设 = **只新增一个方案**：写 longform/presets/*.json，不碰台本、不碰任何句子。
+   以前这个按钮和「保存台本默认」挨在一起，用户点完发现整篇变了 —— 那其实是
+   「保存台本默认」干的事（没有单独覆盖的行都继承默认）。现在两者彻底分开：
+     · 存预设：纯新增，句子 / 台本默认都不动；
+     · 保存台本默认：会改变所有没单独设置的行（下面折叠区里，带警示）。 */
+async function createPreset(name, params, sampling) {
+  const body = {
+    name,
+    params: window.GenParams ? GenParams.normalize(params) : (params || {}),
+    sampling: window.GenParams
+      ? GenParams.normalizeSampling(sampling || (SCRIPT && SCRIPT.sampling) || {})
+      : (sampling || (SCRIPT && SCRIPT.sampling) || {}),
+  };
+  const r = await api("/presets", { method: "POST", body: JSON.stringify(body) });
+  PRESETS.unshift(r.preset);
+  renderPresets();
+  return r.preset;
 }
 
 async function savePreset() {
   if (!SCRIPT) return;
   const name = ($("presetName").value || "").trim() || `预设 ${new Date().toLocaleString()}`;
   try {
-    const r = await api("/presets", {
-      method: "POST",
-      body: JSON.stringify({
-        name,
-        params: window.GenParams ? GenParams.normalize(SCRIPT.defaults) : SCRIPT.defaults,
-        sampling: window.GenParams ? GenParams.normalizeSampling(SCRIPT.sampling) : SCRIPT.sampling,
-      }),
-    });
-    PRESETS.unshift(r.preset);
+    const made = await createPreset(name, SCRIPT.defaults, SCRIPT.sampling);
     $("presetName").value = "";
-    renderPresets();
-    toast("预设已保存");
+    toast(`预设「${made.name}」已保存：只新增了方案，没有改任何句子`);
   } catch (e) { toast("保存失败：" + e.message, true); }
+}
+
+/* 编辑预设本身的参数（改名 + 改音色 / 情感 / 停顿）：只改这份预设文件，
+   不写回台本、也不套到任何句子 —— 想要「套到哪几句」是另一个动作。 */
+function editPreset(p) {
+  const wrap = el("div");
+  const nameInp = document.createElement("input");
+  nameInp.className = "inp";
+  nameInp.value = p.name || "";
+  wrap.appendChild(el("div", "fl", "预设名称"));
+  wrap.appendChild(nameInp);
+  const params = batchParamControls({ params: presetParamsOf(p) });
+  wrap.appendChild(el("div", "fl", "这套参数"));
+  wrap.appendChild(params.node);
+  wrap.appendChild(el("div", "hint",
+    "改的是预设文件本身；套用到句子请用句子的右键菜单、批量改属性或分组里的「套到本组」。"));
+  modal("编辑预设", wrap, async () => {
+    const name = (nameInp.value || "").trim();
+    if (!name) { toast("名称不能为空", true); return false; }
+    try {
+      const r = await api(`/presets/${p.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name, params: params.read() }),
+      });
+      const i = PRESETS.findIndex((x) => x.id === p.id);
+      if (i >= 0) PRESETS[i] = r.preset;
+      renderPresets();
+      toast("预设已更新（没有动任何句子）");
+    } catch (e) {
+      toast("保存失败：" + e.message, true);
+      return false;
+    }
+  }, "保存");
 }
 
 /* 改全局默认前先问一句：这会把没有单独覆盖的句子全打成「需重生成」，
@@ -6920,6 +7000,7 @@ function openDrawer(pane, opt) {
   if (pane === "media") { initMediaPanel(target || MAT.target); }
   if (pane === "default") {
     syncDefaultPanel();
+    syncEnvLine();
     loadSettings(true).then(syncSettingsPanel);
   }
 }
@@ -8308,6 +8389,7 @@ async function boot() {
   initFilters();
   initDefaultPanel();
   loadSettings().then(syncSettingsPanel);
+  if (window.GenParams) GenParams.manifest().catch(() => {});
   initRenderPanel();
   initExportPanel();
   initRefsPanel();

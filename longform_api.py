@@ -52,7 +52,9 @@ from fastapi.responses import FileResponse, Response
 _D = {}
 
 LF_DIRNAME = "longform"
-AUDIO_SR = 22050            # IndexTTS2 实际输出采样率（infer_v2.py 硬编码）
+# 引擎输出的采样率（IndexTTS2 在 infer_v2.py 里硬编码 22050）。
+# 移植到别的模型时**不用改代码**：设环境变量 LF_AUDIO_SR，或直接改这里的默认值。
+AUDIO_SR = int(os.environ.get("LF_AUDIO_SR") or 0) or 22050
 MAX_REF_BYTES = 40 * 1024 * 1024
 DEFAULT_PAUSE = 200         # 行间默认停顿（毫秒）
 PAUSE_MIN, PAUSE_MAX = 0, 30000   # 停顿上限 30s：正念 / 引导稿里「停顿 10 秒」要能落下来
@@ -375,6 +377,7 @@ def _lf_cfg_set(key: str, val):
 
 # 工作台自身的标识（manifest 会带出去；移植到别的整合包时改这两行即可）
 APP_NAME = "全能音声工作台"
+ENGINE_ID = "indextts2"
 APP_VERSION = "0.21-dev"
 API_PREFIX = "/api/v1/lf"
 
@@ -3888,7 +3891,8 @@ def register_longform(app, api, deps):
         return {
             "ok": True,
             "app": {"name": APP_NAME, "version": APP_VERSION, "api": API_PREFIX},
-            "engine": {"id": "indextts2", "adapter": "_engine_kwargs"},
+            "engine": {"id": ENGINE_ID, "adapter": "_engine_kwargs",
+                       "audioSr": AUDIO_SR},
             "params": {
                 "fields": sorted(_DEFAULT_PARAMS.keys()),
                 "sampling": sorted(_DEFAULT_SAMPLING.keys()),

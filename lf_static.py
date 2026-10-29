@@ -13,17 +13,24 @@
 
 import os
 
-from fastapi import HTTPException
-from fastapi.responses import FileResponse
+# 注意：**不要在模块顶层 import fastapi**。
+# 打包脚本（tools/make_patch.py）和测试只用到 asset_files / missing_required，
+# 它们跑在没装 fastapi 的轻量环境里；serve_asset 内部再导入即可。
 
 # 两个页面都要用的脚本（工作台的「中立层」：生成参数字段表 + 预设控件）
 CORE_ASSETS = ("emoctl.js", "genparams.js")
 
-# 各页自己的资源。前缀规则用 "*." 表示「这个前缀下的都放行」。
+# 各页自己的资源。`"前缀.*"` 表示「这个前缀下的都放行」。
+# 注意：**页面自己的 .html 也要列进来** —— 打包清单就是读这里生成的，
+# 漏了它，装到别人机器上 /longform 会 404（2026-10-29 真踩过：补丁包少了
+# web/longform.html，因为这里只写了 js/css）。
 PAGE_ASSETS = {
-    "longform": ("longform.js", "longform.css"),
+    "longform": ("longform.html", "longform.js", "longform.css"),
     "timeline": ("timeline.*",),
 }
+
+# 每个页面必须有这几类资源，缺一个就说明白名单写漏了（打包前会硬校验）
+REQUIRED_SUFFIXES = (".html", ".js", ".css")
 
 NO_CACHE = {
     "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
@@ -55,6 +62,9 @@ def allows(page, base):
 
 def serve_asset(web_dir, page, name):
     """返回 FileResponse；不在白名单或文件不存在都 404（不泄露目录结构）。"""
+    from fastapi import HTTPException
+    from fastapi.responses import FileResponse
+
     base = os.path.basename(name or "")
     if not base or not allows(page, base):
         raise HTTPException(404, "Not found")
@@ -85,3 +95,13 @@ def asset_files(web_dir, page):
             seen.add(fn)
             uniq.append(fn)
     return uniq
+
+
+def missing_required(web_dir, page):
+    """返回这一页「应该在、但白名单里没有」的类型，供打包时硬校验。"""
+    got = asset_files(web_dir, page)
+    out = []
+    for ext in REQUIRED_SUFFIXES:
+        if not any(fn.lower().endswith(ext) for fn in got):
+            out.append(ext)
+    return out

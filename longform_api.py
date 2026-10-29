@@ -31,6 +31,7 @@ import difflib
 import gc
 import io
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -54,7 +55,17 @@ _D = {}
 LF_DIRNAME = "longform"
 # 引擎输出的采样率（IndexTTS2 在 infer_v2.py 里硬编码 22050）。
 # 移植到别的模型时**不用改代码**：设环境变量 LF_AUDIO_SR，或直接改这里的默认值。
-AUDIO_SR = int(os.environ.get("LF_AUDIO_SR") or 0) or 22050
+def _env_sr(default=22050):
+    """环境变量 LF_AUDIO_SR 里写了垃圾值也不要让整个服务起不来。"""
+    raw = (os.environ.get("LF_AUDIO_SR") or "").strip()
+    try:
+        sr = int(float(raw))
+    except (TypeError, ValueError):
+        return default
+    return sr if 8000 <= sr <= 192000 else default
+
+
+AUDIO_SR = _env_sr()
 MAX_REF_BYTES = 40 * 1024 * 1024
 DEFAULT_PAUSE = 200         # 行间默认停顿（毫秒）
 PAUSE_MIN, PAUSE_MAX = 0, 30000   # 停顿上限 30s：正念 / 引导稿里「停顿 10 秒」要能落下来
@@ -1233,30 +1244,60 @@ def _demucs_torch_home():
     return ""
 
 
+_DEMUCS_PROBE_LOCK = threading.Lock()
+
+
 def _demucs_state(probe_only=False):
-    """探测 Demucs 是否可用（不加载模型）。"""
+    """探测 Demucs 是否可用（不加载模型）。
+
+    注意两件事：
+      · `tried` 必须等探测**做完**再置位。以前一进门就置 True，页面同时发几个
+        请求时，第二个请求看到 tried 却还没写 ok，就会把 False 缓存出去 ——
+        设置面板上「Demucs ✗」就是这么来的（实际能用）。
+      · 加锁，避免两个线程同时 import torch（慢且会互相踩状态）。
+    """
     st = _DEMUCS
     if st["tried"] and not probe_only:
         return st
-    st["tried"] = True
-    for p in _demucs_paths():
-        if os.path.isdir(p) and p not in sys.path:
-            sys.path.append(p)
-    st["weights"] = _demucs_torch_home()
-    try:
-        import torch  # noqa: F401
-        from demucs.pretrained import get_model  # noqa: F401
-        st["ok"] = True
-        st["reason"] = ""
+    with _DEMUCS_PROBE_LOCK:
+        if st["tried"] and not probe_only:
+            return st
+        for p in _demucs_paths():
+            if os.path.isdir(p) and p not in sys.path:
+                sys.path.append(p)
+        st["weights"] = _demucs_torch_home()
         try:
-            import torch
-            st["device"] = "cuda" if torch.cuda.is_available() else "cpu"
-        except Exception:  # noqa: BLE001
-            st["device"] = "cpu"
-    except Exception as e:  # noqa: BLE001
-        st["ok"] = False
-        st["reason"] = f"{type(e).__name__}: {e}"
+            import torch  # noqa: F401
+            from demucs.pretrained import get_model  # noqa: F401
+            st["ok"] = True
+            st["reason"] = ""
+            try:
+                st["device"] = "cuda" if torch.cuda.is_available() else "cpu"
+            except Exception:  # noqa: BLE001
+                st["device"] = "cpu"
+        except Exception as e:  # noqa: BLE001
+            st["ok"] = False
+            st["reason"] = f"{type(e).__name__}: {e}"
+        st["tried"] = True
     return st
+
+
+def _demucs_quick():
+    """不 import torch 的粗判（manifest 用）。
+
+    开页面就问一次能力，如果这里去 import torch，会拖慢首屏、还会跟模型加载抢 CPU。
+    真正探测过的以缓存为准；没探测过就看「模块目录 + 离线权重」在不在。
+    """
+    st = _DEMUCS
+    if st.get("tried"):
+        return bool(st.get("ok")), (st.get("device") or "")
+    has_mod = any(os.path.isdir(os.path.join(p, "demucs")) for p in _demucs_paths())
+    if not has_mod:
+        try:
+            has_mod = importlib.util.find_spec("demucs") is not None
+        except (ImportError, ValueError):
+            has_mod = False
+    return bool(has_mod and _demucs_torch_home()), ""
 
 
 def _demucs_get_model():
@@ -3872,9 +3913,10 @@ def register_longform(app, api, deps):
         except Exception:  # noqa: BLE001
             pass
         try:
-            st = _demucs_state()
-            caps["demucs"] = bool(st.get("ok"))      # 字段名是 ok（老代码里没有 available/ready）
-            caps["demucsDevice"] = st.get("device") or ""
+            ok_dm, dev = _demucs_quick()
+            caps["demucs"] = bool(ok_dm)
+            caps["demucsDevice"] = dev
+            caps["demucsProbed"] = bool(_DEMUCS.get("tried"))
         except Exception:  # noqa: BLE001
             caps["demucs"] = False
         try:
@@ -4862,8 +4904,12 @@ def register_longform(app, api, deps):
     def lf_preset_add(req: dict | None = Body(default=None)):
         req = req or {}
         name = _safe_title(req.get("name") or time.strftime("预设 %m-%d %H:%M"))
-        params = {k: v for k, v in (req.get("params") or {}).items() if k in _DEFAULT_PARAMS}
-        sampling = {k: v for k, v in (req.get("sampling") or {}).items() if k in _DEFAULT_SAMPLING}
+        # 只留认识的字段，且丢掉 None（前端「没填」会被序列化成 null，
+        # 存进去之后套用时会变成「把这行清空」，不是它想表达的意思）
+        params = {k: v for k, v in (req.get("params") or {}).items()
+                  if k in _DEFAULT_PARAMS and v is not None}
+        sampling = {k: v for k, v in (req.get("sampling") or {}).items()
+                    if k in _DEFAULT_SAMPLING and v is not None}
         pid = uuid.uuid4().hex[:10]
         data = {"id": pid, "name": name, "created": _now(), "params": params, "sampling": sampling}
         with _LOCK:
@@ -4882,9 +4928,11 @@ def register_longform(app, api, deps):
             if req.get("name"):
                 data["name"] = _safe_title(req["name"], data.get("name") or pid)
             if isinstance(req.get("params"), dict):
-                data["params"] = {k: v for k, v in req["params"].items() if k in _DEFAULT_PARAMS}
+                data["params"] = {k: v for k, v in req["params"].items()
+                                  if k in _DEFAULT_PARAMS and v is not None}
             if isinstance(req.get("sampling"), dict):
-                data["sampling"] = {k: v for k, v in req["sampling"].items() if k in _DEFAULT_SAMPLING}
+                data["sampling"] = {k: v for k, v in req["sampling"].items()
+                                    if k in _DEFAULT_SAMPLING and v is not None}
             data["id"] = pid
             new_path = _preset_file(pid, data["name"])
             _write_json(new_path, data)

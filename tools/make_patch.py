@@ -46,6 +46,14 @@ def _web_files():
                 rel = "web/" + fn
                 if rel not in out:
                     out.append(rel)
+        # 硬校验：每页的 html / js / css 必须都在清单里，否则宁可不打包
+        # （以前只写 js/css，补丁包里少了 web/longform.html，装完页面 404）
+        from lf_static import missing_required
+        for page in ("longform", "timeline"):
+            lack = missing_required(os.path.join(ROOT, "web"), page)
+            if lack:
+                raise SystemExit(f"前端清单缺文件：{page} 页没有 {'/'.join(lack)}，"
+                                 f"检查 lf_static.PAGE_ASSETS")
         out.append("web/guide.html")
         return out or ["web/longform.html"]
     except Exception as e:  # noqa: BLE001

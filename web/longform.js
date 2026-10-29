@@ -3620,7 +3620,14 @@ function syncSettingsPanel() {
   setChk("sLockVoice", tl.lockVoice, true);
   setChk("sSnap", tl.snap, true);
   setChk("sHoverIns", tl.hoverIns, true);
-  const setSel = (id, v, dflt) => { const n = $(id); if (n) n.value = v == null ? dflt : String(v); };
+  const setSel = (id, v, dflt) => {
+    const n = $(id);
+    if (!n) return;
+    n.value = v == null ? dflt : String(v);
+    /* 保存的选项可能已被「能力清单」摘掉（比如没 ffmpeg 就没有 mp3）：
+       这时 selectedIndex 会变成 -1、下拉显示空白，回落默认值。 */
+    if (n.selectedIndex < 0) n.value = dflt;
+  };
   setSel("sTagFollow", tl.tagFollow, "follow");
   setSel("sMixFmt", mx.format, "wav");
   setSel("sMixRate", mx.rate, "44100");
@@ -5023,10 +5030,9 @@ function renderPresets() {
       ? `${PRESETS.length} 个` : `${shown.length} / ${PRESETS.length} 个`;
   }
   if ($("presetHint")) {
-    const cur = (SCRIPT && SCRIPT.defaults && SCRIPT.defaults.ref) || "";
     $("presetHint").textContent = PRESETS.length
       ? `${PRESETS.length} 个预设 · 点名字 = 应用为「台本默认」（会确认）；✎ 只改预设本身`
-      : "还没有预设：填个名字点「存成预设」就行（只新增方案，不会改任何句子）。";
+      : "";   // 空列表的说明放在列表里，避免两行说同一件事
   }
   if (!PRESETS.length) {
     box.appendChild(el("div", "hint", "还没有预设 —— 也可以在「批量改属性 / 编辑分组 / 时间轴改属性」里直接「＋ 存为预设」。"));
@@ -5248,6 +5254,11 @@ function presetCtxItems(uids) {
 async function applyPreset(p) {
   if (!SCRIPT) return;
   guardDefaultChange(`应用预设「${p.name}」`, () => {
+    /* 语义：**部分覆盖** —— 预设里写了的参数盖上去，没写的保持原样。
+       故意不清空预设没提到的键（尤其是 ref）：一个「跟随默认音色」的预设
+       不应该把台本的默认音色抹掉，那会让整篇掉回内置音色。
+       代价是「先套 A（带向量）再套 B（不带向量）」会留下 A 的向量 ——
+       但只有之后某行显式切到「情感向量」模式才会遇上，比抹掉音色安全得多。 */
     SCRIPT.defaults = Object.assign({}, SCRIPT.defaults, presetParamsOf(p));
     SCRIPT.sampling = Object.assign({}, SCRIPT.sampling,
       window.GenParams ? GenParams.normalizeSampling(p.sampling) : (p.sampling || {}));

@@ -83,6 +83,22 @@
 - 预设列表的 ✎ 从「改名」升级成**编辑预设本身**（名称 + 音色 / 情感 / 停顿），只改预设文件；
   ✓ 的提示写明「应用为台本默认（会确认）」；预设多了以后不再靠猜。
 
+**顺手修掉的 5 个新问题（都是本轮改动带出来的）**
+
+- **补丁包少了 `web/longform.html`**：白名单改成单一来源后，`longform` 页只写了
+  `longform.js` / `longform.css`，打包清单跟着少一个 html —— 装到别人机器上 `/longform` 直接 404。
+  现在白名单补上 html，并加了两道闸：打包时 `missing_required()` 缺 html/js/css 直接报错退出；
+  `_t_patch.py` 按白名单逐个核对 zip 里的 `payload/web/*`（不再只抽查 timeline.js）；
+- **设置面板偶尔显示「Demucs ✗」（其实可用）**：探测函数进门就把 `tried` 置 True，
+  页面同时发几个请求时，第二个请求看到「已探测」但 `ok` 还没写，把 False 缓存了出去。
+  现在改成探测**做完**才置位 + 加锁；manifest 用不 import torch 的快速判断（也不拖慢首屏）；
+- **时间轴「＋ 存为预设」会存进 `emo_vec: null` 这类空字段**：为空的那几个键在套用时会
+  变成「把这行清空」。前端存之前过一遍 `GenParams.normalize`，后端再把 `None` 过滤掉（两边都收）；
+- **设置里的下拉可能显示空白**：保存的是 `mp3`，而 ffmpeg 缺失时该选项已被能力清单摘掉，
+  `select.value` 落到不存在项 → selectedIndex=-1。现在赋值后检测并回落默认值；
+- **`lf_static.py` 顶层 import fastapi**：打包脚本 / 测试跑在没装 fastapi 的轻量环境里会直接崩。
+  改成在 `serve_asset()` 内部导入，`asset_files()` / `missing_required()` 保持零依赖。
+
 **可移植性（这轮重点是让「换整合包」只改几处）**
 
 - 新增 **`GET /api/v1/lf/manifest`**：一次说清这台机器有什么 —— 引擎标识、

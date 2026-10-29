@@ -8530,7 +8530,13 @@
       const r = await fetch("/api/v1/lf/presets", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, params: readPanelParams() }),
+        /* 走一遍中立层清洗：没填的情感向量 / 文本 / 音频会被丢掉，
+           否则存进去的是 emo_vec: null，套用时反而会把行上的覆盖清空。 */
+        body: JSON.stringify({
+          name,
+          params: (typeof GenParams !== "undefined"
+            ? GenParams.normalize(readPanelParams()) : readPanelParams()),
+        }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.detail || "保存失败");

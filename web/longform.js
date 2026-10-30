@@ -10,6 +10,17 @@ const SOFT_PUNCT = "，,、：:－—-~～";
 const SENT_END = "。！？!?…；;";
 const MAX_HISTORY = 60;
 
+/* 撤销栈上限按行数收缩：每一层是**整份 lines 的深拷贝**，
+   5000 行时一层就有几 MB，60 层能把堆顶到几百 MB（GC 一卡就是「顿一下」）。
+   长台本用不到 60 步撤销，收紧到 24 层；短台本维持 60。 */
+function histCap() {
+  const n = (SCRIPT && SCRIPT.lines) ? SCRIPT.lines.length : 0;
+  if (n > 5000) return 16;
+  if (n > 3000) return 24;
+  if (n > 1200) return 40;
+  return MAX_HISTORY;
+}
+
 let META = null, SCRIPT = null, STATS = null, RENDER = null;
 let SEL = new Set();
 let dirty = false, saveTimer = null, pollTimer = null;
@@ -640,7 +651,7 @@ function renderEditRows() {
   if (entries.length && !FILTER.status && !FILTER.q && !FILTER.tagOnly) {
     box.appendChild(gapEl(entries[entries.length - 1].line));
   }
-  box.querySelectorAll(".txt").forEach(autoGrow);
+  autoGrowAll(box);
   box.scrollTop = top;
 }
 
@@ -862,6 +873,20 @@ function autoGrow(ta) {
   ta.style.height = Math.max(24, ta.scrollHeight) + "px";
 }
 
+/* 整页/整列表的自动高度：**必须分两遍**。
+   以前是 querySelectorAll(...).forEach(autoGrow) —— 对每个 textarea 先写 height=auto
+   再读 scrollHeight：每次写都让布局失效，下一次读又触发整页重排，2000 行时
+   是 O(n²)，实测一次全量重绘 6~8 秒（看着像卡死）。
+   现在：① 全部置 auto（只失效一次）→ ② 一次性读所有 scrollHeight（只重排一次）
+   → ③ 一次性写回高度（只失效一次）。 */
+function autoGrowAll(root) {
+  const list = [...(root || document).querySelectorAll(".txt")];
+  if (!list.length) return;
+  list.forEach((ta) => { ta.style.height = "auto"; });
+  const hs = list.map((ta) => ta.scrollHeight);
+  list.forEach((ta, i) => { ta.style.height = Math.max(24, hs[i]) + "px"; });
+}
+
 /* ------------------------------ 标签跟随 ------------------------------
    句子被拖动 / 重生成变长之后，标签（句中·句间）在时间轴上的落点怎么算。
    设置存在工程的 project.tagfollow 里，时间轴与这里共用同一份。 */
@@ -946,7 +971,7 @@ function renderBoard() {
   if (entries.length && !FILTER.status && !FILTER.q && !FILTER.tagOnly) {
     box.appendChild(gapEl(entries[entries.length - 1].line));
   }
-  box.querySelectorAll(".txt").forEach(autoGrow);
+  autoGrowAll(box);
   box.scrollTop = top;
 }
 
@@ -2438,7 +2463,7 @@ function commitSnapshot(label, merge) {
     updateUndoButtons();
   } else {
     UNDO.push({ label: label || "编辑", time: Date.now(), lines: deepCopy(SCRIPT.lines), key });
-    if (UNDO.length > MAX_HISTORY) UNDO.shift();
+    if (UNDO.length > histCap()) UNDO.shift();
     REDO = [];
     updateUndoButtons();
   }

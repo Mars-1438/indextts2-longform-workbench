@@ -7860,6 +7860,30 @@ function impStep2(body, foot) {
     tips.appendChild(pr);
   }
 
+  /* ---- ④.5 高级识别：独立开关（不塞进下拉里） ---- */
+  if (cls.id === "novel") {
+    const advRow = impEl("div", "impadvrow");
+    const advBtn = document.createElement("button");
+    advBtn.type = "button";
+    advBtn.className = "btn mini advbtn";
+    const paintAdv = () => {
+      const on = IMP.opts.speaker_mode === "adv";
+      advBtn.classList.toggle("on", on);
+      advBtn.textContent = on ? "🧠 高级识别 · 已开启（点一下关闭）" : "🧠 高级识别：按旁白里的名字认人";
+    };
+    advBtn.title = "认出「李四说」「「…」李四说」「李四冷笑：」这类线索，按真人名分组；"
+      + "一条线索都没有的句子仍退回 角色A / 角色B。默认关闭，不影响原来的识别结果。";
+    advBtn.onclick = () => {
+      IMP.opts.speaker_mode = IMP.opts.speaker_mode === "adv" ? "auto" : "adv";
+      paintAdv();
+    };
+    paintAdv();
+    advRow.appendChild(advBtn);
+    advRow.appendChild(impEl("span", "hint",
+      "可选。开了以后第 3 步顶部会写认出哪些角色，预览里能看到每句的依据"));
+    body.appendChild(advRow);
+  }
+
   /* ---- ⑤ 分组方式 / 单段上限 ---- */
   const selRow = impEl("div", "impselrow");
   selRow.appendChild(impEl("span", "lab", "分组方式"));
@@ -8081,7 +8105,7 @@ function impRecount() {
 }
 
 /* 把某一段搬到另一个角色组：i 不动，台本顺序仍按原文出现顺序（commit 按 i 排） */
-function impMoveSegTo(g, i, targetName) {
+function impMoveSegTo(g, i, targetName, quiet) {
   const t = IMP.groups.find((x) => x.name === targetName);
   if (!t || t === g) return;
   const s = (g.segments || [])[i];
@@ -8092,7 +8116,7 @@ function impMoveSegTo(g, i, targetName) {
   t.segments.push(s);
   t.segments.sort((a, b) => (a.i || 0) - (b.i || 0));
   impRecount();
-  impGo(3);
+  if (!quiet) impGo(3);
 }
 
 /* 整份对调：把两组的名字互换（顺带把每段的 group/role 改过来，台本顺序不变） */
@@ -8212,16 +8236,30 @@ function impGroupParams(g, row) {
 }
 
 /* ------------------------------ 正文预览窗口 ------------------------------
-   分组之后，用「正式导入后台本长什么样」的样子再给人看一遍：
-   · 会被朗读的句子 = 按分组上色（同一组同色，左边一条色条）
-   · 不朗读的附属信息（动作 / 镜头 / 时间码…）= 灰色小字，不上色
-   · 点一句就能改组 / 拆分 / 删除，改完立刻重画，不用回上面的卡片里找
+   两个地方用到，样式和数据结构一样，能力不同：
+
+   · 智能导入第 3 步（本段代码）：正文流式排版 —— 句子连排、按分组逐句上色，
+     像在读一份稿子；可以拖选一段文字再右键，改组 / 拆分 / 删除。
+   · 导入后的台本页（lfPreviewOpen）：只读，点句子跳转 + 选中，不动任何数据。
+
+   共同点：**不朗读的附属信息（动作 / 镜头 / 时间码）不上色**，灰色小字排在句后。
 ------------------------------------------------------------------------- */
 const IMP_PV_COLORS = [
   "#1f5fe0", "#0f766e", "#b45309", "#7c3aed",
   "#be123c", "#0369a1", "#4d7c0f", "#a21caf",
 ];
-let IMP_PV_SEL = null;      // {gi, si}
+let IMP_PV_SEL = null;          // [{gi, si}, ...]
+let IMP_PV_MENU = null;
+
+function impPvColor(gi) {
+  return IMP_PV_COLORS[gi % IMP_PV_COLORS.length];
+}
+
+function impPvTint(hex, alpha) {
+  const h = hex.replace("#", "");
+  const n = parseInt(h, 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
+}
 
 function impPvFlat() {
   const rows = [];
@@ -8238,106 +8276,229 @@ function impPvFlat() {
 function impPvClose() {
   const ov = document.getElementById("impPv");
   if (ov) ov.remove();
+  impPvMenuClose();
   IMP_PV_SEL = null;
+}
+
+/* 句子之间要不要断行：上一句收在句末标点、下一句是引号/破折号开头 → 另起一行，
+   这样对话读起来跟稿子一样，而不是糊成一大坨 */
+function impPvNeedBreak(prev, cur) {
+  if (!prev || !cur) return false;
+  const a = (prev.s.text || "").trim();
+  const b = (cur.s.text || "").trim();
+  if (!a || !b) return false;
+  const endOk = /[。！？…」』”"』]$/.test(a);
+  const startOk = /^[「『“"【\[—]/.test(b);
+  if (endOk && startOk) return true;
+  return prev.g !== cur.g && endOk && b.length > 18;   // 换人且上一句收口，也给个换行
+}
+
+function impPvMenuClose() {
+  if (IMP_PV_MENU) { IMP_PV_MENU.remove(); IMP_PV_MENU = null; }
+}
+
+/* 右键菜单：单句 / 拖选多句都能用 */
+function impPvMenu(x, y, picks) {
+  impPvMenuClose();
+  if (!picks.length) return;
+  const menu = impEl("div", "pvmenu");
+  menu.style.left = Math.round(x) + "px";
+  menu.style.top = Math.round(y) + "px";
+
+  const title = impEl("div", "pvmh",
+    picks.length === 1 ? "这一句" : `已选 ${picks.length} 句`);
+  menu.appendChild(title);
+
+  const grpWrap = impEl("div", "pvmg");
+  grpWrap.appendChild(impEl("span", "pvml", "归到分组"));
+  const sel = document.createElement("select");
+  sel.className = "sel mini";
+  IMP.groups.forEach((g) => {
+    const o = document.createElement("option");
+    o.value = g.name;
+    o.textContent = g.name;
+    sel.appendChild(o);
+  });
+  const first = picks[0];
+  sel.value = IMP.groups[first.gi] ? IMP.groups[first.gi].name : "";
+  sel.onchange = () => {
+    impPvMovePicks(picks, sel.value);
+    impPvMenuClose();
+  };
+  grpWrap.appendChild(sel);
+  menu.appendChild(grpWrap);
+
+  if (picks.length === 1) {
+    const bSplit = impEl("button", "pvmi", "✂ 从这里拆成两句");
+    bSplit.onclick = () => {
+      const p = picks[0];
+      impSplitSeg(IMP.groups[p.gi], p.si);
+      impPvMenuClose();
+      IMP_PV_SEL = null;
+      impPvPaint();
+    };
+    menu.appendChild(bSplit);
+  }
+  const bDel = impEl("button", "pvmi danger", picks.length === 1 ? "✕ 删掉这句" : `✕ 删掉这 ${picks.length} 句`);
+  bDel.onclick = () => {
+    impPvDeletePicks(picks);
+    impPvMenuClose();
+  };
+  menu.appendChild(bDel);
+
+  document.body.appendChild(menu);
+  IMP_PV_MENU = menu;
+  // 贴着窗口边就翻到另一侧
+  const r = menu.getBoundingClientRect();
+  if (r.right > window.innerWidth - 8) menu.style.left = Math.max(8, window.innerWidth - r.width - 12) + "px";
+  if (r.bottom > window.innerHeight - 8) menu.style.top = Math.max(8, window.innerHeight - r.height - 12) + "px";
+}
+
+function impPvMovePicks(picks, targetName) {
+  // 同一组里从后往前删，避免下标错位；搬进目标组后按 i 重排
+  const byGroup = {};
+  picks.forEach((p) => {
+    (byGroup[p.gi] = byGroup[p.gi] || []).push(p.si);
+  });
+  Object.keys(byGroup).forEach((gi) => {
+    const g = IMP.groups[Number(gi)];
+    byGroup[gi].sort((a, b) => b - a).forEach((si) => impMoveSegTo(g, si, targetName, true));
+  });
+  impRecount();
+  IMP_PV_SEL = null;
+  impPvPaint();
+}
+
+function impPvDeletePicks(picks) {
+  const byGroup = {};
+  picks.forEach((p) => { (byGroup[p.gi] = byGroup[p.gi] || []).push(p.si); });
+  Object.keys(byGroup).forEach((gi) => {
+    const g = IMP.groups[Number(gi)];
+    byGroup[gi].sort((a, b) => b - a).forEach((si) => { g.segments.splice(si, 1); });
+  });
+  impRecount();
+  IMP_PV_SEL = null;
+  impPvPaint();
+}
+
+function impPvPickedSet() {
+  const set = new Set();
+  (IMP_PV_SEL || []).forEach((p) => set.add(p.gi + ":" + p.si));
+  return set;
 }
 
 function impPvPaint() {
   const ov = document.getElementById("impPv");
   if (!ov) return;
-  const body = ov.querySelector(".pvbody");
-  const sel = IMP_PV_SEL;
-  body.innerHTML = "";
+  const flow = ov.querySelector(".pvflow");
+  flow.innerHTML = "";
+  const picked = impPvPickedSet();
 
   const rows = impPvFlat();
-  rows.forEach((r, idx) => {
-    const color = IMP_PV_COLORS[r.gi % IMP_PV_COLORS.length];
-    const row = impEl("div", "pvrow" + (sel && sel.gi === r.gi && sel.si === r.si ? " on" : ""));
-    row.style.borderLeftColor = color;
-    if (r.s.quoted) row.style.background = color + "12";   // 台词：淡底
-    const head = impEl("div", "pvhead");
-    const dot = impEl("span", "pvdot");
-    dot.style.background = color;
-    head.appendChild(dot);
-    head.appendChild(impEl("span", "pvgi", r.g.name));
-    if (r.s.role_src && r.s.role_src !== "alternate") {
-      const tag = impEl("span", "pvsrc", r.s.role_src === "after" ? "后置旁白"
-        : r.s.role_src === "lead" ? "前文点名"
-          : r.s.role_src === "context" ? "上文继承" : "规则");
-      tag.title = `归属依据：${r.s.role_src}（置信度 ${r.s.role_conf}）`;
-      head.appendChild(tag);
-    } else if (r.s.role_src === "alternate") {
-      const tag = impEl("span", "pvsrc alt", "交替推测");
-      tag.title = "没有名字线索，按顺序交替分给两个角色（可在这里改）";
-      head.appendChild(tag);
-    }
-    head.appendChild(impEl("span", "spacer"));
-    head.appendChild(impEl("span", "pvidx", String(idx + 1)));
-    row.appendChild(head);
+  let prev = null;
+  rows.forEach((r) => {
+    if (impPvNeedBreak(prev, r)) flow.appendChild(document.createElement("br"));
+    const color = impPvColor(r.gi);
+    const sp = document.createElement("span");
+    sp.className = "pvs" + (picked.has(r.gi + ":" + r.si) ? " on" : "") +
+      (r.s.quoted ? "" : " narr");
+    sp.dataset.gi = String(r.gi);
+    sp.dataset.si = String(r.si);
+    sp.dataset.uid = r.gi + ":" + r.si;
+    sp.style.background = impPvTint(color, r.s.quoted ? 0.20 : 0.10);
+    sp.style.borderBottomColor = color;
+    sp.textContent = (r.s.text || "").trim() || "（空）";
+    sp.title = `${r.g.name}${r.s.role_src ? " · " + r.s.role_src : ""}`;
+    flow.appendChild(sp);
 
-    const txt = impEl("div", "pvtext", r.s.text || "（空）");
-    row.appendChild(txt);
-    // note 里混着两个内部标记（台词 / 括号），它们不是「不朗读」的东西，别当成备注显示
+    // 不朗读的附属信息：灰色小字跟在句后，不上色
     const noteTxt = String(r.s.note || "").replace(/(台词|括号)(；|$)/g, "").trim();
     if (noteTxt) {
-      row.appendChild(impEl("div", "pvnote", "备注（不朗读）：" + noteTxt));
+      const nt = document.createElement("span");
+      nt.className = "pvni";
+      nt.textContent = "（" + noteTxt + "）";
+      nt.title = "备注：导入后进台本备注，不朗读";
+      flow.appendChild(nt);
     }
-    row.onclick = () => {
-      IMP_PV_SEL = { gi: r.gi, si: r.si };
-      impPvPaint();
-    };
-    body.appendChild(row);
+    prev = r;
   });
+  if (!rows.length) flow.appendChild(impEl("div", "impempty", "还没有分组内容"));
 
-  // 图例：每组的颜色 + 段数
+  // 图例
   const legend = ov.querySelector(".pvlegend");
   legend.innerHTML = "";
   IMP.groups.forEach((g, gi) => {
     const chip = impEl("span", "pvchip");
     const dot = impEl("span", "pvdot");
-    dot.style.background = IMP_PV_COLORS[gi % IMP_PV_COLORS.length];
+    dot.style.background = impPvColor(gi);
     chip.appendChild(dot);
     chip.appendChild(document.createTextNode(`${g.name} ${(g.segments || []).length}`));
+    chip.title = "点一下：选中这一组的所有句子";
     chip.onclick = () => {
-      const first = (g.segments || [])[0];
-      if (first) { IMP_PV_SEL = { gi, si: 0 }; impPvPaint(); }
+      const picks = [];
+      (g.segments || []).forEach((s, si) => {
+        if (String(s.text || "").trim() || String(s.note || "").trim()) picks.push({ gi, si });
+      });
+      IMP_PV_SEL = picks;
+      impPvPaint();
     };
-    chip.style.cursor = "pointer";
-    chip.title = "点一下跳到这一组的第一句";
     legend.appendChild(chip);
   });
 
-  // 选中后的操作条
+  // 底部：当前选中
   const bar = ov.querySelector(".pvbar");
   bar.innerHTML = "";
-  if (!sel) {
-    bar.appendChild(impEl("span", "hint", "点任意一句 → 可以改归到哪个分组、拆分、删除（跟在上面卡片里改是同一份数据）"));
+  const sel = IMP_PV_SEL || [];
+  if (!sel.length) {
+    bar.appendChild(impEl("span", "hint",
+      "拖选一段文字（或点一句）→ 右键可以改分组 / 拆分 / 删除；点图例可整组选中"));
     return;
   }
-  const g = IMP.groups[sel.gi];
-  const s = g && (g.segments || [])[sel.si];
-  if (!g || !s) { IMP_PV_SEL = null; impPvPaint(); return; }
-  bar.appendChild(impEl("span", "hint", "这一句："));
+  bar.appendChild(impEl("span", "hint", `已选 ${sel.length} 句：`));
   const selG = document.createElement("select");
   selG.className = "sel mini";
-  IMP.groups.forEach((x) => {
+  IMP.groups.forEach((g) => {
     const o = document.createElement("option");
-    o.value = x.name;
-    o.textContent = x.name;
+    o.value = g.name;
+    o.textContent = g.name;
     selG.appendChild(o);
   });
-  selG.value = g.name;
-  selG.onchange = () => {
-    impMoveSegTo(g, sel.si, selG.value);
-    IMP_PV_SEL = null;
-    impPvPaint();
-  };
+  selG.value = IMP.groups[sel[0].gi] ? IMP.groups[sel[0].gi].name : "";
+  selG.onchange = () => impPvMovePicks(sel, selG.value);
   bar.appendChild(selG);
-  const bSplit = impEl("button", "btn mini ghost", "✂ 拆成两句");
-  bSplit.onclick = () => { impSplitSeg(g, sel.si); IMP_PV_SEL = null; impPvPaint(); };
-  const bDel = impEl("button", "btn mini ghost", "✕ 删掉这句");
-  bDel.onclick = () => { impDelSeg(g, sel.si); IMP_PV_SEL = null; impPvPaint(); };
-  bar.appendChild(bSplit);
+  if (sel.length === 1) {
+    const bSplit = impEl("button", "btn mini ghost", "✂ 拆成两句");
+    bSplit.onclick = () => {
+      const p = sel[0];
+      impSplitSeg(IMP.groups[p.gi], p.si);
+      IMP_PV_SEL = null;
+      impPvPaint();
+    };
+    bar.appendChild(bSplit);
+  }
+  const bDel = impEl("button", "btn mini ghost", "✕ 删除");
+  bDel.onclick = () => impPvDeletePicks(sel);
   bar.appendChild(bDel);
+  const bNone = impEl("button", "btn mini ghost", "取消选中");
+  bNone.onclick = () => { IMP_PV_SEL = null; impPvPaint(); };
+  bar.appendChild(bNone);
+}
+
+/* 把拖选出来的文本范围映射成句子列表 */
+function impPvPicksFromSelection(flow) {
+  const s = window.getSelection();
+  if (!s || !s.rangeCount || s.isCollapsed) return [];
+  const spans = [...flow.querySelectorAll(".pvs")];
+  const out = [];
+  spans.forEach((sp) => {
+    for (let i = 0; i < s.rangeCount; i++) {
+      if (s.getRangeAt(i).intersectsNode(sp)) {
+        out.push({ gi: Number(sp.dataset.gi), si: Number(sp.dataset.si) });
+        break;
+      }
+    }
+  });
+  return out;
 }
 
 function impPreviewOpen() {
@@ -8347,7 +8508,7 @@ function impPreviewOpen() {
   const box = impEl("div", "pvbox");
   const head = impEl("div", "pvtop");
   head.appendChild(impEl("b", null, "正文预览"));
-  head.appendChild(impEl("span", "hint", "按正式导入后的顺序排；同色 = 同一个分组（= 同一个音色）"));
+  head.appendChild(impEl("span", "hint", "正式导入后的样子：同色 = 同一个分组（= 同一个音色）"));
   head.appendChild(impEl("span", "spacer"));
   const close = impEl("button", "btn mini ghost", "关闭");
   close.onclick = impPvClose;
@@ -8356,25 +8517,75 @@ function impPreviewOpen() {
 
   const legend = impEl("div", "pvlegend");
   box.appendChild(legend);
-  const body = impEl("div", "pvbody");
-  box.appendChild(body);
+  const flow = impEl("div", "pvflow");
+  box.appendChild(flow);
   const bar = impEl("div", "pvbar");
   box.appendChild(bar);
   ov.appendChild(box);
-  ov.onclick = (e) => { if (e.target === ov) impPvClose(); };
+  ov.onclick = (e) => {
+    if (e.target === ov) impPvClose();
+    else if (!e.target.closest(".pvmenu")) impPvMenuClose();
+  };
   document.body.appendChild(ov);
+
+  // 点一句 → 选中这一句
+  flow.onclick = (e) => {
+    const sp = e.target.closest(".pvs");
+    if (!sp) return;
+    const pick = { gi: Number(sp.dataset.gi), si: Number(sp.dataset.si) };
+    const cur = IMP_PV_SEL || [];
+    const same = cur.length === 1 && cur[0].gi === pick.gi && cur[0].si === pick.si;
+    IMP_PV_SEL = same ? null : [pick];
+    impPvPaint();
+  };
+  // 拖选完松手 → 把选区映射成句子
+  flow.onmouseup = () => {
+    const picks = impPvPicksFromSelection(flow);
+    if (picks.length > 1) {
+      IMP_PV_SEL = picks;
+      impPvPaint();
+      // 重画会清掉选区，顺手补回来，方便继续右键
+      const spans = [...flow.querySelectorAll(".pvs.on")];
+      if (spans.length) {
+        const r = document.createRange();
+        r.selectNodeContents(spans[0]);
+        r.setEndAfter(spans[spans.length - 1]);
+        const s = window.getSelection();
+        s.removeAllRanges();
+        s.addRange(r);
+      }
+    }
+  };
+  flow.oncontextmenu = (e) => {
+    e.preventDefault();
+    const sp = e.target.closest(".pvs");
+    let picks = impPvPicksFromSelection(flow);
+    if (!picks.length) {
+      picks = IMP_PV_SEL || [];
+    }
+    if (!picks.length && sp) {
+      picks = [{ gi: Number(sp.dataset.gi), si: Number(sp.dataset.si) }];
+    }
+    if (!picks.length) return;
+    IMP_PV_SEL = picks;
+    impPvPaint();
+    impPvMenu(e.clientX, e.clientY, picks);
+  };
   impPvPaint();
 }
 
 /* 一键跑「高级识别」：认旁白里的名字，认不出再退回交替 */
 async function impRunAdvanced() {
   IMP.opts = IMP.opts || {};
-  IMP.opts.speaker_mode = "adv";
+  const on = IMP.opts.speaker_mode === "adv";
+  IMP.opts.speaker_mode = on ? "auto" : "adv";
   await impPlan(true);
   const sp = (IMP.stats || {}).speaker || {};
   if (sp.mode === "adv" && (sp.named || 0) > 0) {
     const names = (sp.names || []).slice(0, 5).join("、");
     toast(`高级识别：认出 ${(sp.names || []).length} 个角色（${names}），${sp.named} 段按名字归属`);
+  } else if (on) {
+    toast("已退出高级识别，回到原来的规则");
   } else {
     toast("没找到名字线索 —— 旁白里要有「张三说」「「…」李四说」这类写法；已退回交替 A/B", true);
   }
@@ -8635,8 +8846,12 @@ function impStep3(body, foot) {
   const ok = impEl("button", "btn primary", `导入并建 ${IMP.groups.length} 个分组`);
   ok.disabled = !impTotalSegs();
   ok.onclick = impCommit;
+  const pvGo = impEl("button", "btn pvcta", "👁 先看正文预览");
+  pvGo.title = "按导入后的样子读一遍：同色 = 同一组，备注不上色；点句子或拖选文字可以改组/拆分/删除";
+  pvGo.onclick = () => impPreviewOpen();
   foot.appendChild(prev);
   foot.appendChild(cancel);
+  foot.appendChild(pvGo);
   foot.appendChild(ok);
 }
 
@@ -8679,10 +8894,108 @@ async function impCommit() {
   finally { IMP.busy = false; }
 }
 
+/* ------------------------------ 台本页：正文预览（只读） ------------------------------
+   和导入里的预览长得一样，但这里**只读**：点一句就把台本滚到那一行并选中它，
+   不在这儿提供改组 / 拆分 / 删除 —— 那些留给台本页自己的右键菜单，
+   免得两套入口同一件事、状态还对不上。
+------------------------------------------------------------------------- */
+function lfPreviewClose() {
+  const ov = document.getElementById("lfPv");
+  if (ov) ov.remove();
+}
+
+function lfJumpToLine(uid) {
+  lfPreviewClose();
+  if (typeof SEL === "undefined") return;
+  SEL.clear(); SEL.add(uid);
+  refreshSelClasses();
+  const row = document.querySelector('.row[data-uid="' + CSS.escape(uid) + '"]')
+    || document.querySelector('.card[data-uid="' + CSS.escape(uid) + '"]');
+  if (row) {
+    row.scrollIntoView({ block: "center", behavior: "smooth" });
+    row.classList.add("sel");
+  }
+  const idx = ((SCRIPT && SCRIPT.lines) || []).findIndex((l) => l.uid === uid);
+  if (idx >= 0) toast(`已选中第 ${idx + 1} 行`);
+}
+
+function lfPreviewOpen() {
+  lfPreviewClose();
+  const lines = ((SCRIPT && SCRIPT.lines) || []).filter((l) => (l.text || "").trim());
+  if (!lines.length) { toast("台本还是空的", true); return; }
+
+  const gnames = [];
+  lines.forEach((l) => {
+    const g = l.group || "未分组";
+    if (gnames.indexOf(g) < 0) gnames.push(g);
+  });
+
+  const ov = impEl("div", "impov");
+  ov.id = "lfPv";
+  const box = impEl("div", "pvbox");
+  const head = impEl("div", "pvtop");
+  head.appendChild(impEl("b", null, "正文预览"));
+  head.appendChild(impEl("span", "hint", "只读：点一句跳到台本里那一行并选中；改内容回台本页右键"));
+  head.appendChild(impEl("span", "spacer"));
+  const close = impEl("button", "btn mini ghost", "关闭");
+  close.onclick = lfPreviewClose;
+  head.appendChild(close);
+  box.appendChild(head);
+
+  const legend = impEl("div", "pvlegend");
+  gnames.slice(0, 12).forEach((g, i) => {
+    const chip = impEl("span", "pvchip");
+    const dot = impEl("span", "pvdot");
+    dot.style.background = IMP_PV_COLORS[i % IMP_PV_COLORS.length];
+    chip.appendChild(dot);
+    chip.appendChild(document.createTextNode(g));
+    legend.appendChild(chip);
+  });
+  if (gnames.length > 12) legend.appendChild(impEl("span", "hint", `…共 ${gnames.length} 组`));
+  box.appendChild(legend);
+
+  const flow = impEl("div", "pvflow");
+  let prev = null;
+  lines.forEach((l) => {
+    const gi = Math.max(0, gnames.indexOf(l.group || "未分组"));
+    const color = IMP_PV_COLORS[gi % IMP_PV_COLORS.length];
+    const a = (prev && (prev.text || "")) || "";
+    const b = (l.text || "").trim();
+    if (/[。！？…」』”]$/.test(a.trim()) && /^[「『“【\[—]/.test(b)) flow.appendChild(document.createElement("br"));
+    const sp = document.createElement("span");
+    sp.className = "pvs";
+    sp.style.background = impPvTint(color, 0.20);
+    sp.style.borderBottomColor = color;
+    sp.textContent = b;
+    sp.title = `${l.group || "未分组"} · 第 ${lines.indexOf(l) + 1} 句（点击选中）`;
+    sp.onclick = () => lfJumpToLine(l.uid);
+    flow.appendChild(sp);
+    if (l.note) {
+      const nt = document.createElement("span");
+      nt.className = "pvni";
+      nt.textContent = "（" + String(l.note).slice(0, 60) + "）";
+      flow.appendChild(nt);
+    }
+    prev = l;
+  });
+  box.appendChild(flow);
+
+  const bar = impEl("div", "pvbar");
+  bar.appendChild(impEl("span", "hint",
+    `共 ${lines.length} 句 · ${gnames.length} 组；点句子 = 关掉预览 + 选中那一行，不会改任何内容`));
+  box.appendChild(bar);
+
+  ov.appendChild(box);
+  ov.onclick = (e) => { if (e.target === ov) lfPreviewClose(); };
+  document.body.appendChild(ov);
+}
+
 /* 绑定入口（在 initHeader 里调用） */
 function initSmartImport() {
   const b = $("btnSmartImport");
   if (b) b.onclick = () => openSmartImport();
+  const pv = $("btnTextPreview");
+  if (pv) pv.onclick = () => lfPreviewOpen();
 }
 
 /* 内嵌模式：时间轴用 iframe 打开「?desk=1&embed=1」，只显示导入台本身，

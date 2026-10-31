@@ -4358,6 +4358,9 @@ def register_longform(app, api, deps):
                 text = str((seg or {}).get("text") or "").strip()
                 if not text:
                     continue
+                # 预览里「去掉配音」的段：文字还在（预览要能看见原文），但不进台本
+                if seg.get("muted"):
+                    continue
                 try:
                     key = float(seg.get("i"))
                 except (TypeError, ValueError):

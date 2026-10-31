@@ -8061,6 +8061,49 @@ function impTotalSegs() {
   return IMP.groups.reduce((n, g) => n + (g.segments || []).length, 0);
 }
 
+/* 对白分角色：只有出现「角色A / 角色B」两组时才提供「逐句改归属」的下拉。
+   解析类（章节+角色）的组名带前缀，逐句搬动会破坏章节归属，就不提供了。 */
+function impRoleNames() {
+  const names = IMP.groups.map((g) => g.name);
+  if (names.indexOf("角色A") < 0 || names.indexOf("角色B") < 0) return [];
+  return names.filter((n) => n === "角色A" || n === "角色B" || n === "旁白");
+}
+
+function impRecount() {
+  IMP.groups.forEach((g) => {
+    g.chars = (g.segments || []).reduce((n, s) => n + (s.text || "").length, 0);
+  });
+}
+
+/* 把某一段搬到另一个角色组：i 不动，台本顺序仍按原文出现顺序（commit 按 i 排） */
+function impMoveSegTo(g, i, targetName) {
+  const t = IMP.groups.find((x) => x.name === targetName);
+  if (!t || t === g) return;
+  const s = (g.segments || [])[i];
+  if (!s) return;
+  g.segments.splice(i, 1);
+  s.group = targetName;
+  s.role = targetName === "旁白" ? "" : targetName;
+  t.segments.push(s);
+  t.segments.sort((a, b) => (a.i || 0) - (b.i || 0));
+  impRecount();
+  impGo(3);
+}
+
+/* 整份对调：把两组的名字互换（顺带把每段的 group/role 改过来，台本顺序不变） */
+function impSwapRoles() {
+  const a = IMP.groups.find((g) => g.name === "角色A");
+  const b = IMP.groups.find((g) => g.name === "角色B");
+  if (!a || !b) { toast("没有「角色A / 角色B」两组可交换", true); return; }
+  a.name = "角色B"; b.name = "角色A";
+  (a.segments || []).forEach((s) => { s.group = "角色B"; s.role = "角色B"; });
+  (b.segments || []).forEach((s) => { s.group = "角色A"; s.role = "角色A"; });
+  const ia = IMP.groups.indexOf(a);
+  const ib = IMP.groups.indexOf(b);
+  if (ia > ib) { IMP.groups[ia] = b; IMP.groups[ib] = a; }   // 让「角色A」仍排在前面
+  impGo(3);
+}
+
 function impSplitSeg(g, i) {
   const s = g.segments[i];
   const txt = s.text || "";
@@ -8195,6 +8238,23 @@ function impStep3(body, foot) {
     body.appendChild(box);
   }
 
+  const spk = (st && st.speaker) || null;
+  if (spk && spk.mode === "alt2" && spk.a + spk.b > 0) {
+    const box = impEl("div", "impissues info");
+    const t1 = impEl("b", null, "没有角色标注，已按台词顺序交替分角色");
+    box.appendChild(t1);
+    box.appendChild(document.createTextNode(
+      `：角色A ${spk.a} 段 / 角色B ${spk.b} 段。` +
+      "导入后这两组各挑一个音色，就是两个人的对话。"));
+    if (spk.switched_group) {
+      box.appendChild(document.createTextNode("（没有章节，已改成「按角色」分组）"));
+    }
+    const tips = impEl("div", "imphintline",
+      "猜错了：改分组名换成真实角色 → 整份反了用「⇄ 交换 A/B」→ 单句错用每行右下角的下拉。");
+    box.appendChild(tips);
+    body.appendChild(box);
+  }
+
   const tools = impEl("div", "imptools");
   const redo = impEl("button", "btn mini ghost", "⟲ 按当前规则重新识别");
   redo.onclick = () => impPlan();
@@ -8206,6 +8266,12 @@ function impStep3(body, foot) {
     impGo(3);
   };
   tools.appendChild(redo); tools.appendChild(back); tools.appendChild(addG);
+  if (impRoleNames().length >= 2) {
+    const sw = impEl("button", "btn mini ghost", "⇄ 交换 A/B");
+    sw.title = "把「角色A」和「角色B」的台词整份对调（第一句就该是另一个人说的时用）";
+    sw.onclick = () => impSwapRoles();
+    tools.appendChild(sw);
+  }
   body.appendChild(tools);
 
   if (!IMP.groups.length) {
@@ -8272,7 +8338,26 @@ function impStep3(body, foot) {
       note.placeholder = "附属备注（动作/镜头/时间码，不朗读）";
       note.value = s.note || "";
       note.oninput = () => { s.note = note.value; };
-      rb.appendChild(note);
+      const roleNames = impRoleNames();
+      if (roleNames.length >= 2) {
+        const nrow = impEl("div", "rline");
+        nrow.appendChild(note);
+        const rs = document.createElement("select");
+        rs.className = "sel mini rolesel";
+        rs.title = "这一句算谁说的（改了就搬到对应分组；台本顺序不变）";
+        roleNames.forEach((n) => {
+          const o = document.createElement("option");
+          o.value = n;
+          o.textContent = n;
+          rs.appendChild(o);
+        });
+        rs.value = g.name;
+        rs.onchange = () => impMoveSegTo(g, si, rs.value);
+        nrow.appendChild(rs);
+        rb.appendChild(nrow);
+      } else {
+        rb.appendChild(note);
+      }
       // 有出现时间或延迟才显示这一行（指令类的「停顿 2 秒」也在这里看得见）
       if (s.t0 != null || s.pause) {
         const bits = [];

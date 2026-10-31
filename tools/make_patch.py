@@ -69,15 +69,31 @@ HRIR = ["assets/hrir/MIT_KEMAR_normal_pinna.sofa",
         "assets/hrir/KU100_near.npz",
         "assets/hrir/KU100_near_circ.npz",
         "assets/hrir/README.md"]
-DOCS = ["技术路线_长篇台本与时间轴.md", "使用说明.txt"]
+DOCS = ["docs/技术路线_长篇台本与时间轴.md", "docs/使用说明.txt"]
 DATA_KEEP = ["longform/refs", "longform/scripts", "longform/sfx", "longform/materials",
              "longform/presets", "longform/_import", "longform/_trash", "outputs", "logs"]
 
 
+def _resolve(rel, kind="file"):
+    """先在仓库里找；没有就找 LF_PATCH_SRC（整合包根目录）。
+
+    bin/ffmpeg.exe、_vendor/、vendor2/ 这些又大又不进 git，仓库里本来就没有 ——
+    与其每次手工拷进来（拷完还得记得删），不如让打包直接读整合包那份。
+    """
+    cand = [os.path.join(ROOT, rel)]
+    alt = (os.environ.get("LF_PATCH_SRC") or "").strip()
+    if alt:
+        cand.append(os.path.join(alt, rel))
+    for p in cand:
+        if (os.path.isfile(p) if kind == "file" else os.path.isdir(p)):
+            return p
+    return None
+
+
 def copy_file(rel, dst_rel=None, base=None):
-    src = os.path.join(ROOT, rel)
-    if not os.path.isfile(src):
-        raise SystemExit("缺文件：" + rel)
+    src = _resolve(rel)
+    if not src:
+        raise SystemExit("缺文件：" + rel + "（可设 LF_PATCH_SRC 指向整合包根目录）")
     dst = os.path.join(base or PAYLOAD, dst_rel or rel)
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     shutil.copy2(src, dst)
@@ -85,9 +101,9 @@ def copy_file(rel, dst_rel=None, base=None):
 
 
 def copy_tree(rel, skip_pycache=True, skip_pyc=True):
-    src_root = os.path.join(ROOT, rel)
-    if not os.path.isdir(src_root):
-        raise SystemExit("缺目录：" + rel)
+    src_root = _resolve(rel, "dir")
+    if not src_root:
+        raise SystemExit("缺目录：" + rel + "（可设 LF_PATCH_SRC 指向整合包根目录）")
     n = 0
     for dirpath, dirs, files in os.walk(src_root):
         if skip_pycache:
@@ -96,7 +112,7 @@ def copy_tree(rel, skip_pycache=True, skip_pyc=True):
             if skip_pyc and fn.endswith((".pyc", ".pyo")):
                 continue
             s = os.path.join(dirpath, fn)
-            r = os.path.relpath(s, ROOT)
+            r = os.path.join(rel, os.path.relpath(s, src_root))
             d = os.path.join(PAYLOAD, r)
             os.makedirs(os.path.dirname(d), exist_ok=True)
             shutil.copy2(s, d)

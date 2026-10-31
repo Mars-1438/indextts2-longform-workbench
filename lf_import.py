@@ -255,10 +255,13 @@ CLASSES = [
             "· 引号里的内容**单独成段**（当台词），引号外的叙述留在旁白段；\n"
             "· 括号里的内容（心理活动 / 动作）也能单独成句，或只记备注不朗读；\n"
             "· 一句里既有叙述又有台词时，会在引号边界切开，不会把台词和旁白粘在一起。\n\n"
-            "**分组**：按章节 / 按「旁白·台词」/ 章节+旁白台词 / 不分组。\n"
-            "想让旁白一个音色、台词另一个音色，就选「旁白 / 台词」分组。"
+            "**分组**：按章节 / 按「旁白·台词」/ 章节+旁白台词 / 按角色（对白 A/B）/ 不分组。\n"
+            "想让旁白一个音色、台词另一个音色，就选「旁白 / 台词」分组。\n\n"
+            "**没有角色标注的对白稿**（整行都是「…」、几乎没有旁白）：\n"
+            "自动按台词顺序**奇偶交替**分成「角色A / 角色B」两组，各组一个音色就能配出两个人的对话；\n"
+            "猜错了就改组名、或逐句改归属，整份反了用「⇄ 交换 A/B」。"
         ),
-        "hints": ["引号内单独成段", "括号可单独成句或转备注", "按章节或旁白/台词分组"],
+        "hints": ["引号内单独成段", "括号可单独成句或转备注", "纯对白稿自动分角色 A/B"],
         "sample": (
             "第一章 起点\n\n夜色渐深，城市的灯一盏盏亮起来。他推开门，听见有人轻声说："
             "「你终于来了。」\n\n「进来吧，外面冷。」她把门让开，顺手接过他手里的伞。\n\n"
@@ -266,8 +269,13 @@ CLASSES = [
         ),
         "default_group": "chapter", "default_max": 80,
         "group_opts": [["chapter", "按章节"], ["kind", "旁白 / 台词"],
-                       ["chapter_kind", "章节 + 旁白台词"], ["none", "不分组"]],
+                       ["chapter_kind", "章节 + 旁白台词"], ["speaker", "按角色（对白 A/B）"],
+                       ["chapter_speaker", "章节 + 角色"], ["none", "不分组"]],
         "opts": [
+            _o("speaker_mode", "对白分角色", "select", "auto",
+               [["auto", "自动（纯对白稿才分）"], ["alt2", "双人交替 A/B"], ["off", "不分角色"]],
+               "稿子里没有「角色：」标注时，按台词出现顺序奇偶交替分给 角色A / 角色B；"
+               "分完可以在预览里改角色名、单句改归属"),
             _o("quote_split", "引号里的内容单独成段", "bool", True),
             _o("paren_split", "括号里的内容单独成句", "bool", True,
                "心理活动 / 动作提示单独成句；不想念出来就把下面「只记备注」勾上"),
@@ -282,6 +290,8 @@ CLASSES = [
         "presets": [
             {"name": "有声书", "opts": {"group_by": "chapter"}},
             {"name": "旁白/台词分开配", "opts": {"group_by": "kind"}},
+            {"name": "双人对白（A/B 两个音色）",
+             "opts": {"group_by": "speaker", "speaker_mode": "alt2"}},
             {"name": "绘本（短句 + 慢速）", "opts": {"group_by": "chapter_kind", "max_chars": 45}},
             {"name": "只读旁白（括号不念）", "opts": {"paren_note": True, "group_by": "chapter"}},
         ],
@@ -1218,6 +1228,17 @@ def detect(src):
     if quotes >= 2:
         s = min(1.0, 0.5 + 0.06 * min(8, quotes))
         e.append(f"检测到 {quotes} 处成对引号（台词）")
+    # 「整行就是一个引号台词」的行占比：纯对白稿没有旁白，也就没有任何角色线索，
+    # 这种稿子只能按台词顺序交替分 A/B，先在这里把特征数出来
+    quoted_lines = 0
+    for l in lines:
+        t = l.strip()
+        if len(t) >= 2 and t[0] in "「『“" and t[-1] in "」』”":
+            quoted_lines += 1
+    q_ratio = quoted_lines / n
+    if quoted_lines >= 4 and q_ratio >= 0.6:
+        e.append(f"{int(q_ratio * 100)}% 的行整行就是一句引号台词、几乎没有旁白"
+                 f"（{quoted_lines} 行）→ 像没标角色的对白稿，导入时按顺序交替分「角色A / 角色B」")
     scores["novel"], ev["novel"] = s, e
 
     # 4. 指令
@@ -1257,6 +1278,7 @@ def detect(src):
                   "roles": len(roles),
                   "role_lines": role_colon, "bare_cues": bare, "scenes": scenes,
                   "quotes": quotes, "tags": tag_hits, "tag_kw": tag_kw,
+                  "quoted_lines": quoted_lines, "quoted_ratio": round(q_ratio, 2),
                   "short_ratio": round(short_ratio, 2), "kind": kind},
     }
 
@@ -1628,13 +1650,23 @@ def _novel_paragraphs(text, chapter_mode="auto"):
     return out
 
 
-def _novel_group(group_by, chapter, kind):
-    k = "台词" if kind == "dialogue" else "旁白"
+SPEAKER_A = "角色A"
+SPEAKER_B = "角色B"
+SPEAKER_GROUP_RE = re.compile(r"^角色[AB]$")     # 前端用同一条规则决定要不要显示角色下拉
+
+
+def _novel_group(group_by, chapter, kind, role=""):
+    """分组名。role 只在「按角色」口径下参与命名，其它口径仍回落 旁白 / 台词。"""
+    role = (role or "").strip()
+    if kind == "dialogue" and role and group_by in ("speaker", "chapter_speaker"):
+        k = role
+    else:
+        k = "台词" if kind == "dialogue" else "旁白"
     if group_by == "chapter":
         return chapter or "正文"
-    if group_by == "kind" or group_by == "role":
+    if group_by in ("kind", "role", "speaker"):
         return k
-    if group_by == "chapter_kind":
+    if group_by in ("chapter_kind", "chapter_speaker"):
         return f"{chapter or '正文'} · {k}"
     return "正文"
 
@@ -1654,15 +1686,9 @@ def _plan_novel(src, o):
         text = "\n".join(b.get("text") or "" for b in src["blocks"])
     paras = _novel_paragraphs(text, chapter_mode)
 
-    groups, order, seq = {}, [], 0
-    total = 0
-
-    def push(gname, seg):
-        if gname not in groups:
-            groups[gname] = []
-            order.append(gname)
-        groups[gname].append(seg)
-
+    # ① 先只收集片段、不落段：得先看清「整份稿子几乎全是引号台词、而且没有章节」，
+    #    才知道要不要按角色交替。纯对白稿的每一行都长得一样，光看单行分不出是谁说的。
+    pieces_all = []          # (章节, 正文, kind, notes)
     for chapter, para in paras:
         pieces = []          # (正文, kind, notes)
         if quote_split:
@@ -1690,32 +1716,86 @@ def _plan_novel(src, o):
 
         for body, kind, notes in pieces:
             body = _norm_space(body)
-            if not body:
-                continue
-            gname = _novel_group(group_by, chapter, kind)
-            segs = split_smart(body, max_chars)
-            for si, sg in enumerate(segs):
-                seq += 1
-                bits = list(notes) if si == 0 else []
-                if kind == "dialogue" and si == 0:
-                    bits.insert(0, "台词")
-                elif kind == "paren" and si == 0:
-                    bits.insert(0, "括号")
-                seg = {
-                    "i": seq, "text": sg["text"],
-                    "note": "；".join([x for x in bits if x])[:200],
-                    "role": "", "quoted": kind == "dialogue", "pause": None,
-                    "slow": False, "over": bool(sg["over"]), "group": gname,
-                }
-                push(gname, seg)
-                total += len(sg["text"])
-                if sg["over"]:
-                    issues.append({"level": "warn", "group": gname,
-                                   "msg": f"「{gname}」有一段 {len(sg['text'])} 字超过上限 {max_chars}"
-                                          f"（引号/括号内不宜切分），已保留原文",
-                                   "text": sg["text"][:40]})
+            if body:
+                pieces_all.append((chapter, body, kind, notes))
+
+    # ② 要不要分角色：台词段 ≥4、台词占 ≥72%、且没有章节头
+    n_dia = sum(1 for p in pieces_all if p[2] == "dialogue")
+    dia_ratio = n_dia / max(1, len(pieces_all))
+    has_chapter = any(p[0] for p in pieces_all)
+    mode = (o.get("speaker_mode") or "auto").lower()
+    if mode not in ("auto", "alt2", "off"):
+        mode = "auto"
+    auto_alt = bool(n_dia >= 4 and dia_ratio >= 0.72)
+    alt = mode == "alt2" or (mode == "auto" and auto_alt)
+    if mode == "off":
+        alt = False
+    elif group_by in ("speaker", "chapter_speaker"):
+        alt = True                    # 明确选了「按角色」，就别等自动判断
+    switched = False
+    explicit_group = bool(o.get("_group_by_explicit"))
+    if alt and not explicit_group and group_by == "chapter":
+        # 默认口径是「按章节」，可这份稿子几乎全是台词：塞进章节组里就是一个章节一个音色，
+        # 等于没分角色。改成按角色两组（章节信息仍留在每段的播放顺序里）
+        group_by = "speaker"
+        switched = True
+
+    groups, order, seq = {}, [], 0
+    total = 0
+    spk_a = spk_b = 0
+
+    def push(gname, seg):
+        if gname not in groups:
+            groups[gname] = []
+            order.append(gname)
+        groups[gname].append(seg)
+
+    for chapter, body, kind, notes in pieces_all:
+        role = ""
+        if alt and kind == "dialogue":
+            role = SPEAKER_A if (spk_a + spk_b) % 2 == 0 else SPEAKER_B
+            if role == SPEAKER_A:
+                spk_a += 1
+            else:
+                spk_b += 1
+        gname = _novel_group(group_by, chapter, kind, role)
+        segs = split_smart(body, max_chars)
+        for si, sg in enumerate(segs):
+            seq += 1
+            bits = list(notes) if si == 0 else []
+            if kind == "dialogue" and si == 0:
+                bits.insert(0, "台词")
+            elif kind == "paren" and si == 0:
+                bits.insert(0, "括号")
+            seg = {
+                "i": seq, "text": sg["text"],
+                "note": "；".join([x for x in bits if x])[:200],
+                "role": role, "quoted": kind == "dialogue", "pause": None,
+                "slow": False, "over": bool(sg["over"]), "group": gname,
+            }
+            push(gname, seg)
+            total += len(sg["text"])
+            if sg["over"]:
+                issues.append({"level": "warn", "group": gname,
+                               "msg": f"「{gname}」有一段 {len(sg['text'])} 字超过上限 {max_chars}"
+                                      f"（引号/括号内不宜切分），已保留原文",
+                               "text": sg["text"][:40]})
+    if alt and mode == "auto" and spk_a + spk_b >= 4:
+        issues.append({"level": "info", "group": "",
+                       "msg": f"没有角色标注，按台词顺序交替分成「{SPEAKER_A} / {SPEAKER_B}」"
+                              f"（{spk_a} 段 / {spk_b} 段）；猜错了可以改组名或逐句改归属"})
     out = _finish(groups, order)
-    return out, issues, {"paragraphs": len(paras), "chars": total}
+    return out, issues, {
+        "paragraphs": len(paras), "chars": total,
+        "group_by": group_by,
+        "speaker": {
+            "mode": "alt2" if alt else "off",
+            "auto": bool(mode == "auto" and auto_alt),
+            "a": spk_a, "b": spk_b,
+            "dialogue": n_dia, "ratio": round(dia_ratio, 2),
+            "switched_group": switched,
+        },
+    }
 
 
 # ---------------------------------------------------------------- 指令类
@@ -2010,8 +2090,13 @@ def plan(src, cls=None, opts=None):
     allowed = [g for g, _ in (CLASS_MAP[cid].get("group_opts") or [])]
     if cfg.get("group_by") not in allowed:
         cfg["group_by"] = CLASS_MAP[cid].get("default_group") or "none"
+    # 调用方有没有自己选过分组口径：有就绝不替用户改（只有「没选」才允许按内容自适应）
+    cfg["_group_by_explicit"] = "group_by" in opts
 
     groups, issues, extra = PLANNERS[cid](src, cfg)
+    cfg.pop("_group_by_explicit", None)
+    if extra.get("group_by") in allowed:
+        cfg["group_by"] = extra["group_by"]      # planner 可能改口（纯对白稿 → 按角色）
     stats = {
         "cls": cid, "cls_name": CLASS_MAP[cid]["name"], "group_by": cfg["group_by"],
         "max_chars": cfg["max_chars"],

@@ -1047,6 +1047,16 @@ html.embed .libfoot { margin-bottom: 4px; }
 .impissues { margin: 8px 0 0; padding: 8px 10px; border-radius: 9px; font-size: 11.5px; line-height: 1.7; }
 .impissues.warn { background: var(--warn-soft); border: 1px solid var(--warn-line); color: var(--warn-ink); }
 .impissues.err { background: var(--danger-soft); border: 1px solid var(--danger-line); color: var(--danger); }
+.impissues.info { background: var(--accent-soft); border: 1px solid var(--accent-line); color: var(--ink); }
+.impissues.info b { color: var(--accent); }
+.impissues .imphintline { margin-top: 3px; font-size: 11px; color: var(--muted); }
+/* 对白分角色：备注行 + 逐句角色下拉 */
+.improw .rline { display: flex; align-items: center; gap: 4px; }
+.improw .rline .rnote { flex: 1; min-width: 0; }
+.improw .rolesel {
+  flex: none; width: 74px; font-size: 10.5px; padding: 2px 2px;
+  border-color: var(--border-2);
+}
 .imptools { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 10px 0 4px; }
 .impgroup {
   border: 1px solid var(--border); border-radius: 11px; margin-top: 10px;

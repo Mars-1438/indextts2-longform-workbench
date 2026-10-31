@@ -276,9 +276,11 @@ CLASSES = [
                        ["chapter_speaker", "章节 + 角色"], ["none", "不分组"]],
         "opts": [
             _o("speaker_mode", "对白分角色", "select", "auto",
-               [["auto", "自动（纯对白稿才分）"], ["alt2", "双人交替 A/B"], ["off", "不分角色"]],
-               "稿子里没有「角色：」标注时，按台词出现顺序奇偶交替分给 角色A / 角色B；"
-               "分完可以在预览里改角色名、单句改归属"),
+               [["auto", "自动（纯对白稿才分）"], ["alt2", "双人交替 A/B"],
+                ["adv", "高级：按旁白里的名字（张三/李四）"], ["off", "不分角色"]],
+               "autual：没有「角色：」标注时按台词顺序交替给 角色A / 角色B；"
+               "高级：先看旁白里的「李四说」「李四：」「（…）李四冷笑：」认人，认不出才退回交替。"
+               "分完都能在预览里改角色名、单句改归属"),
             _o("quote_split", "引号里的内容单独成段", "bool", True),
             _o("quote_pairs", "对白符号（可自定义）", "text", "",
                "留空 = 认全部常见符号：「」『』“”‘’\"\" ﹁﹂﹃﹄ ｢｣ []［］【】〔〕〖〗《》〈〉{}｛｝；"
@@ -1739,21 +1741,34 @@ def _plan_script(src, o):
 
 # ---------------------------------------------------------------- 小说类
 def _novel_paragraphs(text, chapter_mode="auto"):
-    """[(章节名, 段落正文)]"""
+    """[(章节名, 段落正文)]
+
+    注意：这里**逐行**产出（不是把整段揉成一行）。揉成一行会让
+    「“路上堵车。”张三把外套挂在椅背上。」的旁白跑到下一句台词前面去，
+    高级识别的「后置旁白」就会张冠李戴 —— 相邻关系必须保住。
+    跨行的长句仍会在 split_smart 里按句号合并，不会碎成一条一条。
+    """
     raw = (text or "").replace("\r\n", "\n").replace("\r", "\n")
     blocks = re.split(r"\n\s*\n", raw)
     if chapter_mode == "blank":
-        return [(None, _norm_space(b)) for b in blocks if _norm_space(b)]
+        out = []
+        for b in blocks:
+            for ln in b.split("\n"):
+                ln = _norm_space(ln)
+                if ln:
+                    out.append((None, ln))
+        return out
 
     out, chapter = [], None
     buf = []
 
     def flush():
-        if buf:
-            joined = _norm_space(" ".join(buf))
-            if joined:
-                out.append((chapter, joined))
-            buf.clear()
+        for block_text in buf:
+            for ln in block_text.split("\n"):
+                ln = _norm_space(ln)
+                if ln:
+                    out.append((chapter, ln))
+        buf.clear()
 
     for b in blocks:
         s = _norm_space(b)
@@ -1849,10 +1864,11 @@ def _plan_novel(src, o):
     dia_ratio = n_dia / max(1, len(pieces_all))
     has_chapter = any(p[0] for p in pieces_all)
     mode = (o.get("speaker_mode") or "auto").lower()
-    if mode not in ("auto", "alt2", "off"):
+    if mode not in ("auto", "alt2", "adv", "off"):
         mode = "auto"
     auto_alt = bool(n_dia >= 4 and dia_ratio >= 0.72)
-    alt = mode == "alt2" or (mode == "auto" and auto_alt)
+    adv = mode == "adv"
+    alt = mode in ("alt2", "adv") or (mode == "auto" and auto_alt)
     if mode == "off":
         alt = False
     elif group_by in ("speaker", "chapter_speaker"):
@@ -1865,9 +1881,44 @@ def _plan_novel(src, o):
         group_by = "speaker"
         switched = True
 
+    # ③ 每一段到底算谁说的
+    #    alt2 = 按顺序交替 A/B（只认得"两个人在说话"）
+    #    adv  = 先看旁白里的名字线索（张三说 / 「…」李四说 / 李四：「…」），
+    #           认得出就用真名，认不出再退回交替 —— 这就是「高级智能识别」
+    adv_att = None
+    if adv and n_dia:
+        try:
+            import lf_roles as ROLE          # 单独一层，不启用时完全不参与
+            adv_att = ROLE.attribute([
+                {"kind": p[2], "text": p[1]} for p in pieces_all
+            ])
+        except Exception:                    # noqa: BLE001  引擎坏了不能拖垮导入
+            adv_att = None
+            adv = False
+    piece_roles = []                         # [(role, source, conf)]
+    spk_i = 0
+    named = guessed = 0
+    name_hits = {}
+    for idx, p in enumerate(pieces_all):
+        kind = p[2]
+        role, src, conf = "", "", 0.0
+        if alt and kind == "dialogue":
+            a = adv_att[idx] if adv_att else None
+            if a and a.get("role"):
+                role, src, conf = a["role"], a.get("source") or "rule", float(a.get("conf") or 0.8)
+                named += 1
+                name_hits[role] = name_hits.get(role, 0) + 1
+            else:
+                role = SPEAKER_A if spk_i % 2 == 0 else SPEAKER_B
+                spk_i += 1
+                src, conf = "alternate", 0.3
+                guessed += 1
+        piece_roles.append((role, src, conf))
+
     groups, order, seq = {}, [], 0
     total = 0
-    spk_a = spk_b = 0
+    spk_a = sum(1 for r in piece_roles if r[0] == SPEAKER_A)
+    spk_b = sum(1 for r in piece_roles if r[0] == SPEAKER_B)
 
     def push(gname, seg):
         if gname not in groups:
@@ -1875,14 +1926,8 @@ def _plan_novel(src, o):
             order.append(gname)
         groups[gname].append(seg)
 
-    for chapter, body, kind, notes in pieces_all:
-        role = ""
-        if alt and kind == "dialogue":
-            role = SPEAKER_A if (spk_a + spk_b) % 2 == 0 else SPEAKER_B
-            if role == SPEAKER_A:
-                spk_a += 1
-            else:
-                spk_b += 1
+    for idx, (chapter, body, kind, notes) in enumerate(pieces_all):
+        role, role_src, role_conf = piece_roles[idx]
         gname = _novel_group(group_by, chapter, kind, role)
         segs = split_smart(body, max_chars)
         for si, sg in enumerate(segs):
@@ -1895,7 +1940,8 @@ def _plan_novel(src, o):
             seg = {
                 "i": seq, "text": sg["text"],
                 "note": "；".join([x for x in bits if x])[:200],
-                "role": role, "quoted": kind == "dialogue", "pause": None,
+                "role": role, "role_src": role_src, "role_conf": round(role_conf, 2),
+                "quoted": kind == "dialogue", "pause": None,
                 "slow": False, "over": bool(sg["over"]), "group": gname,
             }
             push(gname, seg)
@@ -1905,7 +1951,13 @@ def _plan_novel(src, o):
                                "msg": f"「{gname}」有一段 {len(sg['text'])} 字超过上限 {max_chars}"
                                       f"（引号/括号内不宜切分），已保留原文",
                                "text": sg["text"][:40]})
-    if alt and mode == "auto" and spk_a + spk_b >= 4:
+    if adv and named:
+        top = "、".join(sorted(name_hits, key=lambda k: -name_hits[k])[:4])
+        issues.append({"level": "info", "group": "",
+                       "msg": f"高级识别：认出 {len(name_hits)} 个角色（{top}），"
+                              f"{named} 段按名字归属；剩下 {guessed} 段没线索，仍按顺序交替"
+                              f"（{SPEAKER_A} / {SPEAKER_B}）"})
+    elif alt and mode == "auto" and spk_a + spk_b >= 4:
         issues.append({"level": "info", "group": "",
                        "msg": f"没有角色标注，按台词顺序交替分成「{SPEAKER_A} / {SPEAKER_B}」"
                               f"（{spk_a} 段 / {spk_b} 段）；猜错了可以改组名或逐句改归属"})
@@ -1914,9 +1966,11 @@ def _plan_novel(src, o):
         "paragraphs": len(paras), "chars": total,
         "group_by": group_by,
         "speaker": {
-            "mode": "alt2" if alt else "off",
+            "mode": "adv" if adv else ("alt2" if alt else "off"),
             "auto": bool(mode == "auto" and auto_alt),
             "a": spk_a, "b": spk_b,
+            "named": named, "guessed": guessed,
+            "names": sorted(name_hits, key=lambda k: -name_hits[k])[:12],
             "dialogue": n_dia, "ratio": round(dia_ratio, 2),
             "switched_group": switched,
         },

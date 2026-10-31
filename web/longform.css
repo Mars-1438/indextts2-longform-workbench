@@ -1041,6 +1041,51 @@ html.embed .libfoot { margin-bottom: 4px; }
 .impselrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 .impselrow .lab { font-size: 12px; color: var(--muted); }
 
+/* 正文预览窗口：同色 = 同一分组（= 同一音色），备注不上色 */
+.impov {
+  position: fixed; inset: 0; z-index: 300; background: var(--overlay, rgba(27,26,24,.34));
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+}
+.pvbox {
+  width: min(920px, 96vw); max-height: 86vh; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow);
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.pvtop {
+  display: flex; align-items: center; gap: 10px; padding: 11px 14px;
+  border-bottom: 1px solid var(--border); background: var(--surface-2);
+}
+.pvtop b { font-size: 13.5px; }
+.pvtop .spacer { flex: 1; }
+.pvlegend {
+  display: flex; gap: 8px; flex-wrap: wrap; padding: 8px 14px;
+  border-bottom: 1px solid var(--border); font-size: 11.5px; color: var(--muted);
+}
+.pvchip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px;
+  border: 1px solid var(--border); border-radius: 999px; background: var(--inset); }
+.pvdot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+.pvbody { flex: 1; overflow: auto; padding: 6px 0 10px; }
+.pvrow {
+  display: block; margin: 4px 12px; padding: 6px 10px 7px 11px;
+  border: 1px solid var(--border); border-left: 3px solid var(--border-2);
+  border-radius: 9px; background: var(--surface); cursor: pointer;
+}
+.pvrow:hover { border-color: var(--border-2); box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+.pvrow.on { outline: 2px solid var(--accent, #1f5fe0); outline-offset: 1px; }
+.pvhead { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--muted); }
+.pvhead .spacer { flex: 1; }
+.pvgi { font-weight: 600; color: var(--ink); }
+.pvsrc { font-size: 10px; color: var(--faint); border: 1px solid var(--border); border-radius: 5px; padding: 0 4px; }
+.pvsrc.alt { color: var(--warn-ink, #8a5a10); border-color: var(--warn-line, #eed9ae); background: var(--warn-soft, #fffaf0); }
+.pvidx { font-family: var(--mono); color: var(--faint); }
+.pvtext { font-size: 13px; line-height: 1.65; margin-top: 3px; word-break: break-word; }
+.pvnote { font-size: 10.5px; color: var(--faint); margin-top: 3px; }
+.pvbar {
+  display: flex; align-items: center; gap: 8px; padding: 9px 14px;
+  border-top: 1px solid var(--border); background: var(--surface-2); min-height: 44px;
+}
+.pvbar .hint { font-size: 11.5px; color: var(--muted); }
+
 /* 步骤 3：预览 */
 .impstats { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
 .impstats b { color: var(--ink); font-family: var(--mono); }

@@ -28,8 +28,8 @@ STAGE = os.path.join(DIST, NAME)
 PAYLOAD = os.path.join(STAGE, "payload")
 
 # lf_static.py 里放静态资源白名单（两个页面共用一份），必须一起打包
-CORE_PY = ["longform_api.py", "lf_import.py", "timeline_api.py", "hrir.py", "rooms.py",
-           "lf_static.py"]
+CORE_PY = ["longform_api.py", "lf_import.py", "lf_roles.py", "timeline_api.py", "hrir.py",
+           "rooms.py", "lf_static.py"]
 
 
 def _web_files():

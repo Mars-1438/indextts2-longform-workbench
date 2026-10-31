@@ -8211,6 +8211,175 @@ function impGroupParams(g, row) {
   row.appendChild(box);
 }
 
+/* ------------------------------ 正文预览窗口 ------------------------------
+   分组之后，用「正式导入后台本长什么样」的样子再给人看一遍：
+   · 会被朗读的句子 = 按分组上色（同一组同色，左边一条色条）
+   · 不朗读的附属信息（动作 / 镜头 / 时间码…）= 灰色小字，不上色
+   · 点一句就能改组 / 拆分 / 删除，改完立刻重画，不用回上面的卡片里找
+------------------------------------------------------------------------- */
+const IMP_PV_COLORS = [
+  "#1f5fe0", "#0f766e", "#b45309", "#7c3aed",
+  "#be123c", "#0369a1", "#4d7c0f", "#a21caf",
+];
+let IMP_PV_SEL = null;      // {gi, si}
+
+function impPvFlat() {
+  const rows = [];
+  IMP.groups.forEach((g, gi) => {
+    (g.segments || []).forEach((s, si) => {
+      if (!String(s.text || "").trim() && !String(s.note || "").trim()) return;
+      rows.push({ gi, si, g, s, key: typeof s.i === "number" ? s.i : 1e6 + gi * 100 + si });
+    });
+  });
+  rows.sort((a, b) => a.key - b.key);
+  return rows;
+}
+
+function impPvClose() {
+  const ov = document.getElementById("impPv");
+  if (ov) ov.remove();
+  IMP_PV_SEL = null;
+}
+
+function impPvPaint() {
+  const ov = document.getElementById("impPv");
+  if (!ov) return;
+  const body = ov.querySelector(".pvbody");
+  const sel = IMP_PV_SEL;
+  body.innerHTML = "";
+
+  const rows = impPvFlat();
+  rows.forEach((r, idx) => {
+    const color = IMP_PV_COLORS[r.gi % IMP_PV_COLORS.length];
+    const row = impEl("div", "pvrow" + (sel && sel.gi === r.gi && sel.si === r.si ? " on" : ""));
+    row.style.borderLeftColor = color;
+    if (r.s.quoted) row.style.background = color + "12";   // 台词：淡底
+    const head = impEl("div", "pvhead");
+    const dot = impEl("span", "pvdot");
+    dot.style.background = color;
+    head.appendChild(dot);
+    head.appendChild(impEl("span", "pvgi", r.g.name));
+    if (r.s.role_src && r.s.role_src !== "alternate") {
+      const tag = impEl("span", "pvsrc", r.s.role_src === "after" ? "后置旁白"
+        : r.s.role_src === "lead" ? "前文点名"
+          : r.s.role_src === "context" ? "上文继承" : "规则");
+      tag.title = `归属依据：${r.s.role_src}（置信度 ${r.s.role_conf}）`;
+      head.appendChild(tag);
+    } else if (r.s.role_src === "alternate") {
+      const tag = impEl("span", "pvsrc alt", "交替推测");
+      tag.title = "没有名字线索，按顺序交替分给两个角色（可在这里改）";
+      head.appendChild(tag);
+    }
+    head.appendChild(impEl("span", "spacer"));
+    head.appendChild(impEl("span", "pvidx", String(idx + 1)));
+    row.appendChild(head);
+
+    const txt = impEl("div", "pvtext", r.s.text || "（空）");
+    row.appendChild(txt);
+    // note 里混着两个内部标记（台词 / 括号），它们不是「不朗读」的东西，别当成备注显示
+    const noteTxt = String(r.s.note || "").replace(/(台词|括号)(；|$)/g, "").trim();
+    if (noteTxt) {
+      row.appendChild(impEl("div", "pvnote", "备注（不朗读）：" + noteTxt));
+    }
+    row.onclick = () => {
+      IMP_PV_SEL = { gi: r.gi, si: r.si };
+      impPvPaint();
+    };
+    body.appendChild(row);
+  });
+
+  // 图例：每组的颜色 + 段数
+  const legend = ov.querySelector(".pvlegend");
+  legend.innerHTML = "";
+  IMP.groups.forEach((g, gi) => {
+    const chip = impEl("span", "pvchip");
+    const dot = impEl("span", "pvdot");
+    dot.style.background = IMP_PV_COLORS[gi % IMP_PV_COLORS.length];
+    chip.appendChild(dot);
+    chip.appendChild(document.createTextNode(`${g.name} ${(g.segments || []).length}`));
+    chip.onclick = () => {
+      const first = (g.segments || [])[0];
+      if (first) { IMP_PV_SEL = { gi, si: 0 }; impPvPaint(); }
+    };
+    chip.style.cursor = "pointer";
+    chip.title = "点一下跳到这一组的第一句";
+    legend.appendChild(chip);
+  });
+
+  // 选中后的操作条
+  const bar = ov.querySelector(".pvbar");
+  bar.innerHTML = "";
+  if (!sel) {
+    bar.appendChild(impEl("span", "hint", "点任意一句 → 可以改归到哪个分组、拆分、删除（跟在上面卡片里改是同一份数据）"));
+    return;
+  }
+  const g = IMP.groups[sel.gi];
+  const s = g && (g.segments || [])[sel.si];
+  if (!g || !s) { IMP_PV_SEL = null; impPvPaint(); return; }
+  bar.appendChild(impEl("span", "hint", "这一句："));
+  const selG = document.createElement("select");
+  selG.className = "sel mini";
+  IMP.groups.forEach((x) => {
+    const o = document.createElement("option");
+    o.value = x.name;
+    o.textContent = x.name;
+    selG.appendChild(o);
+  });
+  selG.value = g.name;
+  selG.onchange = () => {
+    impMoveSegTo(g, sel.si, selG.value);
+    IMP_PV_SEL = null;
+    impPvPaint();
+  };
+  bar.appendChild(selG);
+  const bSplit = impEl("button", "btn mini ghost", "✂ 拆成两句");
+  bSplit.onclick = () => { impSplitSeg(g, sel.si); IMP_PV_SEL = null; impPvPaint(); };
+  const bDel = impEl("button", "btn mini ghost", "✕ 删掉这句");
+  bDel.onclick = () => { impDelSeg(g, sel.si); IMP_PV_SEL = null; impPvPaint(); };
+  bar.appendChild(bSplit);
+  bar.appendChild(bDel);
+}
+
+function impPreviewOpen() {
+  impPvClose();
+  const ov = impEl("div", "impov");
+  ov.id = "impPv";
+  const box = impEl("div", "pvbox");
+  const head = impEl("div", "pvtop");
+  head.appendChild(impEl("b", null, "正文预览"));
+  head.appendChild(impEl("span", "hint", "按正式导入后的顺序排；同色 = 同一个分组（= 同一个音色）"));
+  head.appendChild(impEl("span", "spacer"));
+  const close = impEl("button", "btn mini ghost", "关闭");
+  close.onclick = impPvClose;
+  head.appendChild(close);
+  box.appendChild(head);
+
+  const legend = impEl("div", "pvlegend");
+  box.appendChild(legend);
+  const body = impEl("div", "pvbody");
+  box.appendChild(body);
+  const bar = impEl("div", "pvbar");
+  box.appendChild(bar);
+  ov.appendChild(box);
+  ov.onclick = (e) => { if (e.target === ov) impPvClose(); };
+  document.body.appendChild(ov);
+  impPvPaint();
+}
+
+/* 一键跑「高级识别」：认旁白里的名字，认不出再退回交替 */
+async function impRunAdvanced() {
+  IMP.opts = IMP.opts || {};
+  IMP.opts.speaker_mode = "adv";
+  await impPlan(true);
+  const sp = (IMP.stats || {}).speaker || {};
+  if (sp.mode === "adv" && (sp.named || 0) > 0) {
+    const names = (sp.names || []).slice(0, 5).join("、");
+    toast(`高级识别：认出 ${(sp.names || []).length} 个角色（${names}），${sp.named} 段按名字归属`);
+  } else {
+    toast("没找到名字线索 —— 旁白里要有「张三说」「「…」李四说」这类写法；已退回交替 A/B", true);
+  }
+}
+
 function impStep3(body, foot) {
   const st = IMP.stats || {};
   const top = impEl("div", "impstats");
@@ -8244,7 +8413,18 @@ function impStep3(body, foot) {
   }
 
   const spk = (st && st.speaker) || null;
-  if (spk && spk.mode === "alt2" && spk.a + spk.b > 0) {
+  if (spk && spk.mode === "adv" && (spk.named || 0) > 0) {
+    const box = impEl("div", "impissues info");
+    box.appendChild(impEl("b", null,
+      `高级识别：认出 ${(spk.names || []).length} 个角色（${(spk.names || []).slice(0, 5).join("、")}）`));
+    box.appendChild(document.createTextNode(
+      `，${spk.named} 段按名字归属。` +
+      (spk.guessed ? `另有 ${spk.guessed} 段没线索，仍按顺序交替（角色A / 角色B）。` : "")));
+    box.appendChild(impEl("div", "imphintline",
+      "点「👁 正文预览」按导入后的顺序逐句核对：同一组同色，备注这类不朗读的内容是灰色。" +
+      "认错了就在预览里直接改组名或改这一句的归属。"));
+    body.appendChild(box);
+  } else if (spk && spk.mode === "alt2" && spk.a + spk.b > 0) {
     const box = impEl("div", "impissues info");
     const t1 = impEl("b", null, "没有角色标注，已按台词顺序交替分角色");
     box.appendChild(t1);
@@ -8271,6 +8451,16 @@ function impStep3(body, foot) {
     impGo(3);
   };
   tools.appendChild(redo); tools.appendChild(back); tools.appendChild(addG);
+  const pvBtn = impEl("button", "btn mini ghost", "👁 正文预览");
+  pvBtn.title = "按正式导入后的样子看一遍：同一组同色，备注这类不朗读的内容不上色；点句子可以改组/拆分/删除";
+  pvBtn.onclick = () => impPreviewOpen();
+  tools.appendChild(pvBtn);
+  if (impCls().id === "novel") {
+    const advBtn = impEl("button", "btn mini ghost", "🧠 高级识别");
+    advBtn.title = "按旁白里的名字认人（张三说 / 「…」李四说 / 李四冷笑：），认不出再退回交替 A/B";
+    advBtn.onclick = () => impRunAdvanced();
+    tools.appendChild(advBtn);
+  }
   if (impRoleNames().length >= 2) {
     const sw = impEl("button", "btn mini ghost", "⇄ 交换 A/B");
     sw.title = "把「角色A」和「角色B」的台词整份对调（第一句就该是另一个人说的时用）";

@@ -250,7 +250,10 @@ CLASSES = [
         "desc": "含成对引号对白：「…」『…』“…”\"…\"",
         "detail": (
             "**怎么认出来的**\n"
-            "成对引号出现 ≥2 次 —— 小说里「引号 = 台词」，这是最稳的特征。\n\n"
+            "成对引号出现 ≥2 次 —— 小说里「引号 = 台词」，这是最稳的特征。\n"
+            "除了「」『』“”‘’，**方括号 / 书名号 / 花括号**也认：`[台词]`、`【台词】`、`《台词》`、`{台词}`，\n"
+            "以及竖排用的 ﹁﹂﹃﹄ ｢｣（`[00:12]`、`[镜头 3]`、`[叹气]` 这种会被排除，不当台词）。\n"
+            "符号还能自己指定：选项里「对白符号」留空 = 全部常见符号，写 `[]【】` = 只认这两种。\n\n"
             "**这一类怎么切**\n"
             "· 引号里的内容**单独成段**（当台词），引号外的叙述留在旁白段；\n"
             "· 括号里的内容（心理活动 / 动作）也能单独成句，或只记备注不朗读；\n"
@@ -277,6 +280,9 @@ CLASSES = [
                "稿子里没有「角色：」标注时，按台词出现顺序奇偶交替分给 角色A / 角色B；"
                "分完可以在预览里改角色名、单句改归属"),
             _o("quote_split", "引号里的内容单独成段", "bool", True),
+            _o("quote_pairs", "对白符号（可自定义）", "text", "",
+               "留空 = 认全部常见符号：「」『』“”‘’\"\" ﹁﹂﹃﹄ ｢｣ []［］【】〔〕〖〗《》〈〉{}｛｝；"
+               "只认某几种就写 `[]【】`；符号本身有空格用 `[ ] | 【 】`；写 none 一个都不认"),
             _o("paren_split", "括号里的内容单独成句", "bool", True,
                "心理活动 / 动作提示单独成句；不想念出来就把下面「只记备注」勾上"),
             _o("paren_note", "括号内容只记备注（不朗读）", "bool", False),
@@ -898,26 +904,125 @@ def _fmt_tc_long(sec):
     return f"{int(h):02d}:{int(m):02d}:{s:06.3f}"
 
 
-def _quote_split(text, keep_marks=True):
-    """把「引号内 / 引号外」拆开，返回 [(片段, 是否引号内)]。"""
+# ---------------------------------------------------------------- 台词符号
+# 「哪些符号包起来算对白」是一张表，不是硬编码的几种：
+#   · 强符号（本身就是引号，内容一律当台词）：「」『』“”‘’""﹁﹂﹃﹄｢｣
+#   · 弱符号（借来的方括号 / 书名号 / 花括号，要看内容）：[]［］【】〔〕〖〗《》〈〉{}｛｝
+# 弱符号要过 _inner_is_speech()：`[00:12]` 是时间码、`[镜头 3]` 是标签、`[叹气]` 是动作，
+# 都不当台词；`[李逍遥！你皮痒啊？]` 才是。
+QUOTE_PAIRS = [
+    ("「", "」"), ("『", "』"), ("“", "”"), ("‘", "’"), ('"', '"'),
+    ("﹁", "﹂"), ("﹃", "﹄"), ("｢", "｣"),
+    ("[", "]"), ("［", "］"), ("【", "】"), ("〔", "〕"), ("〖", "〗"),
+    ("《", "》"), ("〈", "〉"), ("{", "}"), ("｛", "｝"),
+]
+STRONG_OPEN = "「『“‘\"﹁﹃｢"
+WEAK_OPEN = "[]［］【】〔〕〖〗《》〈〉{｛"
+ALL_MARKS = "".join(o + c for o, c in QUOTE_PAIRS)
+_TIME_ONLY_RE = re.compile(r"^[\s\d:;.,\-—~'\"→|/]+$")
+
+
+def _inner_is_speech(inner, strict=True):
+    """符号里这一坨像台词吗？
+
+    strict=False（`quote_pairs` 里用户自己写的符号）：只挡「时间码 / 标签词」这两种
+    明显不是台词的东西 —— 用户既然说这个符号是对白，短句也算；
+    strict=True（内置的弱符号）：还要够长或有句读，免得把 `[叹气]`、`《红楼梦》` 当台词。
+    """
+    s = (inner or "").strip()
+    if not s:
+        return False
+    if TAG_KW_RE.search(s) or _TIME_ONLY_RE.match(s):
+        return False
+    if not strict:
+        return True
+    cjk = len(re.findall(r"[\u4e00-\u9fa5]", s))
+    punct = bool(re.search(r"[。！？!?…，、；;：:～~]", s))
+    return cjk >= 6 or (cjk >= 2 and punct) or len(s) >= 10
+
+
+def _quote_pairs(spec=None):
+    """把「自定义对白符号」解析成 [(开, 闭)]。
+
+    留空 = 用全部内置符号；写 `none` / `off` / `-` = 一个都不认（只按旁白 / 章节切）。
+    支持三种写法：
+        `[]【】`        依次两两配成 [] 和 【】
+        `[ ] | 【 】`   显式用 | 分隔每一对（符号本身是空格时用这个）
+        `§`             单个符号，两边同一个（像 `§台词§`）
+    """
+    spec = (spec or "").strip()
+    if not spec:
+        return list(QUOTE_PAIRS)
+    if spec.lower() in ("none", "off", "0", "-"):
+        return []
+    if "|" in spec:
+        pairs = []
+        for tok in (x.strip() for x in spec.split("|")):
+            if not tok:
+                continue
+            pairs.append((tok[0], tok[1] if len(tok) >= 2 else tok[0]))
+        return pairs
+    chars = [c for c in spec if not c.isspace()]
+    if len(chars) == 1:
+        return [(chars[0], chars[0])]
+    if len(chars) % 2:
+        chars = chars[:-1]
+    return [(chars[i], chars[i + 1]) for i in range(0, len(chars), 2)]
+
+
+def _line_quoted(t, pairs=None):
+    """整行是否被某个对白符号包住（且内容确实像台词）。"""
+    t = (t or "").strip()
+    if len(t) < 3:
+        return False
+    for o, c in (pairs if pairs is not None else QUOTE_PAIRS):
+        if len(t) >= len(o) + len(c) + 1 and t.startswith(o) and t.endswith(c):
+            if o in STRONG_OPEN or o == c:
+                return True
+            return _inner_is_speech(t[len(o):len(t) - len(c)])
+    return False
+
+
+def _quote_split(text, keep_marks=True, pairs=None):
+    """把「引号内 / 引号外」拆开，返回 [(片段, 是否引号内)]。
+
+    符号表见 QUOTE_PAIRS，可被 options 里的 quote_pairs 覆盖。
+    """
+    pairs = pairs if pairs is not None else QUOTE_PAIRS
+    close_of = {}
+    for o, c in pairs:
+        close_of.setdefault(o, c)
     out, buf, in_q = [], "", False
-    q_open = "「『“‘\""
-    q_close = "」』”’\""
-    for ch in text:
-        if not in_q and ch in q_open:
-            if buf.strip():
-                out.append((buf.strip(), False))
-            buf, in_q = ch, True
-        elif in_q and ch in q_close:
-            buf += ch
-            out.append((buf.strip(), True))
-            buf, in_q = "", False
+    closer = ""
+    i, n = 0, len(text or "")
+    while i < n:
+        ch = text[i]
+        if not in_q:
+            close = close_of.get(ch)
+            if close is None:
+                buf += ch
+            else:
+                if ch not in STRONG_OPEN and close != ch:
+                    # 弱符号：先看这一对里装的是什么，再决定要不要当台词
+                    j = text.find(close, i + 1)
+                    inner = text[i + 1:j] if j > i else ""
+                    if j < 0 or not _inner_is_speech(inner, strict=ch in WEAK_OPEN):
+                        buf += ch
+                        i += 1
+                        continue
+                if buf.strip():
+                    out.append((buf.strip(), False))
+                buf, in_q, closer = ch, True, close
         else:
             buf += ch
+            if ch == closer:
+                out.append((buf.strip(), True))
+                buf, in_q, closer = "", False, ""
+        i += 1
     if buf.strip():
         out.append((buf.strip(), in_q))
     if not keep_marks:
-        out = [((t.strip("「」『』“‘”’\"") if q else t), q) for t, q in out]
+        out = [((t.strip(ALL_MARKS) if q else t), q) for t, q in out]
     return [(t.strip(), q) for t, q in out if t.strip()]
 
 
@@ -1148,8 +1253,11 @@ def _count_bare_cues(lines):
     return cnt
 
 
-def detect(src):
-    """判断这份文本属于 5 类里的哪一类，返回分数 + 证据。"""
+def detect(src, pairs=None):
+    """判断这份文本属于 5 类里的哪一类，返回分数 + 证据。
+
+    pairs：对白符号表（用户在选项里自定义时传进来），不传就用内置那套。
+    """
     kind = src.get("kind") or "text"
     lines = _text_lines(src)
     n = max(1, len(lines))
@@ -1179,10 +1287,23 @@ def detect(src):
         scenes = max(scenes, sum(1 for b in (src.get("blocks") or []) if b.get("kind") == "scene"))
 
     quotes = sum(text.count(ch) for ch in ("「", "『", "“")) + text.count('"') // 2
+    # 弱符号标的台词（`[李逍遥！你皮痒啊？]`、`【他走了。】`、《》…）：
+    # 不认的话会被当成 `[镜头 3]` 那种标签，整篇判到「指令类」去。
+    # 强符号（「」『』“”）上面已经数过了，这里只数弱符号的行。
+    # 注意要传 pairs：用户自定义了符号（比如 `§台词§`）时，这里也得跟着认。
+    weak_lines = 0
+    for l in lines:
+        t = l.strip()
+        if t[:1] and t[:1] not in STRONG_OPEN and _line_quoted(t, pairs):
+            weak_lines += 1
+    if weak_lines:
+        quotes += weak_lines
 
     tag_hits, tag_kw = 0, 0
     for m in TAG_ANY_RE.finditer(text):
         inner = m.group(1) or m.group(2) or ""
+        if m.group(0)[:1] in WEAK_OPEN and _inner_is_speech(inner, strict=False):
+            continue                     # 是台词，不是标签
         tag_hits += 1
         if TAG_KW_RE.search(inner):
             tag_kw += 1
@@ -1228,17 +1349,19 @@ def detect(src):
     if quotes >= 2:
         s = min(1.0, 0.5 + 0.06 * min(8, quotes))
         e.append(f"检测到 {quotes} 处成对引号（台词）")
-    # 「整行就是一个引号台词」的行占比：纯对白稿没有旁白，也就没有任何角色线索，
+    # 「整行就是一句台词」的行占比：纯对白稿没有旁白，也就没有任何角色线索，
     # 这种稿子只能按台词顺序交替分 A/B，先在这里把特征数出来
     quoted_lines = 0
     for l in lines:
-        t = l.strip()
-        if len(t) >= 2 and t[0] in "「『“" and t[-1] in "」』”":
+        if _line_quoted(l.strip(), pairs):
             quoted_lines += 1
     q_ratio = quoted_lines / n
     if quoted_lines >= 4 and q_ratio >= 0.6:
-        e.append(f"{int(q_ratio * 100)}% 的行整行就是一句引号台词、几乎没有旁白"
-                 f"（{quoted_lines} 行）→ 像没标角色的对白稿，导入时按顺序交替分「角色A / 角色B」")
+        e.append(f"{int(q_ratio * 100)}% 的行整行就是一句台词（被「」[]【】《》之类包住）、"
+                 f"几乎没有旁白（{quoted_lines} 行）→ 像没标角色的对白稿，"
+                 f"导入时按顺序交替分「角色A / 角色B」")
+    if weak_lines:
+        e.append(f"其中 {weak_lines} 行用的是弱符号（[]【】《》{{}} 之类），按台词处理，不当标签")
     scores["novel"], ev["novel"] = s, e
 
     # 4. 指令
@@ -1279,6 +1402,7 @@ def detect(src):
                   "role_lines": role_colon, "bare_cues": bare, "scenes": scenes,
                   "quotes": quotes, "tags": tag_hits, "tag_kw": tag_kw,
                   "quoted_lines": quoted_lines, "quoted_ratio": round(q_ratio, 2),
+                  "weak_quote_lines": weak_lines,
                   "short_ratio": round(short_ratio, 2), "kind": kind},
     }
 
@@ -1689,10 +1813,11 @@ def _plan_novel(src, o):
     # ① 先只收集片段、不落段：得先看清「整份稿子几乎全是引号台词、而且没有章节」，
     #    才知道要不要按角色交替。纯对白稿的每一行都长得一样，光看单行分不出是谁说的。
     pieces_all = []          # (章节, 正文, kind, notes)
+    qpairs = _quote_pairs(o.get("quote_pairs"))
     for chapter, para in paras:
         pieces = []          # (正文, kind, notes)
         if quote_split:
-            for piece, quoted in _quote_split(para, keep_marks):
+            for piece, quoted in _quote_split(para, keep_marks, qpairs):
                 if quoted:
                     pieces.append((piece, "dialogue", []))
                     continue
@@ -2081,7 +2206,7 @@ def defaults_of(cid):
 def plan(src, cls=None, opts=None):
     """src + 类别 + 选项 → groups / issues / stats。cls 为空时自动检测。"""
     opts = dict(opts or {})
-    det = detect(src)
+    det = detect(src, _quote_pairs(opts.get("quote_pairs")))
     cid = cls if cls in CLASS_MAP else det["cls"]
     cfg = defaults_of(cid)
     cfg.update({k: v for k, v in opts.items() if v is not None})

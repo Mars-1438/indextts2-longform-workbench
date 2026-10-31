@@ -7915,15 +7915,20 @@ function impStep2(body, foot) {
       sel.onchange = () => { IMP.opts[d.k] = sel.value; };
       row.appendChild(sel);
     } else if (d.type === "text") {
-      /* 自由文本选项（目前用于「自定义时间码格式」）：输入框 + 一个校验按钮，
-         校验会真的拿这份文件的正文跑一遍解析，告诉用户能认出多少处。 */
+      /* 自由文本选项：「自定义时间码格式」带一个校验按钮（拿正文真跑一遍）；
+         「对白符号」只收符号，留空 = 认全部常见符号。 */
       row.appendChild(lab);
       const inp = document.createElement("input");
       inp.className = "inp tc";
       inp.type = "text";
-      inp.placeholder = d.k === "tc_custom"
-        ? "例：[00:12]　或　00:12:03,200　或　^\\[(\\d+):(\\d+)\\]"
-        : "";
+      if (d.k === "tc_custom") {
+        inp.placeholder = "例：[00:12]　或　00:12:03,200　或　^\\[(\\d+):(\\d+)\\]";
+      } else if (d.k === "quote_pairs") {
+        inp.placeholder = "留空 = 全部符号；也可写 []【】 或 { } 或 §";
+        inp.style.width = "300px";
+      } else {
+        inp.placeholder = "";
+      }
       inp.value = String(impVal(d) == null ? "" : impVal(d));
       inp.oninput = () => { IMP.opts[d.k] = inp.value.trim(); };
       row.appendChild(inp);

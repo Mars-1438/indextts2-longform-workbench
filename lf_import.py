@@ -224,7 +224,8 @@ CLASSES = [
         ),
         "default_group": "role", "default_max": 70,
         "group_opts": [["role", "按角色"], ["scene", "按场景"], ["scene_role", "场景 + 角色"],
-                       ["chapter", "按章节"], ["none", "不分组"]],
+                       ["chapter", "按章节"], ["speaker", "按角色（对白 A/B / 人名）"],
+                       ["none", "不分组"]],
         "opts": [
             _o("role_style", "角色写法", "select", "auto",
                [["auto", "自动判断"], ["colon", "行内「名字：台词」"], ["line", "角色名单独一行"]],
@@ -236,6 +237,10 @@ CLASSES = [
                "关掉就整段丢弃动作提示"),
             _o("paren_name", "剥掉角色名后的括号提示", "bool", True,
                "「阿澈（低声）」→ 角色 阿澈，提示「低声」记备注"),
+            _o("speaker_mode", "对白分角色", "select", "off",
+               [["off", "不分（有角色名就用角色名）"], ["alt2", "双人交替 A/B"],
+                ["adv", "高级：按旁白里的名字"]],
+               "只有「整篇没有角色前缀」的裸台词稿才用得上；已经有「名字：」前缀时它不起作用"),
         ],
         "presets": [
             {"name": "短剧 / 广播剧", "opts": {"group_by": "role", "action_note": True}},
@@ -364,22 +369,27 @@ CLASSES = [
             "更没有引号和标签。\n\n所以只能按句子切开，再合并到每段不超过上限。\n"
         ),
         "default_group": "none", "default_max": 70,
-        "group_opts": [["none", "不分组"], ["chapter", "按章节"], ["every_n", "每 N 段一组"]],
+        "group_opts": [["none", "不分组"], ["chapter", "按章节"], ["every_n", "每 N 段一组"],
+                       ["speaker", "按角色（对白 A/B / 人名）"]],
         "opts": [
             _o("seg_mode", "分段方式", "select", "length",
                [["length", "按长度（切句后合并）"], ["sentence", "一句一行"],
-                ["paragraph", "一段一行（按空行）"]]),
+                ["paragraph", "一段一行（按空行）"], ["line", "一行一段（不切也不合）"]]),
             _o("group_n", "每 N 段一组", "number", 20, lo=2, hi=200, step=1,
                hint="分组方式选「每 N 段一组」时生效"),
             _o("chapter_mode", "章节识别", "select", "auto",
                [["auto", "自动（第 x 章 / # 标题）"], ["hash", "只认 # 标题"], ["off", "不认章节"]]),
             _o("pause_per_para", "每段后加停顿(ms)", "number", 0, lo=0, hi=5000, step=50),
+            _o("speaker_mode", "对白分角色", "select", "off",
+               [["off", "不分角色"], ["alt2", "双人交替 A/B"], ["adv", "高级：按旁白里的名字"]],
+               "纯文本稿里也常常是两人对话：开着它就把台词按 A/B（或旁白里的真名）分开"),
         ],
         "presets": [
             {"name": "口播稿（按长度）", "opts": {}},
             {"name": "逐句精修（一句一行）", "opts": {"seg_mode": "sentence"}},
             {"name": "按段落", "opts": {"seg_mode": "paragraph"}},
             {"name": "长文分批（每 30 段一组）", "opts": {"group_by": "every_n", "group_n": 30}},
+            {"name": "导入原稿（一行一段，不切分）", "opts": {"seg_mode": "line"}},
         ],
     },
 ]
@@ -2155,7 +2165,14 @@ def _plan_plain(src, o):
         text = "\n".join(c["text"] for c in src["cues"])
 
     paras = []
-    if seg_mode == "paragraph":
+    if seg_mode == "line":
+        # 一行一段：**不切也不合** —— 「导入原稿」下载下来就是这种文件，
+        # 再导回去时选这个模式，分段和当初完全一致。
+        for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+            one = _norm_space(line)
+            if one:
+                paras.append((None, one))
+    elif seg_mode == "paragraph":
         paras = _novel_paragraphs(text, chapter_mode)
     else:
         chapter, buf = None, []
@@ -2187,9 +2204,8 @@ def _plan_plain(src, o):
     for chapter, body in paras:
         if not body.strip():
             continue
-        if seg_mode == "paragraph":
-            pieces = split_smart(body, max_chars) if len(body) > max_chars \
-                else [{"text": body, "over": False}]
+        if seg_mode in ("paragraph", "line"):
+            pieces = [{"text": body, "over": len(body) > max_chars}]
         elif seg_mode == "sentence":
             pieces = split_smart(body, max_chars, no_merge=True)
         else:
@@ -2228,6 +2244,90 @@ def _finish(groups, order):
         out.append({"name": gname, "note": "", "params": {}, "segments": segs,
                     "chars": sum(len(s["text"]) for s in segs)})
     return out
+
+
+def _regroup_by_speaker(groups, cfg):
+    """把已有的分段按「谁说的」重新分组（剧本 / 纯文本共用）。
+
+    和小说类共用同一套判据（角色判断交给 lf_roles）：
+      旁白 / 括号 → 「旁白」组；台词 → 真名（认得出来时）或 角色A / 角色B 交替。
+    只有"整篇没有角色前缀"的稿子才需要它 —— 剧本类里已经认出 ≥2 个角色时直接跳过。
+    """
+    mode = (cfg.get("speaker_mode") or "off").lower()
+    if mode not in ("alt2", "adv"):
+        return groups, None
+    roles_now = [g.get("name") for g in groups if g.get("name") not in ("旁白", "正文", "未分组")]
+    if len(roles_now) >= 2:
+        return groups, {"mode": mode, "skipped": "已经有角色前缀（按名字分组就够了）"}
+
+    flat = []
+    for g in groups:
+        for sg in g.get("segments") or []:
+            flat.append((float(sg.get("i") or 0), sg))
+    flat.sort(key=lambda x: x[0])
+    if not flat:
+        return groups, None
+
+    # 把每段再拆成「引号内 / 引号外」，这样 adv 才能看到 `「…」李四说。` 里的名字
+    subs = []                        # [(seg_idx, kind, text)]
+    for idx, (_k, sg) in enumerate(flat):
+        txt = (sg.get("text") or "").strip()
+        parts = _quote_split(txt, keep_marks=False)
+        if not parts:
+            parts = [(txt, False)]
+        hit = False
+        for piece, q in parts:
+            if not piece.strip():
+                continue
+            if q:
+                hit = True
+            subs.append((idx, "dialogue" if q else "narration", piece))
+        if not hit and len(parts) == 1:
+            # 没有引号，但整行可能就是台词（有的稿子用破折号）——按旁白算，稳妥
+            pass
+    n_dia = sum(1 for x in subs if x[1] == "dialogue")
+    if not n_dia:
+        return groups, {"mode": mode, "skipped": "没有引号台词，分不出角色"}
+
+    att = None
+    if mode == "adv":
+        try:
+            import lf_roles as ROLE
+            att = ROLE.attribute([{"kind": k, "text": t} for _i, k, t in subs])
+        except Exception:                     # noqa: BLE001
+            att = None
+
+    seg_role = {}                    # seg_idx -> (role, src, conf)
+    spk_i = named = guessed = 0
+    names = {}
+    for j, (idx, kind, _t) in enumerate(subs):
+        if idx in seg_role:
+            continue                 # 一段里多句台词：按第一句算（整段同一个人）
+        if kind != "dialogue":
+            continue
+        role = ""
+        a = att[j] if att else None
+        if a and a.get("role"):
+            role = a["role"]; named += 1
+            names[role] = names.get(role, 0) + 1
+        else:
+            role = SPEAKER_A if spk_i % 2 == 0 else SPEAKER_B
+            spk_i += 1; guessed += 1
+        seg_role[idx] = role
+
+    out, order = {}, []
+    for idx, (_k, sg) in enumerate(flat):
+        role = seg_role.get(idx) or "旁白"
+        sg["group"] = role
+        if role not in out:
+            out[role] = []; order.append(role)
+        out[role].append(sg)
+
+    return _finish(out, order), {
+        "mode": mode, "named": named, "guessed": guessed,
+        "names": list(names), "a": sum(1 for r in out if r == SPEAKER_A),
+        "b": sum(1 for r in out if r == SPEAKER_B),
+    }
 
 
 PLANNERS = {
@@ -2271,7 +2371,20 @@ def plan(src, cls=None, opts=None):
     # 调用方有没有自己选过分组口径：有就绝不替用户改（只有「没选」才允许按内容自适应）
     cfg["_group_by_explicit"] = "group_by" in opts
 
+    # 剧本类要分角色时，先把「同一角色连说合并」关掉：
+    # 合完只剩一大段，就没法按句判断谁说的了。
+    if cid == "script" and (cfg.get("speaker_mode") or "off") in ("alt2", "adv"):
+        cfg["merge_same_role"] = False
     groups, issues, extra = PLANNERS[cid](src, cfg)
+    if cid in ("script", "plain"):
+        groups2, spk2 = _regroup_by_speaker(groups, cfg)
+        if spk2:
+            extra = dict(extra or {})
+            extra["speaker"] = spk2
+            if groups2 is not groups and spk2.get("mode") in ("alt2", "adv") and not spk2.get("skipped"):
+                groups = groups2
+                if "speaker" in allowed:
+                    extra["group_by"] = "speaker"
     cfg.pop("_group_by_explicit", None)
     if extra.get("group_by") in allowed:
         cfg["group_by"] = extra["group_by"]      # planner 可能改口（纯对白稿 → 按角色）

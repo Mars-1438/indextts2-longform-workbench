@@ -1056,10 +1056,17 @@ html.embed .libfoot { margin-bottom: 4px; }
 .advbtn.big { font-size: 13px; padding: 8px 16px; font-weight: 600; flex-direction: column; align-items: flex-start; gap: 1px; }
 .advbtn .advsub { font-size: 10.5px; font-weight: 400; opacity: .78; }
 /* 预览里的「不配音」：文字留着、颜色去掉 */
-.pvs.muted { background: transparent !important; border-bottom-color: transparent !important; color: var(--muted); }
+/* 不配音 / 没进台本：不用下划线（会跟"选中几个字"混），改用虚线外框 + 变灰 */
+.pvs.muted {
+  background: transparent !important;
+  color: var(--muted);
+  outline: 1px dashed var(--border-2);
+  outline-offset: 1px;
+}
+.pvs.muted:hover { outline-color: var(--muted); }
 .pvs.muted:hover { box-shadow: inset 0 0 0 1px var(--border-2); }
 .pvchip.mutedchip { color: var(--faint); border-style: dashed; }
-.pvchar.on { background: var(--accent-soft, #f3f7ff); border-color: var(--accent, #1f5fe0); color: var(--accent, #1f5fe0); font-weight: 600; }
+.pvmarkstat { font-size: 10.5px; color: var(--faint); margin: 0 2px 0 6px; white-space: nowrap; }
 .pvmenu .pvmsep { height: 1px; margin: 4px 6px; background: var(--border); }
 .pvtop .btn[disabled] { opacity: .42; cursor: not-allowed; }
 .btn.pvcta {
@@ -1068,13 +1075,24 @@ html.embed .libfoot { margin-bottom: 4px; }
 }
 .btn.pvcta:hover { background: #e9f0ff; }
 
+/* 预览右下角主按钮 + 台本页两个预览按钮 */
+.pvapply { margin-left: auto; flex: none; }
+.btn.pvcta2 {
+  border-color: var(--border-2); color: var(--ink); background: var(--surface-2);
+}
+.btn.pvcta2:hover { background: var(--surface); }
+.pvseg { display: inline-flex; gap: 0; border: 1px solid var(--border-2); border-radius: 8px; overflow: hidden; }
+.pvsegbtn { border: 0 !important; border-radius: 0 !important; background: transparent; }
+.pvsegbtn + .pvsegbtn { border-left: 1px solid var(--border) !important; }
+.pvsegbtn.on { background: var(--accent, #1f5fe0); color: #fff; font-weight: 600; }
+
 /* 正文预览窗口：连续正文 + 逐句上色（不是卡片），备注不上色 */
 .impov {
   position: fixed; inset: 0; z-index: 300; background: var(--overlay, rgba(27,26,24,.34));
   display: flex; align-items: center; justify-content: center; padding: 24px;
 }
 .pvbox {
-  width: min(960px, 96vw); max-height: 88vh; background: var(--surface);
+  width: min(1240px, 97vw); max-height: 90vh; background: var(--surface);
   border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow);
   display: flex; flex-direction: column; overflow: hidden;
 }
@@ -1097,9 +1115,37 @@ html.embed .libfoot { margin-bottom: 4px; }
   font-size: 14.5px; line-height: 2.1; color: var(--ink);
   word-break: break-word; user-select: text;
 }
-.pvs { border-radius: 4px; padding: 1px 3px; border-bottom: 2px solid transparent; cursor: pointer; }
+/* 台本页的两个视图：一句一行 + 左边序号（虚线分隔），行号跟台本里对得上 */
+.pvflow.pvrows { padding: 6px 18px 12px; font-size: 14px; line-height: 1.7; }
+.pvrow {
+  display: flex; gap: 10px; align-items: flex-start;
+  padding: 5px 6px 6px; border-bottom: 1px dashed var(--border);
+}
+.pvrow:last-child { border-bottom: 0; }
+.pvrow:hover { background: var(--surface-2); }
+.pvrow.on { background: var(--surface-2); box-shadow: inset 2px 0 0 var(--accent, #1f5fe0); }
+.pvnum {
+  flex: none; width: 40px; text-align: right; user-select: none;
+  font-family: var(--mono, ui-monospace, monospace); font-size: 11px; line-height: 2.1;
+  color: var(--faint);
+}
+.pvtext { flex: 1; min-width: 0; }
+/* 整句只靠底色区分分组，不再画下划线（整篇一条条线太花）；
+   只有「只选中了几个字」时，那几个字才加下划线 —— 见 .pvselu */
+.pvs { border-radius: 4px; padding: 1px 3px; cursor: pointer; }
 .pvs:hover { box-shadow: inset 0 0 0 1px var(--border-2); }
 .pvs.on { outline: 2px solid var(--accent, #1f5fe0); outline-offset: 1px; }
+.pvselu {
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+  border-radius: 2px;
+  background: rgba(31, 95, 224, .10);
+}
+.pvsent.on {
+  background: var(--accent, #1f5fe0); border-color: var(--accent, #1f5fe0);
+  color: #fff; font-weight: 600;
+}
 .pvni { color: var(--faint); font-size: 12.5px; padding: 0 1px; }
 .pvmenu {
   position: fixed; z-index: 400; min-width: 176px; padding: 6px;
@@ -1158,6 +1204,18 @@ html.embed .libfoot { margin-bottom: 4px; }
 .impgh .gmeta { font-size: 10.5px; color: var(--faint); font-family: var(--mono); }
 .impgh .spacer { flex: 1; }
 .improw { display: flex; align-items: flex-start; gap: 6px; padding: 3px 10px 4px; border-top: 1px solid var(--border); }
+/* 不配音的段：卡片上要一眼看出来（预览里去掉配音后，这里不能还跟没事一样） */
+.improw.muted { background: var(--surface-2); }
+.impgroup.dead { opacity: .72; }
+.impgroup.dead .gname { text-decoration: line-through; }
+.improw.muted textarea { color: var(--muted); background: transparent; }
+.improw.muted .ridx { opacity: .5; }
+.mutebadge {
+  display: inline-block; font-size: 10.5px; color: var(--muted);
+  border: 1px dashed var(--border-2); border-radius: 5px; padding: 0 5px; margin-bottom: 2px;
+  align-self: flex-start;
+}
+.iconbtn.on { color: var(--accent, #1f5fe0); border-color: var(--accent-line, #c9d9f7); background: var(--accent-soft, #f3f7ff); }
 .improw:first-of-type { border-top: 0; }
 .improw .ridx {
   font-family: var(--mono); font-size: 10px; color: var(--faint); width: 22px;

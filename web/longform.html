@@ -13,7 +13,7 @@
 })();
 </script>
 <link rel="icon" href="/assets/favicon.svg">
-<link rel="stylesheet" href="/longform-assets/longform.css?v=20261031e">
+<link rel="stylesheet" href="/longform-assets/longform.css?v=20261101e">
 </head>
 <body>
 
@@ -25,7 +25,8 @@
     <button id="btnNew" class="btn">新建</button>
     <button id="btnImport" class="btn" title="把文本追加到当前台本">导入</button>
     <button id="btnSmartImport" class="btn" title="智能导入：txt / docx / srt / csv / fountain → 选模板 → 自动分段分组 → 一次建好分组任务">🧠 智能导入</button>
-    <button id="btnTextPreview" class="btn ghost" title="正文预览：按分组给每句上色，点一句就跳到台本里那一行（只读，不改任何内容）">👁 正文预览</button>
+    <button id="btnOriginPreview" class="btn pvcta" title="原文本预览：导入那一刻的原文全文（含当时设为不配音、没进台本的句子）。只读">📄 原文本预览</button>
+    <button id="btnCurPreview" class="btn pvcta2" title="当前文本预览：只看台本里现有的句子，点一句跳到那一行（只读，不改内容）">📝 当前文本预览</button>
     <button id="btnSave" class="btn primary">保存</button>
     <span id="saveState" class="hint">—</span>
     <div class="spacer"></div>
@@ -88,6 +89,7 @@
       <button id="btnSelTail" class="btn mini ghost" title="从当前句一直选到末尾">↓ 往后全选</button>
       <button id="btnBulkProps2" class="btn mini" title="对选中的句子批量修改音色 / 情感 / 停顿">批量改属性</button>
       <button id="btnCopySel" class="btn mini" title="复制选中的句子：文本 / 句中标签 / 行属性，已生成的音频也会一起复制（Ctrl+Alt+C）">复制选中</button>
+      <button id="btnDelSel" class="btn mini danger" title="删除选中的句子（会再确认一次，删错了能撤销）">删除选中</button>
       <button id="btnPasteLines" class="btn mini ghost" title="粘贴到「光标所在句」后面（Ctrl+Alt+V）">粘贴</button>
       <button id="btnPropUndo" class="btn mini ghost" title="撤回上一步属性修改（只回退音色/情感/停顿/标签等属性，不动文本）">↩ 撤回属性</button>
       <button id="btnChanged" class="btn mini ghost" title="只看「改过内容或属性、和生成时不一样」的句子（点一下切换）">改动 <b>0</b></button>
@@ -920,8 +922,8 @@
 </div>
 <div id="toast" class="toast" hidden></div>
 
-<script src="/longform-assets/emoctl.js?v=20261031e"></script>
-<script src="/longform-assets/genparams.js?v=20261031e"></script>
-<script src="/longform-assets/longform.js?v=20261031e"></script>
+<script src="/longform-assets/emoctl.js?v=20261101e"></script>
+<script src="/longform-assets/genparams.js?v=20261101e"></script>
+<script src="/longform-assets/longform.js?v=20261101e"></script>
 </body>
 </html>

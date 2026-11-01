@@ -389,7 +389,7 @@ def _lf_cfg_set(key: str, val):
 # 工作台自身的标识（manifest 会带出去；移植到别的整合包时改这两行即可）
 APP_NAME = "全能音声工作台"
 ENGINE_ID = "indextts2"
-APP_VERSION = "0.21-dev"
+APP_VERSION = "0.22"
 API_PREFIX = "/api/v1/lf"
 
 
@@ -4328,6 +4328,71 @@ def register_longform(app, api, deps):
                          "chars": src.get("chars") or len(src.get("text") or "")}
         return out
 
+    @lf.post("/lf/import/marked")
+    def lf_import_marked(req: dict = Body(...)):
+        """写一份「导入原稿」：这次导入的原文**纯文本**（一段一行，不带任何标记）。
+
+        它不是"当前状态的副本"，而是导入那一刻的原文：
+        · 拿它核对「导入时有没有漏掉什么」；
+        · 直接拖回智能导入就是一份干净的文本稿（想保持分段就选「一行一段」）。
+        """
+        req = req or {}
+        src = _load_import_src(req.get("token"))
+        token = re.sub(r"[^0-9a-f]", "", str(req.get("token") or ""))[:32]
+        rows = []
+        voiced = muted = 0
+        for gi, g in enumerate((req.get("groups") or [])[:80]):
+            if not isinstance(g, dict):
+                continue
+            for seg in (g.get("segments") or [])[:2000]:
+                if not isinstance(seg, dict):
+                    seg = {"text": str(seg or "")}
+                body = str(seg.get("text") or "").strip()
+                if not body:
+                    continue
+                try:
+                    key = float(seg.get("i"))
+                except (TypeError, ValueError):
+                    key = 10 ** 6 + gi * 1000
+                if seg.get("muted"):
+                    muted += 1
+                else:
+                    voiced += 1
+                rows.append((key, gi, body))
+        if not rows:
+            raise HTTPException(400, "没有可保存的内容")
+        rows.sort(key=lambda x: (x[0], x[1]))
+        title = _safe_title(req.get("title") or src.get("orig_name") or "智能导入")
+        # 纯文本：一段一行，**不加**任何前缀/注释 —— 拖回智能导入就是一份普通文本稿
+        text = "\n".join(r[2] for r in rows) + "\n"
+        d = _import_dir()
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+        fn = f"{token}.origin.txt"
+        path = os.path.join(d, fn)
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        _log("longform: origin text %s -> %d rows (%d voiced)", token, len(rows), voiced)
+        return {"ok": True, "kind": "origin-text", "file": fn, "path": path, "rows": len(rows),
+                "voiced": voiced, "muted": muted, "chars": len(text),
+                "preview": "\n".join([r[2] for r in rows[:12]])}
+
+    @lf.get("/lf/import/marked/{token}")
+    def lf_import_marked_get(token: str):
+        """下载这份「导入原稿」（纯文本，可直接再导入）。"""
+        import fastapi.responses as _fr
+        token = re.sub(r"[^0-9a-f]", "", str(token or ""))[:32]
+        path = os.path.join(_import_dir(), token + ".origin.txt")
+        if not os.path.isfile(path):
+            # 兼容旧版写下的 .marked.txt
+            path = os.path.join(_import_dir(), token + ".marked.txt")
+        if not token or not os.path.isfile(path):
+            raise HTTPException(404, "还没有生成过导入原稿")
+        return _fr.FileResponse(path, media_type="text/plain; charset=utf-8",
+                                filename="导入原稿_" + token + ".txt")
+
     @lf.post("/lf/import/commit")
     def lf_import_commit(req: dict = Body(...)):
         """把「预览里改过的分组/分段」建成一份新台本 + 每个分组一个批量任务。
@@ -4345,6 +4410,7 @@ def register_longform(app, api, deps):
         template = str(req.get("cls") or req.get("template") or "plain")[:30]
         sid = uuid.uuid4().hex[:12]
         flat = []          # (sort_key, gname, seg, params)
+        origin_all = []    # 原稿行（含不配音段），最后写文件 + 存进 script.origin
         batches = []
         for gi, g in enumerate(groups[:80]):
             if not isinstance(g, dict):
@@ -4358,14 +4424,22 @@ def register_longform(app, api, deps):
                 text = str((seg or {}).get("text") or "").strip()
                 if not text:
                     continue
-                # 预览里「去掉配音」的段：文字还在（预览要能看见原文），但不进台本
-                if seg.get("muted"):
-                    continue
                 try:
                     key = float(seg.get("i"))
                 except (TypeError, ValueError):
                     # 手动加的段没有 i：排在它所在分组最后一个已知位置之后
                     key = 10 ** 6 + gi * 1000 + si
+                # 「导入原稿」要包含**所有**文字（含不配音的），先记一份
+                origin_all.append({
+                    "text": str(seg.get("text") or "").strip()[:MAX_LINE_CHARS],
+                    "group": gname,
+                    "note": (str(seg.get("note") or "").strip()[:200] or None),
+                    "muted": bool(seg.get("muted")),
+                    "i": key,
+                })
+                # 预览里「去掉配音」的段：文字还在（预览要能看见原文），但不进台本
+                if seg.get("muted"):
+                    continue
                 flat.append((key, gi, si, gname, seg, params))
                 n_in_group += 1
             if n_in_group:
@@ -4411,10 +4485,18 @@ def register_longform(app, api, deps):
         defaults = dict(_DEFAULT_PARAMS)
         defaults.update({k: v for k, v in (req.get("defaults") or {}).items()
                          if k in _DEFAULT_PARAMS})
+        # 导入原稿：**所有**文字（含被设成不配音的），按原文顺序。
+        # 它既是台本页「原文本预览」的数据源，也会写成 `<token>.origin.txt` ——
+        # 那份文件再拖回智能导入，分组/配音标记能原样还原。
+        origin_all.sort(key=lambda x: x["i"])
+        origin = [{
+            "text": it["text"], "group": it["group"],
+            "note": it["note"], "muted": it["muted"],
+        } for it in origin_all if it["text"]]
         script = {
             "version": 2, "id": sid, "title": title, "created": _now(), "updated": _now(),
             "defaults": defaults, "sampling": dict(_DEFAULT_SAMPLING),
-            "tag_presets": [], "lines": lines,
+            "tag_presets": [], "lines": lines, "origin": origin,
             "batches": out_batches if req.get("make_batches", True) else [],
             "import": {"cls": template, "template": template,
                        "filename": req.get("filename"),
@@ -4422,6 +4504,20 @@ def register_longform(app, api, deps):
                        "at": _now(), "groups": len(out_batches)},
         }
         _save_script(script)
+        # 写「导入原稿」：这份文件再拖回智能导入，分组/不配音标记/备注都能原样还原。
+        # 它是**这次导入采用的那份稿子**，台本页之后的编辑不会回写它。
+        try:
+            tk = re.sub(r"[^0-9a-f]", "", str(req.get("token") or ""))[:32]
+            if tk and origin:
+                # 纯文本，一段一行，不带任何前缀/注释：拖回智能导入就是普通文本稿
+                body_txt = "\n".join(it["text"] for it in origin) + "\n"
+                d = _import_dir()
+                os.makedirs(d, exist_ok=True)
+                with open(os.path.join(d, tk + ".origin.txt"), "w",
+                          encoding="utf-8", newline="\n") as f:
+                    f.write(body_txt)
+        except Exception as e:  # noqa: BLE001
+            _log("longform: write origin script failed: %s", e, level="warning")
         _log("longform: smart import %s -> %d lines / %d groups", sid, len(lines), len(out_batches))
         return {"ok": True, "id": sid, "script": _load_script(sid), "stats": _stats(script),
                 "lines": len(lines), "groups": len(out_batches)}

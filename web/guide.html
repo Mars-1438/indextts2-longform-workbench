@@ -167,6 +167,16 @@
   article.feat.wide > figure.shot img { max-height: 300px; width: auto; max-width: 100%; }
   article.feat.wide.nofloat > figure.shot { float: none; width: auto; margin: 12px 0 0; }
   article.feat.wide.nofloat > figure.shot img { max-height: 420px; }
+  /* 全宽截图（正文预览 / 原文本预览这类界面照）：允许铺满卡片宽、高度上限放宽，
+     否则会被 .wide > figure.shot 的 max-width:470px 压成 470 宽，字全糊 */
+  article.feat.wide > figure.shot.big,
+  article.feat.wide.nofloat > figure.shot.big {
+    float: none; width: auto; max-width: 100%; margin: 12px 0 0;
+  }
+  article.feat.wide > figure.shot.big img,
+  article.feat.wide.nofloat > figure.shot.big img {
+    max-height: 640px; max-width: 100%; width: auto;
+  }
   @media (max-width: 900px) {
     article.feat.wide > figure.shot { float: none; width: auto; max-width: 100%; margin: 10px 0 0; }
   }
@@ -378,7 +388,7 @@
         再按这一类的规则切行。<b>所有规则都只是建议</b>——第 3 步预览里每一段都能改。
       </p>
 
-      <div style="font-size:12.5px;font-weight:600;margin:10px 0 0">A. 三种分行方案（纯文本类最常用，其它类等价）</div>
+      <div style="font-size:12.5px;font-weight:600;margin:10px 0 0">A. 四种分行方案（纯文本类最常用，其它类等价）</div>
       <table class="ruletbl">
         <tr><th style="width:20%">方案</th><th>怎么切</th><th style="width:22%">适合</th><th style="width:22%">注意</th></tr>
         <tr>
@@ -399,7 +409,16 @@
           <td>已经排好版的口播稿、每段就是一口气念完的</td>
           <td>段落太长会被再切；没有空行的稿子会变成一整行</td>
         </tr>
+        <tr>
+          <td><b>一行一段</b><br><span style="color:var(--faint);font-size:10.5px">不切也不合</span></td>
+          <td>原文一行 = 一行，<b>既不切句也不合并</b>，超上限只标提示、不硬切。</td>
+          <td>把「⤓ 导入原稿」下载的文件原样重来；已经手工排好、不希望被动过的稿子</td>
+          <td>一行太长会整段进一行（生成质量会降，用时自己看一眼上限提示）</td>
+        </tr>
       </table>
+
+      <figure class="shot big"><a href="/guide-img/h13-step2.png" target="_blank"><img src="/guide-img/h13-step2.png" alt="智能导入第 2 步的选项区"></a>
+        <figcaption>② 第 2 步：分段方式、对白符号、分组方式都在这一屏。上面那颗「🧠 高级识别 · 未开启」是独立开关，点一下才按旁白里的名字认人。</figcaption></figure>
 
       <div style="font-size:12.5px;font-weight:600;margin:14px 0 0">B. 五类稿子的识别规则</div>
       <table class="ruletbl">
@@ -421,7 +440,7 @@
             <td>标记本身不朗读：可以变成停顿、变成分组名，或只写进备注。</td></tr>
         <tr><td><b>🧩 纯文本</b></td>
             <td>以上特征都没有</td>
-            <td>用上面 A 的三种方案。默认「按长度」。</td></tr>
+            <td>用上面 A 的四种方案。默认「按长度」；要「原稿原样重来」就选「一行一段」。</td></tr>
       </table>
 
       <div style="font-size:12.5px;font-weight:600;margin:14px 0 0">C. 切完之后：上限、分组、停顿、预设</div>
@@ -429,7 +448,7 @@
         <li><b>单段上限</b>（默认 70 字 / 纯文本，剧本 70、小说 80、指令 60）：一行最长多少字。超过会被切开。</li>
         <li><b>分组</b>：不分组 / 按章节 / 按角色 / 按场景 / 每 N 段一组。分组决定后面「批量生成」的单位，长文建议每 30 段一组。</li>
         <li><b>每段后加停顿</b>：批量给每段末尾加静音（台本里存成停顿值）。</li>
-        <li><b>预设</b>：每类都有几个一键配置，比如「口播稿（按长度）」「逐句精修（一句一行）」「按段落」「长文分批（每 30 段一组）」——选完还能再改单项。</li>
+        <li><b>预设</b>：每类都有几个一键配置，比如「口播稿（按长度）」「逐句精修（一句一行）」「按段落」「长文分批（每 30 段一组）」「导入原稿（一行一段，不切分）」——选完还能再改单项。</li>
         <li><b>预览里能改什么</b>：拆分一行、合并两行、改分组、改文字；超过上限 / 空行这类问题会标出来。确认后一次导入。</li>
         <li><b>没标角色的两人对话</b>：整行都是「…」或 <code>[…]</code>、谁也不写是谁说的稿子，
           会按<b>台词出现顺序奇偶交替</b>分成「角色A / 角色B」两组（台词段 ≥4、占全篇 ≥72%）：
@@ -437,22 +456,43 @@
           或用每行右下角的下拉逐句改归属 —— <b>搬组不会打乱台本顺序</b>（顺序永远按原文出现先后）。
           想关掉：第 2 步「对白分角色」选「不分角色」。<b>稿子用的符号不常见？</b>
           第 2 步「对白符号」里写进去就行，例如 <code>{}｛｝</code> 或 <code>[ ] | 【 】</code>。</li>
-        <li><b>🧠 高级识别（可选）</b>：稿子的名字写在<b>旁白</b>里（<code>「你怎么才来？」李四说。</code>）、
+        <li><b>🧠 高级识别（可选）</b>：<b>小说、剧本、纯文本</b>三类都有这颗按钮。稿子的名字写在<b>旁白</b>里（<code>「你怎么才来？」李四说。</code>）、
           又不严格交替时，点第 3 步工具栏的「🧠 高级识别」，它会按
           <b>前文点名 &gt; 后置旁白 &gt; 上文继承</b> 的顺序认人，认出谁就按谁分组；
           一条线索都没有的句子仍退回「角色A / 角色B」。<b>默认不会自动用它</b>，
           原来的识别结果一个字都不变。认错的句子在预览里直接改。
-          （不认没名字的稿子：像 <code>[李逍遥！…]</code> 这种整篇一个人名都没有的，它也无能为力 —— 那还是交替。）</li>
+          （不认没名字的稿子：像 <code>[李逍遥！…]</code> 这种整篇一个人名都没有的，它也无能为力 —— 那还是交替。）
+          剧本类如果<b>已经有「名字：」前缀</b>，它会自动跳过（按名字分组本来就对）；
+          时间轴类和指令类没有这颗按钮 —— 前者靠时间码分组，后者多是单人旁白，没有"谁说的"这回事。</li>
         <li><b>👁 正文预览</b>：按<b>正式导入后的顺序</b>把台本连排成正文，一句一个色块（同色 = 同一组 = 同一音色），
           读起来就是一份上了色的稿子。<b>动作 / 镜头 / 时间码这类不朗读的备注是灰色、不上色</b>。
           <b>窗口里是原文全文</b>：会上色的才会配音，「去掉配音」只把颜色去掉、文字留着（右键第一项就是它，
           可以再点一次恢复）；真要删字用右键最后一项「从台本里移除」。
-          右上角有 <b>↶ 撤销 / ↷ 恢复</b>（Ctrl+Z / Ctrl+Shift+Z）；<b>✂ 按文字选择</b> 打开后可以只选半句话单独处理。
+          右上角有 <b>↶ 撤销 / ↷ 恢复</b>（Ctrl+Z / Ctrl+Shift+Z）。
+          顶部有 <b>「按句选择」</b>开关：<b>开</b>着点一句 / 拖一段都按整句（Ctrl 加选、Shift 连选）；
+          <b>关</b>掉就只处理你划中的那几个字（那几个字会加下划线，其余不受影响）。
+          整句只有底色、没有下划线，看起来更干净；右键菜单里还能「选中整组 / 只选这一句 / 取消选择」。
+          <b>改完记得点右下角「保存并按预览分组」</b>——预览里改的是草稿，
+          直接关掉（或按 Esc）= 丢弃，会先问你一次。
+          顶栏的 <b>⤓ 导入原稿</b> 下载的是<b>原文纯文本</b>（一段一行，不带任何前缀/注释），
+          用来核对「导入时有没有漏掉什么」；想拿它重来一遍，
+          在智能导入里选「纯文本」+ 分段方式「<b>一行一段（不切也不合）</b>」就能保持分段一致。
           第 3 步<b>底部</b>还有一颗更显眼的「👁 先看正文预览」，就在「导入并建 N 个分组」旁边。</li>
-        <li><b>导入之后</b>：台本页顶栏也有「👁 正文预览」，样式一样但<b>只读</b> ——
-          点一句就滚到台本里那一行并选中它，不给改组/删除（那些用台本页自己的右键菜单，
-          免得两套入口同一件事、状态对不上）。</li>
+        <li><b>导入之后</b>：台本页顶栏有两颗 —— <b>📄 原文本预览</b>（导入那一刻的全文，
+          没进台本的句子是灰色虚线框）和 <b>📝 当前文本预览</b>（台本里现在有的句子，点一句跳过去选中）。
+          窗口里<b>一句一行、左边是行号</b>，和台本里的序号对得上；两个视图<b>随时切换且停在原处</b>。
+          两颗都<b>只读</b>，改组/删除还是用台本页自己的右键菜单。
+          右上角都有 <b>⤓ 导入原稿</b>：下载原文纯文本（一段一行），核对导入时漏没漏东西，
+          或者拿它重来一遍都行（重来时选「纯文本 + 一行一段」分段才对得上）。</li>
+        <li><b>多选删除</b>：勾选多行后右键有「🗑 删除选中的 N 行」，顶栏「复制选中」旁边也有「删除选中」，
+          删错了 Ctrl+Z 一步撤回。</li>
       </ul>
+      <figure class="shot big"><a href="/guide-img/h14-preview.png" target="_blank"><img src="/guide-img/h14-preview.png" alt="正文预览窗口"></a>
+        <figcaption>③ 正文预览：同色 = 同一组 = 同一音色；一句一个色块，连起来就是导入后的读稿效果。灰色小字是只进备注、不朗读的内容。</figcaption></figure>
+      <figure class="shot big"><a href="/guide-img/h15-muted.png" target="_blank"><img src="/guide-img/h15-muted.png" alt="去掉配音之后"></a>
+        <figcaption>在这一句上右键「🚫 去掉配音」→ 只剩无色文字（文字还在、只是不进台本），再点一次就恢复；右下角那颗「保存并按预览分组」点下去才算数。</figcaption></figure>
+      <figure class="shot big"><a href="/guide-img/h16-cards.png" target="_blank"><img src="/guide-img/h16-cards.png" alt="第 3 步卡片同步标出不配音"></a>
+        <figcaption>第 3 步的分组卡片同步显示：那一段变灰并标「不配音（不进台本）」，分组头写「整组不配音 · 1 段（不会导入）」。</figcaption></figure>
       <figure class="shot"><a href="/guide-img/h1-import.png" target="_blank"><img src="/guide-img/h1-import.png" alt="新建台本"></a>
         <figcaption>① 粘贴文本；分行方案和参数在第 2 步，第 3 步还能逐段改。</figcaption></figure>
     </article>
@@ -494,7 +534,7 @@
 
   <div class="mapwrap">
 
-    <article class="feat">
+    <article class="feat wide nofloat">
       <h3>我的台本 <span class="tag">源文件 / 工程</span></h3>
       <div class="where2">位置：左边栏，分两组显示</div>
       <ul>
@@ -502,6 +542,13 @@
         <li><b>工程（时间轴副本）</b>：第一次点「时间轴」时自动生成。之后所有剪辑改动只进副本，<b>源文件不动</b>；想退回起点用工程页的「回到初始样本」。</li>
         <li><b>多选</b>：Ctrl 点加选 / Shift 点连选；选中后出现批量条，可一次<b>删除 / 复制</b>多份；Esc 取消。</li>
       </ul>
+      <figure class="shot big"><a href="/guide-img/h17-origin.png" target="_blank"><img src="/guide-img/h17-origin.png" alt="原文本预览"></a>
+        <figcaption>📄 原文本预览：一行一句、左边是行号（和台本里对得上）。灰色虚线框那句 = 导入时有这段原文、但没进台本。</figcaption></figure>
+      <figure class="shot big"><a href="/guide-img/h18-current.png" target="_blank"><img src="/guide-img/h18-current.png" alt="当前文本预览"></a>
+        <figcaption>📝 当前文本预览：只有台本里现在有的句子，点一句就滚到那一行并选中；两个视图随时切换，停在同一句。</figcaption></figure>
+      <figure class="shot big"><a href="/guide-img/h19-batchdel.png" target="_blank"><img src="/guide-img/h19-batchdel.png" alt="多选后的右键菜单"></a>
+        <figcaption>勾几行 → 右键「🗑 删除选中的 N 行」（顶栏也有「删除选中」），Ctrl+Z 一步撤回。</figcaption></figure>
+
     </article>
 
     <article class="feat">
@@ -753,7 +800,7 @@
   </details>
 
   <footer>
-    全能音声工作台 · 补丁 v0.20 · 更细的说明见包内 <code>docs\使用说明.txt</code> 与 <code>docs\技术路线_长篇台本与时间轴.md</code>
+    全能音声工作台 · 补丁 v0.22 · 更细的说明见包内 <code>docs\使用说明.txt</code> 与 <code>docs\技术路线_长篇台本与时间轴.md</code>
   </footer>
 </div>
 </body>

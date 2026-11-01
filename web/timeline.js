@@ -3955,6 +3955,10 @@
     item.dur = left;
     const clone = { ...item, id: uid(), start: t, dur: right,
       offset: item.offset + left * (item.speed || 1) };
+    /* 淡入淡出只留在原来那一头：复制过去会变成「切开处也有淡入淡出」，
+       听感上就是断口前一顿衰减、断口后又爬升（用户报过「切开像掉了一下」）。 */
+    item.fade_out = 0;
+    clone.fade_in = 0;
     S.data.project.sfx = S.data.project.sfx.concat([clone]);
     // 关键帧跟着切：切点补一个点，两段各自连续（否则切开后曲线会跳变）
     const kf0 = c.kf && Object.keys(c.kf).length ? JSON.parse(JSON.stringify(c.kf)) : null;

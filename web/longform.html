@@ -13,7 +13,7 @@
 })();
 </script>
 <link rel="icon" href="/assets/favicon.svg">
-<link rel="stylesheet" href="/longform-assets/longform.css?v=20261101e">
+<link rel="stylesheet" href="/longform-assets/longform.css?v=20261104n">
 </head>
 <body>
 
@@ -43,6 +43,7 @@
     <div id="statChips" class="chips"></div>
     <div class="spacer"></div>
     <button id="btnGuide" class="btn guide" title="第一次用？这里有一份带截图的最短流程（导入台本 → 提取音色 → 生成 → 加音效 → 时间轴 → 导出混音）">🎓 第一次用？看看这里</button>
+    <button id="btnSfxBenchTop" class="btn green" title="高级音频处理台：去人声 / 去伴奏 · 切段修整 · 按字幕对位进工程（新开一页，勾了导入台素材会一起带过去）">🎛 高级音频处理台</button>
     <button id="btnImportDesk" class="btn" title="导入台素材库：批量导入音频/视频（未处理/未标记）→ 处理 → 存入音色库或音效库">📥 素材导入台</button>
     <button id="btnVoiceLib" class="btn" title="音色素材库：参考音频 + 导入台（视频抽音频 / 去伴奏 / 降噪…）">🎙 音色素材库</button>
     <button id="btnSfxLib" class="btn" title="音效素材库：给台本标签挂的音效，可上传 / 处理 / 复制改名">🔔 音效素材库</button>
@@ -152,6 +153,8 @@
         <span class="tsdot" id="tsTtsDot"></span>
         <span class="tslab">模型</span>
         <span class="tsval" id="tsTts">未知</span>
+        <button class="tsbtn tsload" id="tsTtsLoad" type="button"
+                title="现在就把 IndexTTS2 模型加载进显存（不然要等第一次生成才开始加载）">加载</button>
         <span class="spacer"></span>
         <span class="tsdot" id="tsFfDot"></span>
         <span class="tslab">ffmpeg</span>
@@ -163,6 +166,14 @@
         <span class="tsval" id="tsSep">检查中…</span>
         <span class="spacer"></span>
         <button class="tsbtn" id="tsRefresh" type="button" title="重新检测模型与依赖">⟳</button>
+      </div>
+      <div class="tsrow">
+        <span class="tsdot" id="tsRoDot"></span>
+        <span class="tslab">模型拓展</span>
+        <span class="tsval" id="tsRo">检查中…</span>
+        <span class="spacer"></span>
+        <button class="tsbtn" id="tsRoHelp" type="button"
+                title="给「Demucs 不够用」的情况准备的：点这里看模型放哪、怎么下">?</button>
       </div>
     </div>
 
@@ -355,9 +366,13 @@
       <div class="pfoot">
         <button id="btnExportMd" class="btn grow">导出 Markdown</button>
         <button id="btnExportTxt" class="btn grow">导出纯文本</button>
+        <button id="btnExportSrt" class="btn grow" type="button"
+                title="按台本行的实际时长排一份 SRT 字幕">导出 SRT 字幕</button>
       </div>
       <div id="exMdResult" class="hint"></div>
       <div class="hint">附加信息 = 统计、时间轴表格、音色/情感列；关掉只留台本正文。</div>
+      <div class="hint">SRT 的时间来自「每行的实际时长」：<b>全部生成完之后再导才有用</b>，
+        否则没生成的行按字数估，排出来只是一版大致对位的字幕（能看，别拿去压片）。</div>
 
       <div class="sec-h" style="margin-top:20px">
         历史成品<button id="btnExRefresh" class="btn mini ghost" style="float:right">刷新</button>
@@ -381,12 +396,56 @@
       <div class="ppane" data-pane="default">
         <div class="phead">
           <span class="badge">设置</span>
-          <span class="hint">上半部分是<b>整台机器通用</b>的偏好（跨台本、跨工程）；台本默认参数收在最后。</span>
+          <span class="hint">下面四块各自<b>可折叠</b>（点标题开合，状态会记住）：
+            <b>人物标签</b>（跨台本）/ <b>时间轴与工作台</b> / <b>混音导出</b> / <b>参数预设</b>；
+            台本默认参数收在最后一块里面。</span>
         </div>
         <!-- 运行环境 / 能力：来自 GET /lf/manifest（移植时前端据此隐藏做不到的功能） -->
         <div id="envLine" class="envline"></div>
 
-        <div class="sec-h">时间轴与工作台</div>
+        <!-- 人物标签：跨台本、跨工程。和工程里的「标签」（句中/句间时间点）不是一回事。
+             四块设置各自可折叠（记忆在 localStorage["lf.setfold.*"]），不用一屏滚到底。 -->
+        <details class="setfold setsec" data-fold="chars" open>
+        <summary>👤 人物标签 <span class="hint" style="font-weight:400">跨台本 · 智能导入按人名对音色</span></summary>
+        <div class="hint" style="line-height:1.65">
+          这里是<b>人物库</b>，和工程里的「标签」（句中 / 句间时间点）不是一回事：
+          一个人物 = <b>一个人名标签</b>（唯一，可加别名）+ <b>多个属性标签</b>
+          （傲娇 / 冰山美人 / 旁白）+ 绑定的音色。<br>
+          智能导入时<b>先按人名匹配</b>（含别名），命中就用它绑定的音色；没命中才看音色上的属性标签。
+          同一角色在别的章节写成「澈哥」也能认，只要加进别名。
+        </div>
+        <label class="mini-chk" style="margin:7px 0">
+          <input type="checkbox" id="setAutoVoice"> 智能导入时按人物自动设音色（只改音色）
+        </label>
+        <div class="hint" style="line-height:1.6;margin-bottom:8px">
+          <b>音色优先级</b>（高 → 低）：① 这一句单独指定 → ② 人物绑定音色
+          → ③ 音色上的属性标签 → ④ 台本默认音色。<br>
+          人物识别会把命中的音色写成「这一句的音色」，所以属性面板里看到的是它、不是默认值；
+          面板顶部会标「当前生效音色 · 来源」。把这一句的音色改回「跟随默认」就会重新走 ②③④。
+        </div>
+        <div class="row2">
+          <button id="btnCharNew" class="btn" type="button">＋ 新建人物</button>
+          <button id="btnCharFromScript" class="btn ghost" type="button"
+                  title="把当前台本里还没收录的分组名批量建成人物，再逐个绑音色">从当前台本分组新建</button>
+        </div>
+        <div class="row2" style="margin-top:7px;margin-bottom:6px">
+          <button id="btnTaglibTrait" class="btn mini ghost" type="button"
+                  title="增删属性标签（音色 / 人物用的候选）">🏷 属性标签库</button>
+          <button id="btnTaglibSfx" class="btn mini ghost" type="button"
+                  title="增删音效标签（句中 / 句间标签的候选）">🔔 音效标签库</button>
+        </div>
+        <input id="charSearch" class="inp" placeholder="搜索人名 / 别名 / 属性标签" autocomplete="off">
+        <div id="charHint" class="libhint"></div>
+        <div id="charList" class="charlist"></div>
+        <div class="row2" style="margin-top:8px">
+          <button id="btnAutoVoice" class="btn grow" type="button"
+                  title="按人物库把当前台本里每个角色对应的音色套上">🧠 智能识别人物（套到当前台本）</button>
+        </div>
+        <div id="autoVoiceHint" class="libhint"></div>
+        </details>
+
+        <details class="setfold setsec" data-fold="timeline">
+        <summary>🎬 时间轴与工作台 <span class="hint" style="font-weight:400">片段锁定 / 吸附 / 标签跟随</span></summary>
         <label class="setrow">
           <input type="checkbox" id="sLockVoice">
           <span><b>新语音片段默认锁定</b>
@@ -409,8 +468,10 @@
           <option value="inline">只跟句中 — 句间标签固定</option>
           <option value="between">只跟句间 — 句中标签固定</option>
         </select>
+        </details>
 
-        <div class="sec-h" style="margin-top:16px">混音导出默认</div>
+        <details class="setfold setsec" data-fold="mix">
+        <summary>🎚 混音导出默认 <span class="hint" style="font-weight:400">格式 / 采样率 / 声道</span></summary>
         <div class="row2">
           <div><label class="fl">格式</label>
             <select id="sMixFmt" class="sel">
@@ -441,11 +502,11 @@
               <option value="full">源末端（含被裁掉的部分）</option>
             </select></div>
         </div>
-        <div class="pfoot"><button id="btnSaveSettings" class="btn primary grow">保存设置</button></div>
         <div class="hint">这些是「这台机器」的偏好，存在 <code>longform/settings.json</code>，所有台本共用。</div>
+        </details>
 
-        <div class="sec-h" style="margin-top:16px">参数预设
-          <span class="hint" style="font-weight:400">跨台本 · 只存方案</span></div>
+        <details class="setfold setsec" data-fold="preset">
+        <summary>📦 参数预设 <span class="hint" style="font-weight:400">跨台本 · 只存方案</span></summary>
         <div class="hint">
           预设 = 一套生成参数（音色 / 情感 / 停顿 / Token），存在 <code>longform/presets/</code>，所有台本共用。
           <b>「存成预设」只新增一个方案</b>：不改台本默认、不动任何句子。
@@ -458,8 +519,9 @@
         </div>
         <div id="presetHint" class="libhint"></div>
         <div id="presetList" class="reflist liblist presetlist"></div>
+        </details>
 
-        <details class="setfold" style="margin-top:16px">
+        <details class="setfold setfold-sub" style="margin-top:10px" open>
           <summary>台本默认参数（改当前台本 · 会影响没单独设置的行）</summary>
           <div class="phead" style="margin-top:8px">
             <span class="badge">台本默认</span>
@@ -471,6 +533,7 @@
           </div>
           <label class="fl">默认音色</label>
           <select id="dRef" class="sel"></select>
+
           <label class="fl">默认情感模式</label>
           <select id="dEmoMode" class="sel">
             <option value="0">与音色参考音频相同</option>
@@ -478,10 +541,20 @@
             <option value="2">情感向量</option>
             <option value="3">情感描述文本（实验）</option>
           </select>
-          <label class="fl">默认情感参考音频 <span class="hint">模式 1 用</span></label>
-          <div id="dEmoRefHost"></div>
-          <label class="fl">默认情感向量 <span class="hint">模式 2 用</span></label>
-          <div id="dEmoVecHost"></div>
+          <!-- 只展开「当前模式」用到的那一块：三块同时铺开会让人以为都要填 -->
+          <div id="dEmoRefGrp">
+            <label class="fl">默认情感参考音频 <span class="hint">模式 1 用</span></label>
+            <div id="dEmoRefHost"></div>
+          </div>
+          <div id="dEmoVecGrp">
+            <label class="fl">默认情感向量 <span class="hint">模式 2 用</span></label>
+            <div id="dEmoVecHost"></div>
+          </div>
+          <div id="dEmoTextGrp">
+            <label class="fl">默认情感描述 <span class="hint">模式 3 用（实验）</span></label>
+            <input id="dEmoText" class="inp" placeholder="例如：委屈巴巴、压着嗓子说话" autocomplete="off">
+            <div class="hint" style="line-height:1.5">模式 3 才会用到这句描述；留空 = 这一项不生效。</div>
+          </div>
           <label class="fl">情感权重 <span id="dWeightOut" class="mono">0.65</span></label>
           <input id="dWeight" type="range" min="0" max="1" step="0.01" value="0.65">
           <label class="fl">默认行间停顿 <span class="hint">毫秒</span></label>
@@ -514,6 +587,15 @@
           </div>
           <div class="pfoot"><button id="btnSaveDefault" class="btn grow">保存台本默认（改这份台本）</button></div>
         </details>
+
+        <!-- 保存设置：上面四块都会被折叠，所以这个按钮固定在最后，永远看得见 -->
+        <div class="pfoot setfoot">
+          <button id="btnSaveSettings" class="btn primary grow"
+                  title="保存「人物标签 / 时间轴 / 混音导出」这些整机偏好">保存设置</button>
+        </div>
+        <div class="hint" style="text-align:center;font-size:11px">
+          上面四块都可以点标题折叠，折叠状态会记住；「保存设置」只管整机偏好，台本默认用上面那颗。
+        </div>
       </div>
 
       <!-- 音色库 -->
@@ -534,6 +616,9 @@
           <button id="btnRefRefresh" class="btn mini ghost" type="button" title="刷新音色列表">⟳</button>
           <span id="refCount" class="libcount">0 个</span>
         </div>
+        <div id="refFolders" class="libfolders"></div>
+        <div id="refTagBar" class="tagbar"></div>
+        <div id="refSelBar" class="libselbar" hidden></div>
         <div id="refHint" class="libhint"></div>
         <div id="refList" class="reflist liblist mode-list"></div>
         <div class="libfoot">
@@ -561,6 +646,8 @@
           <button id="btnSfxRefresh" class="btn mini ghost" type="button" title="刷新音效列表">⟳</button>
           <span id="sfxCount" class="libcount">0 个</span>
         </div>
+        <div id="sfxFolders" class="libfolders"></div>
+        <div id="sfxSelBar" class="libselbar" hidden></div>
         <div id="sfxHint" class="libhint"></div>
         <div id="sfxList" class="matlist liblist mode-list"></div>
         <div class="libfoot">
@@ -616,11 +703,94 @@
             <button type="button" data-mv="grid">网格</button>
           </div>
           <span class="spacer"></span>
+          <button id="btnMatMove" class="btn mini ghost" type="button"
+                  title="把勾选的素材移到某个文件夹（可现场新建）">📁 移到文件夹</button>
           <span class="hint">右键可试听 / 重命名 / 快捷处理</span>
         </div>
+        <div id="matFolders" class="libfolders"></div>
         <div id="matList" class="matlist mode-list"></div>
 
+        <!-- ===== 播放台：边听边看处理方案 ================================ -->
+        <div class="matplayer" id="matPlayer">
+          <div class="mp-head">
+            <span class="mp-name" id="mpName">还没选素材</span>
+            <span class="hint" id="mpFrom"></span>
+            <span class="spacer"></span>
+            <span class="mp-time mono" id="mpTime">0:00 / 0:00</span>
+          </div>
+          <div class="mp-track" id="mpTrack" title="点一下跳到那个位置；拖两侧圆点改「裁剪」起止">
+            <div class="mp-grain"></div>
+            <div class="mp-fill" id="mpFill"></div>
+            <div class="mp-crop" id="mpCrop"></div>
+            <div class="mp-cut mp-cut-l" id="mpCutL"></div>
+            <div class="mp-cut mp-cut-r" id="mpCutR"></div>
+            <div class="mp-fade mp-fade-in" id="mpFadeIn"></div>
+            <div class="mp-fade mp-fade-out" id="mpFadeOut"></div>
+            <div class="mp-headline" id="mpHeadline"></div>
+            <button class="mp-grip mp-grip-l" id="mpGripL" type="button" title="拖动：裁剪起点"></button>
+            <button class="mp-grip mp-grip-r" id="mpGripR" type="button" title="拖动：裁剪终点"></button>
+          </div>
+          <div class="mp-ruler" id="mpRuler"></div>
+          <div class="mp-ctl">
+            <button id="mpPlay" class="btn mini" type="button" title="播放 / 暂停（只试听，不改文件）">▶ 播放</button>
+            <button id="mpBack" class="btn mini ghost" type="button" title="后退 3 秒">« 3s</button>
+            <button id="mpFwd" class="btn mini ghost" type="button" title="前进 3 秒">3s »</button>
+            <select id="mpRate" class="sel mini" title="试听变速（只影响试听，不改文件）">
+              <option value="0.5">0.5×</option>
+              <option value="0.75">0.75×</option>
+              <option value="1" selected>1×</option>
+              <option value="1.25">1.25×</option>
+              <option value="1.5">1.5×</option>
+              <option value="2">2×</option>
+            </select>
+            <label class="mini-chk mp-loop"><input type="checkbox" id="mpLoop"> 循环</label>
+            <span class="spacer"></span>
+            <div class="mp-chips" id="mpChips"></div>
+          </div>
+        </div>
+
         <div class="sec-h" style="margin-top:16px">处理 <span class="hint" id="matSelHint">先勾选素材</span></div>
+
+        <!-- 两条主路：勾好素材点一下就行；参数都收进下面的「详细方案设置」 -->
+        <div class="matbig" id="matBig">
+          <div class="bigcard ref" id="bigCardRef">
+            <input type="checkbox" class="bigchk" id="chkRef"
+                   title="勾上 = 把这套方案装进下面的详细设置，播放台立刻能看到效果（不处理）">
+            <span class="bi">🎙</span>
+            <div class="btxt">
+              <b>一键做成音色</b>
+              <span class="bs">取人声 · 降噪 · 去静音 · -1dB · 22.05k 单声道</span>
+            </div>
+            <button class="biggo" id="btnGoRef" type="button"
+                    title="按这套方案正式处理并存入音色库">生成！</button>
+          </div>
+          <div class="bigcard sfx" id="bigCardSfx">
+            <input type="checkbox" class="bigchk" id="chkSfx"
+                   title="勾上 = 把这套方案装进下面的详细设置，播放台立刻能看到效果（不处理）">
+            <span class="bi">🔔</span>
+            <div class="btxt">
+              <b>一键做成音效</b>
+              <span class="bs">Demucs 只取伴奏 · 其它都不动</span>
+            </div>
+            <button class="biggo" id="btnGoSfx" type="button"
+                    title="按这套方案正式处理并存入音效库">生成！</button>
+          </div>
+        </div>
+        <div class="hint matbighint" id="matBigHint">
+          勾左边的方框 = <b>先看方案</b>（播放台与详细设置跟着变，不处理文件）；
+          觉得对了再点右边的 <b>生成！</b> 正式处理并入库。
+        </div>
+
+        <details class="matdetails" id="matDetails">
+          <summary>详细方案设置 <span class="hint">精细调参 / 按当前方案处理</span></summary>
+          <div class="matdetails-body">
+        <div class="optrow planrow">
+          <button id="btnSavePlan" class="btn mini" type="button"
+                  title="把当前这套方案（本页的参数）记成默认，之后点「一键做成音色/音效」就是这套">
+            ☆ 把当前方案设为默认
+          </button>
+          <span class="hint" id="planSaved">默认方案：还没有（用内置的）</span>
+        </div>
         <div class="optrow" id="qpVoiceRow" style="margin:-2px 0 6px">
           <span class="hint">快捷：</span>
           <button id="qpClean" class="btn mini" type="button" title="人声 + 降噪 + 去静音 + 标准化">净化人声</button>
@@ -642,6 +812,7 @@
                 <option value="instrumental">只要伴奏</option>
               </select>
               <select id="opVocalEngine" class="sel" title="分离算法（默认 Demucs：分离更干净，但慢一些）">
+                <option value="roformer" disabled>BS-Roformer（无模型）</option>
                 <option value="demucs" selected>Demucs 高精度</option>
                 <option value="dsp">中置提取（快）</option>
               </select>
@@ -649,6 +820,19 @@
             <div class="row2" id="vocalDspOpts">
               <span class="hint">强度 <b id="vVocal" class="mono">0.65</b></span>
               <input id="opVocalStrength" type="range" min="0.2" max="1" step="0.05" value="0.65" style="flex:1">
+            </div>
+            <div class="row2" id="vocalDemucsOpts">
+              <span class="hint">分离精度</span>
+              <select id="opVocalQuality" class="sel grow" title="越精细越干净，但也越慢（精细约 4 倍时间）">
+                <option value="fast">快速（1 次）</option>
+                <option value="std" selected>标准（2 次）</option>
+                <option value="fine">精细（4 次，最干净）</option>
+              </select>
+            </div>
+            <div class="row2" id="vocalResidualRow" hidden>
+              <span class="hint">残留人声抑制 <b id="vVocalResidual" class="mono">0%</b></span>
+              <input id="opVocalResidual" type="range" min="0" max="1" step="0.05" value="0" style="flex:1"
+                     title="只对「只要伴奏」有效：用人声轨反相压制伴奏里残留的人声（电音感）">
             </div>
             <div class="hint" id="vocalEngineHint">Demucs：按「人声 / 鼓 / 贝斯 / 其它」分离，伴奏居中也能分开，效果最好（CPU 上比中置提取慢几十倍）；想快可切中置提取。</div>
           </div>
@@ -824,6 +1008,7 @@
                 <option value="instrumental">只要伴奏</option>
               </select>
               <select id="opSSepEngine" class="sel" title="分离算法（默认 Demucs：分离更干净，但慢一些）">
+                <option value="roformer" disabled>BS-Roformer（无模型）</option>
                 <option value="demucs" selected>Demucs 高精度</option>
                 <option value="dsp">中置提取（快）</option>
               </select>
@@ -832,7 +1017,21 @@
               <span class="hint">强度 <b id="vSep" class="mono">0.65</b></span>
               <input id="opSSepStrength" type="range" min="0.2" max="1" step="0.05" value="0.65" style="flex:1">
             </div>
-            <div class="hint" id="sepEngineHint">Demucs：分离更干净（尤其中置的鼓/贝斯），代价是慢；中置提取只适合「人声明显居中」的立体声素材。</div>
+            <div class="row2" id="sepDemucsOpts">
+              <span class="hint">分离精度</span>
+              <select id="opSSepQuality" class="sel grow" title="越精细越干净，但也越慢（精细约 4 倍时间）">
+                <option value="fast">快速（1 次）</option>
+                <option value="std" selected>标准（2 次）</option>
+                <option value="fine">精细（4 次，最干净）</option>
+              </select>
+            </div>
+            <div class="row2" id="sepResidualRow" hidden>
+              <span class="hint">残留人声抑制 <b id="vSepResidual" class="mono">0%</b></span>
+              <input id="opSSepResidual" type="range" min="0" max="1" step="0.05" value="0" style="flex:1"
+                     title="只对「只要伴奏」有效：用人声轨反相压制伴奏里残留的人声（电音感）">
+            </div>
+            <div class="hint" id="sepEngineHint">Demucs：分离更干净（尤其中置的鼓/贝斯），代价是慢；中置提取只适合「人声明显居中」的立体声素材。<br>
+              残留人声抑制：Demucs 取伴奏时常在气声/齿音/混响尾巴上留一层「电音」，开着它把这一层压掉，代价是伴奏高频会稍微空一点。</div>
           </div>
 
           <div class="opcard">
@@ -859,7 +1058,9 @@
           <button id="btnMatDirect" class="btn" type="button"
                   title="不勾任何处理项，直接收进目标库（只做格式归一）">直接存入</button>
         </div>
-        <!-- 存完直接去对应的库看结果 / 挂着用 -->
+          </div>
+        </details>
+
         <div class="pfoot jumprow">
           <button id="btnJumpRef" class="btn grow" type="button"
                   title="打开「音色素材库」：设为默认音色、套用到选中行、重命名 / 删除">🎙 去音色素材库</button>
@@ -890,6 +1091,147 @@
           <b>导入台素材库（中转站）</b>：上传的音频/视频先落在这里，勾好处理项后点「处理并存入」，
           结果才会成为音色 / 音效。导入台里的中间文件不会出现在两个库里。
         </div>
+
+        <!-- 两个入口并排：左边去音频处理台（独立页面），右边展开「模型拓展」。
+             放在导入台最底部（处理流程、素材库、ffmpeg 都走完之后）：它是「进阶功能」，
+             不该插在「上传→勾处理项→存入」这条主线的中间。模型选项默认收起 ——
+             不装模型的人完全看不到。 -->
+        <div class="bigentry-row">
+          <button id="btnSfxBench" class="bigentry" type="button"
+                  title="载入音频 →（可选）去人声/去伴奏 → 按字幕或静音切段 → 修整 → 入库 / 按字幕对位进工程（新开一页）">
+            <span class="bi">🎛</span>
+            <span class="btxt">
+              <b>高级音频处理台</b>
+              <i>去人声 / 去伴奏 · 切段修整 · 按字幕对位进工程</i>
+            </span>
+          </button>
+          <button id="btnRoPanel" class="bigentry ghost" type="button" aria-expanded="false"
+                  title="可选增强：BS-Roformer 等人声分离模型（不装也能用 Demucs）">
+            <span class="bi">🧩</span>
+            <span class="btxt">
+              <b>模型拓展</b>
+              <i id="roSumHint">（可选 · 检测中…）</i>
+            </span>
+            <span class="caret">▾</span>
+          </button>
+        </div>
+
+        <!-- 模型拓展面板：默认收起，点上面右边那个按钮才展开。
+             工作台不自动下载、不自动安装，只检测目录 + 给地址 + 挂进引擎下拉。 -->
+        <div class="ropanel" id="roDetails" hidden>
+          <div class="ropanel-h">
+            <b>模型拓展</b>
+            <span class="hint">BS-Roformer 等可选模型（放了才会出现在引擎下拉里）</span>
+            <span class="spacer"></span>
+            <button class="iconbtn" id="btnRoPanelClose" type="button" title="收起（Esc）">✕</button>
+          </div>
+          <div class="matdetails-body">
+            <div class="ronote">
+              <b>什么时候才需要它：</b>Demucs 已经够用就别管这一块。只有当你觉得
+              「Demucs 分出来的伴奏里还留着一层人声、有电音感」时，才值得上 BS-Roformer。
+              模型 275MB（Demucs 才 80MB），首次加载要十几秒；<b>不是默认必装项</b>。
+            </div>
+
+            <div class="ffbar" id="roBar">
+              <div class="ffline">
+                <span class="ffdot" id="roDot"></span>
+                <span class="hint grow" id="roState">正在检测模型目录…</span>
+              </div>
+              <div class="ffbtns">
+                <button class="btn mini ghost" id="btnRoOpen" type="button"
+                        title="在资源管理器里打开模型目录（不存在会自动建）">📂 打开模型目录</button>
+                <button class="btn mini ghost" id="btnRoScan" type="button"
+                        title="重新扫一遍目录（放完模型不用重启）">⟳ 重新检测</button>
+                <button class="btn mini ghost" id="btnRoTest" type="button"
+                        title="用 3 秒合成音实跑一遍，确认「模型 + 后端」这套真能跑通（不评判音质）">▶ 试跑一次</button>
+              </div>
+            </div>
+            <div class="hint mono" id="roDir" style="margin-top:6px;word-break:break-all"></div>
+            <div class="hint" id="roWhy" style="margin-top:4px"></div>
+
+            <div class="rohelp">
+              <div class="rohelp-t">先搞清楚：下<b>一个</b>就够，人声和伴奏是一起出来的</div>
+              <div class="hint">
+                这类模型都是「人声 / 伴奏」二分离：一次推理同时给出 <b>vocals</b> 和 <b>instrument</b> 两轨。
+                所以上面选「只要人声」还是「只要伴奏」，只是取哪一轨，<b>不用为两种用途各下一个模型</b>。
+                模型库里另有一类「伴奏 / 无人声提取」专用模型，那是给「只要伴奏」再优化一档的，一般用不上。
+              </div>
+
+              <div class="rohelp-t">挑一个就行（体积 / 速度都是官方目录里的实数）</div>
+              <table class="rotbl">
+                <thead><tr><th>模型</th><th>体积</th><th>特点</th></tr></thead>
+                <tbody>
+                  <tr class="rec">
+                    <td>bs_roformer_voc_hyperacev2</td><td>275MB</td>
+                    <td><b>推荐</b>：同为 BS-Roformer，速度最快（1 小时音频约 15 秒 / RTX 5090），综合最好</td>
+                  </tr>
+                  <tr>
+                    <td>BS-Roformer-Resurrection</td><td>195MB</td>
+                    <td>体积最小；显存紧、只想先试试的时候用</td>
+                  </tr>
+                  <tr>
+                    <td>model_bs_roformer_ep_368_sdr_12.9628</td><td>610MB</td>
+                    <td>经典款，MUSDB 人声 SDR 12.96；速度大概慢一倍</td>
+                  </tr>
+                </tbody>
+              </table>
+              <div class="hint">
+                Mel-Band Roformer 系（871MB~1.6GB）更重更慢，一般没必要；
+                同一系列里体积越大通常越强，但也越吃显存。
+              </div>
+
+              <div class="rostep">
+                <b>1　装推理后端（必须，一次就够）</b>
+                <div class="hint">模型只是权重，真正跑推理的是 <b>pymss</b>（开源，MIT）。整合包根目录执行：</div>
+                <pre class="rocmd" id="roCmd">runtime\python.exe -m ensurepip --default-pip
+runtime\python.exe -m pip install pymss</pre>
+                <div class="ffbtns">
+                  <button class="btn mini ghost" type="button" data-copy="roCmd">复制命令</button>
+                  <a class="btn mini ghost" href="https://github.com/pymss-project/pymss"
+                     target="_blank" rel="noopener">pymss 项目主页</a>
+                  <a class="btn mini ghost" href="https://pypi.org/project/pymss/"
+                     target="_blank" rel="noopener">PyPI</a>
+                </div>
+                <div class="hint">装完回这里点「⟳ 重新检测」。有显卡才快，没显卡也能跑，就是慢。</div>
+              </div>
+
+              <div class="rostep">
+                <b>2　下模型（两种方式，选一种）</b>
+                <div class="hint">
+                  <b>A. 一条命令（推荐）</b>——pymss 会自己把 ckpt 和同名 yaml 一起下到模型目录，
+                  不用手点、不会漏 yaml：
+                </div>
+                <pre class="rocmd" id="roCmdDown">runtime\python.exe -m pymss.cli download bs_roformer_voc_hyperacev2 --model-dir vendor2\roformer --source modelscope</pre>
+                <div class="ffbtns">
+                  <button class="btn mini ghost" type="button" data-copy="roCmdDown">复制下载命令</button>
+                  <span class="hint" id="roDlHint"></span>
+                </div>
+                <div class="hint">
+                  <b>B. 手动下</b>——去下面任一仓库，进 <b>vocal/vocal_extraction/</b>，
+                  把<b>同名</b>的 .ckpt 和 .yaml 两个文件一起丢进模型目录：
+                  <br>
+                  <a href="https://huggingface.co/baicai1145/pymss" target="_blank" rel="noopener">HuggingFace：baicai1145/pymss</a>（原始仓库，国内常连不上）
+                  ·
+                  <a href="https://www.modelscope.cn/models/baicai1145/pymss" target="_blank" rel="noopener">ModelScope：baicai1145/pymss</a>（国内镜像，一般更快）
+                  <br>
+                  命令里的 <code>--source</code> 可以换成 <code>modelscope</code> /
+                  <code>huggingface</code> / <code>hf-mirror</code>（HF 直连不通时走镜像站）。
+                  文件名别改，yaml 必须和 ckpt 同名，否则认不出来。
+                </div>
+              </div>
+
+              <div class="hint">
+                两步都齐了，上面「提取人声 / 从歌曲里取」的引擎下拉才会多出 <b>BS-Roformer</b> 一项。
+                社区基准上它比 Demucs 的人声 SDR 高 2~3dB，但<b>实际差距很看素材</b>。
+                本机用一首歌的 30 秒片段实测：两轨互相漏音的相关性 <b>0.04（Roformer）
+                vs 0.08（Demucs）</b> —— 干净一倍，速度都是 30 秒素材约 2 秒；
+                换成纯说话的素材，两者差距会小很多（0.3dB 量级）。
+                建议拿自己的素材两种各跑一遍再决定；不够用就继续用 Demucs，不影响任何功能。
+              </div>
+            </div>
+          </div>
+        </div>
+
       </div>
 
       <!-- 参数预设 -->
@@ -922,8 +1264,9 @@
 </div>
 <div id="toast" class="toast" hidden></div>
 
-<script src="/longform-assets/emoctl.js?v=20261101e"></script>
-<script src="/longform-assets/genparams.js?v=20261101e"></script>
-<script src="/longform-assets/longform.js?v=20261101e"></script>
+<script src="/longform-assets/libfolders.js?v=20261104c"></script>
+<script src="/longform-assets/emoctl.js?v=20261102b"></script>
+<script src="/longform-assets/genparams.js?v=20261102b"></script>
+<script src="/longform-assets/longform.js?v=20261104n"></script>
 </body>
 </html>

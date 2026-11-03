@@ -33,7 +33,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PAYLOAD = os.path.join(HERE, "payload")
-PATCH_VERSION = "0.22 / 2026-11-01"
+PATCH_VERSION = "0.33 / 2026-11-04"
 BACKUP_NAME = "_patch_backup"
 
 # 这几个模块是本补丁的「主体」；version 用文件大小+哈希做粗校验

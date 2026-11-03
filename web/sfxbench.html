@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>高级音频处理台 · 音声工作台</title>
+<script>
+// 主题：和工作台 / 时间轴共用 localStorage["lf.theme"]。默认浅色，不跟随系统。
+(function () {
+  var t = localStorage.getItem("lf.theme") === "dark" ? "dark" : "light";
+  document.documentElement.dataset.theme = t;
+  window.addEventListener("storage", function (e) {
+    if (e.key !== "lf.theme") return;
+    document.documentElement.dataset.theme = e.newValue === "dark" ? "dark" : "light";
+    if (window.__sbThemeChanged) window.__sbThemeChanged();
+  });
+})();
+</script>
+<link rel="stylesheet" href="/sfxbench-assets/sfxbench.css?v=20261104h">
+</head>
+<body>
+
+<header class="sb-top">
+  <button class="btn ghost" id="btnBack" type="button" title="回到台本工作台（导入台抽屉会自动打开）">← 返回工作台</button>
+  <b>高级音频处理台</b>
+  <span class="hint">载入音频 →（可选）去人声 / 去伴奏 → 切段 → 修整 → 入库 / 按字幕对位进工程</span>
+  <span class="spacer"></span>
+  <span class="hint" id="topHint"></span>
+  <button class="btn ghost" id="btnSbTheme" type="button" title="浅色 / 夜间（和工作台共用同一个开关）">🌙 夜间</button>
+</header>
+
+<main class="sb-wrap">
+  <aside class="sb-side">
+
+    <section class="sb-card" id="cardMat">
+      <div class="sb-h"><i>1</i>选素材<span class="hint">（来自导入台）</span>
+        <button class="sb-hbtn" type="button" data-help="mat" title="这一块怎么用">?</button>
+      </div>
+      <div class="row2">
+        <input class="inp" id="matSearch" placeholder="搜索素材名…" autocomplete="off">
+        <label class="btn mini ghost nowrap" id="btnMatAdd" style="cursor:pointer;margin:0"
+               title="直接从本机加入音频/视频：会先存进导入台，再自动选中">＋ 直接加入</label>
+        <input type="file" id="fileMatAdd" accept="audio/*,video/*,.wav,.mp3,.flac,.ogg,.m4a,.mp4,.mkv,.mov" multiple hidden>
+      </div>
+      <div id="matFolders" class="mat-folders"></div>
+      <div class="sb-mats" id="matList"></div>
+      <div class="hint" id="matHint"></div>
+    </section>
+
+    <section class="sb-card" id="cardSep">
+      <div class="sb-h"><i>2</i>处理<span class="hint">（可选）</span>
+        <button class="sb-hbtn" type="button" data-help="sep" title="这一块怎么用">?</button>
+      </div>
+      <div class="row2">
+        <span class="hint">留下</span>
+        <select class="sel" id="stem" title="去除哪一半：留伴奏（去人声）/ 留人声（去伴奏）/ 原样">
+          <option value="instrumental" selected>伴奏（去掉台词人声）</option>
+          <option value="vocals">人声（去掉伴奏 / 背景乐）</option>
+          <option value="none">原样（不分离）</option>
+        </select>
+      </div>
+      <div class="row2" id="engRow">
+        <span class="hint">引擎</span>
+        <select class="sel" id="eng">
+          <option value="roformer">BS-Roformer（最干净）</option>
+          <option value="demucs" selected>Demucs（内置）</option>
+          <option value="dsp">中置提取（最快）</option>
+        </select>
+      </div>
+      <div class="row2" id="qRow">
+        <span class="hint">精度</span>
+        <select class="sel" id="quality">
+          <option value="fast">快速</option>
+          <option value="std" selected>标准</option>
+          <option value="fine">精细</option>
+        </select>
+      </div>
+      <div class="row2" id="resRow">
+        <span class="hint">残留抑制</span>
+        <input type="range" id="residual" min="0" max="1" step="0.05" value="0.15" style="flex:1">
+        <b class="mono" id="vRes">15%</b>
+      </div>
+      <button class="btn primary wide" id="btnPrepare" type="button">② 开始处理并载入</button>
+      <div class="hint" id="prepHint">分离只做一次，之后调切分参数不用重跑；选「原样」就是直接开始切。</div>
+      <div class="sb-warn" id="sepWarn" hidden></div>
+    </section>
+
+    <section class="sb-card" id="cardSeg" disabled>
+      <div class="sb-h"><i>3</i>切成片段
+        <button class="sb-hbtn" type="button" data-help="seg" title="这一块怎么用">?</button>
+      </div>
+      <div class="row2">
+        <select class="sel" id="segMode" title="按什么切">
+          <option value="gap">按静音间隔（推荐）</option>
+          <option value="srt">按字幕切音效（字幕之外，需字幕）</option>
+          <option value="fg">先减稳态背景再切</option>
+          <option value="onset">按起始点（节奏/打击）</option>
+        </select>
+      </div>
+      <div class="grid2">
+        <label>最小间隔<input class="inp" id="minGap" type="number" min="0.05" max="5" step="0.05" value="0.35"><i>秒</i></label>
+        <label>最短片段<input class="inp" id="minLen" type="number" min="0.05" max="10" step="0.05" value="0.2"><i>秒</i></label>
+        <label>门限<input class="inp" id="thresh" type="number" min="1" max="40" step="1" value="10"><i>dB</i></label>
+        <label>前后留白<input class="inp" id="pad" type="number" min="0" max="1" step="0.01" value="0.03"><i>秒</i></label>
+      </div>
+      <button class="btn wide" id="btnSeg" type="button">重新切分</button>
+      <div class="hint" id="segHint">门限越低切得越碎；最小间隔越大，越会把相邻声音并成一段。</div>
+    </section>
+
+    <section class="sb-card" id="cardSrt">
+      <div class="sb-h"><i>4</i>字幕参考<span class="hint">（可选）</span>
+        <button class="sb-hbtn" type="button" data-help="srt" title="这一块怎么用">?</button>
+      </div>
+      <div class="srt-drop" id="srtDrop">
+        <label class="btn mini ghost" for="srtFile" style="cursor:pointer">📄 选 .srt 文件</label>
+        <input type="file" id="srtFile" accept=".srt,.txt" hidden>
+        <button class="btn mini ghost" id="btnSrtPaste" type="button">粘贴</button>
+        <button class="btn mini ghost" id="btnSrtClear" type="button">清除</button>
+        <span class="hint">也可以把文件拖到这里</span>
+      </div>
+      <div class="row2">
+        <span class="hint">或从台本</span>
+        <select class="sel" id="cueSid" title="直接用工作台里某个台本的时间码（从 SRT 导入的台本才有）">
+          <option value="">（读取台本列表…）</option>
+        </select>
+        <button class="btn mini" id="btnCueLoad" type="button" title="把这个台本的时间码当作字幕轨载入">载入</button>
+      </div>
+      <div class="hint" id="srtHint">把原音声的字幕放进来，会多出一条字幕轨：每句一块，点一下就跳到那句。</div>
+      <label class="mini-chk"><input type="checkbox" id="srtShow" checked> 显示字幕轨</label>
+      <button class="btn mini wide" id="btnSrtNext" type="button" disabled>→ 跳到下一条字幕</button>
+    </section>
+
+    <section class="sb-card" id="cardPlan">
+      <div class="sb-h"><i>5</i>处理方案<span class="hint">（可回退）</span>
+        <button class="sb-hbtn" type="button" data-help="plan" title="这一块怎么用">?</button>
+      </div>
+      <div class="row2">
+        <input class="inp" id="planName" placeholder="方案名（留空 = 自动）" autocomplete="off">
+        <button class="btn mini" id="btnPlanSave" type="button" title="保存当前分离参数 + 切分参数 + 手工改过的片段">保存</button>
+      </div>
+      <div class="sb-plans" id="planList"></div>
+      <label class="mini-chk" style="margin-top:6px"><input type="checkbox" id="planAuto" checked>
+        重新切分前自动存一份方案</label>
+      <div class="hint" id="planHint">误操作可以「撤销」；重新切分前会先弹确认窗。</div>
+    </section>
+
+    <section class="sb-card" id="cardIns">
+      <div class="sb-h"><i>6</i>输出与对位<span class="hint">（入库 / 进工程）</span>
+        <button class="sb-hbtn" type="button" data-help="ins" title="这一块怎么用">?</button>
+      </div>
+      <div class="row2">
+        <span class="hint">存入</span>
+        <select class="sel" id="target" title="勾选的片段存到哪个库">
+          <option value="sfx">音效库</option>
+          <option value="ref">音色库</option>
+          <option value="media">导入台</option>
+        </select>
+        <button class="btn mini" id="btnSaveFolder" type="button" title="选一个文件夹：这次存的片段会一起放进去（没有就现场新建）">📁 未归档</button>
+      </div>
+      <label class="mini-chk" id="batchFolderRow" style="margin-top:6px">
+        <input type="checkbox" id="saveBatchFolder" checked>
+        <span>为这一批新建文件夹（用素材名）</span>
+      </label>
+      <div class="hint" id="saveDestHint">会存进「音效库 / 素材名」这个文件夹，一次存多少段都在一起。</div>
+      <button class="btn wide" id="btnSave" type="button" disabled>存入选中片段</button>
+
+      <div class="sb-sep"><span>按字幕对位进时间轴</span></div>
+      <select class="sel wide" id="tlSid" title="插入到哪个工程">
+        <option value="">（读取工程列表…）</option>
+      </select>
+      <div class="row2">
+        <span class="hint">换算</span>
+        <select class="sel" id="insPolicy" title="原片时间 → 中文时间轴时间 的换算方式">
+          <option value="sentence" selected>按句对位（最准，需字幕时间码）</option>
+          <option value="follow">跟句子起点（老算法）</option>
+          <option value="abs">按全片比例</option>
+          <option value="snap">跟句子 + 吸附句边界</option>
+          <option value="seq">不做换算（接在末尾）</option>
+        </select>
+      </div>
+      <div class="row2" id="insTimebaseRow">
+        <span class="hint">素材时间</span>
+        <select class="sel" id="insTimebase" title="这段素材的时间码是按哪一版音频算的？选错了会整段偏">
+          <option value="auto" selected>自动（按素材总长判断，推荐）</option>
+          <option value="orig">原片（素材＝原版音频）</option>
+          <option value="cue">跟载入的字幕同一套（素材＝重新生成后的音频）</option>
+        </select>
+      </div>
+      <div class="hint" id="insTimebaseHint">自动：素材总长接近「载入字幕的末尾」就按字幕序号对位，
+        接近「工程时间轴末尾」就直接按工程句子。判断结果会写在预览里。</div>
+      <div class="row2">
+        <button class="btn" id="btnMapPreview" type="button" style="flex:1" title="先算一遍：每段落在第几句、偏移多少、目标时间是多少">🔎 对位预览</button>
+        <button class="btn primary" id="btnInsert" type="button" style="flex:1" disabled>↳ 写入工程</button>
+      </div>
+      <button class="btn wide" id="btnPipeline" type="button"
+              title="一步跑完：载入字幕 → 按字幕切分 → 按句对位 → 写进工程">⚡ 一键全流程</button>
+      <button class="btn mini wide ghost" id="btnGoTl" type="button" hidden>打开时间轴看结果 →</button>
+      <div class="hint" id="flowHint" style="line-height:1.6">
+        <b>全流程</b>：工作台从 SRT 导入台本 → 这里选同一个工程 → 点「⚡ 一键全流程」→
+        在预览里确认「写入工程」。音效位置按「原音里的时间 → 那一句中文的位置」换算。
+      </div>
+      <div class="hint" id="insHint">先选工程和字幕来源，再点「🔎 对位预览」看每一段落到哪；确认后「写入工程」。</div>
+    </section>
+
+    <section class="sb-card sb-card-tips">
+      <div class="sb-h"><i>?</i>操作速查
+        <button class="sb-hbtn" type="button" data-help="keys" title="快捷键与鼠标操作">?</button>
+      </div>
+      <div class="hint" id="keySheet">
+        <b>鼠标</b>：拖空白＝圈出新片段；拖片段两端＝改起止；拖片段中间＝整体平移；
+        右键＝菜单；点字幕块＝跳到那一句。<br>
+        <b>键盘</b>：空格 播放/暂停 · ←/→ 播放头 ±50ms（Shift ±10ms）·
+        <b>S</b> 切分 · <b>M</b> 合并 · <b>Del</b> 删除 · <b>Ctrl+A</b> 全选 ·
+        <b>[</b> / <b>]</b> 把选中片段的起/终点移到播放头 · <b>Esc</b> 取消。
+      </div>
+    </section>
+
+  </aside>
+
+  <section class="sb-main">
+
+    <div class="sb-editor" id="editor" hidden>
+
+      <!-- 导航窗：整条的缩略图。视窗（方块）可以拖，省得靠缩放来回找 -->
+      <div class="sb-navbox" id="navBox" title="导航窗：拖动方块改看哪一段，双击看全长">
+        <canvas id="nav"></canvas>
+        <span class="sb-navcap" id="navCap">全长</span>
+      </div>
+
+      <!-- 播放头条：只干一件事 —— 拖动播放头。
+           独立成一条，不和波形上的「剪切/圈选」抢手势；刻度也在这里，波形区只画内容。 -->
+      <div class="sb-scrub" id="scrubBox" title="按住拖动改播放头（这里不会新建/移动片段）">
+        <div class="sb-scrub-h">
+          <span class="scrub-dot"></span><b>播放头</b>
+          <span class="mono sb-scrub-t" id="scrubTime">0:00.00</span>
+          <span class="hint" id="scrubHint">拖动这条改位置</span>
+          <span class="spacer"></span>
+          <button class="tbtn" id="btnScrubPrev" type="button" title="后退 1 秒">«</button>
+          <button class="tbtn" id="btnScrubPlay" type="button" title="从此处播放 / 暂停">▶</button>
+          <button class="tbtn" id="btnScrubNext" type="button" title="前进 1 秒">»</button>
+        </div>
+        <canvas id="scrub"></canvas>
+      </div>
+
+      <!-- 原音轨：A/B 对照用，只有播放能力，不可编辑 -->
+      <div class="sb-trk" id="trkRaw">
+        <div class="sb-trk-h">
+          <span class="trk-dot raw"></span><b>原音</b>
+          <span class="tstate" id="rawState">待命</span>
+          <button class="tbtn tp" id="btnRawPlay" type="button" title="只放这条（处理后那轨自动静音）">▶</button>
+          <button class="tbtn" id="btnRawMute" type="button" aria-pressed="false" title="静音原音（听处理结果时用）">🔊</button>
+          <input class="vol" id="volRaw" type="range" min="0" max="100" value="100" title="原音音量">
+          <span class="mono tcur" id="rawTime">0:00.0</span>
+          <span class="spacer"></span>
+          <span class="hint" id="rawInfo"></span>
+        </div>
+        <canvas id="waveRaw"></canvas>
+      </div>
+
+      <!-- 处理后：可编辑的那条 -->
+      <div class="sb-trk" id="trkProc">
+        <div class="sb-trk-h">
+          <span class="trk-dot proc"></span><b>处理后</b>
+          <span class="tstate" id="procState">待命</span>
+          <button class="tbtn tp" id="btnProcPlay" type="button" title="只放这条（原音自动静音）">▶</button>
+          <button class="tbtn" id="btnProcMute" type="button" aria-pressed="false" title="静音处理后（只听原音）">🔊</button>
+          <input class="vol" id="volProc" type="range" min="0" max="100" value="100" title="处理后音量">
+          <span class="mono tcur" id="procTime">0:00.0</span>
+          <span class="spacer"></span>
+          <span class="hint" id="procInfo"></span>
+        </div>
+        <div class="sb-tools" id="procTools">
+          <button class="tool" id="toolMark" type="button" title="圈选模式：拖出来的区域直接变成一个新片段（可以压住已有片段）">▭ 标记</button>
+          <button class="tool" id="toolSplit" type="button" title="在播放头处切分选中片段（没选就切播放头所在的那段）">✂ 切分</button>
+          <button class="tool" id="toolMerge" type="button" title="把选中的片段合并成一段（跨过中间的空隙）">⤵ 合并</button>
+          <button class="tool" id="toolDel" type="button" title="删除选中的片段（只影响这次导出）">✕ 删除</button>
+          <span class="tsep"></span>
+          <button class="tool" id="toolUndo" type="button" title="撤销上一步编辑（Ctrl+Z）">↺ 撤销</button>
+          <button class="tool" id="toolRedo" type="button" title="重做（Ctrl+Shift+Z）">↻ 重做</button>
+          <button class="tool" id="toolFx" type="button" title="对选中片段做首尾静音 / 淡入淡出 / 变速变调 / 标准化…">⚙ 处理选中</button>
+          <button class="tool" id="toolAll" type="button" title="全选（Ctrl+A）">全选</button>
+          <button class="tool" id="toolInv" type="button" title="反选">反选</button>
+          <span class="spacer"></span>
+          <span class="hint" id="toolHint"></span>
+        </div>
+        <canvas id="wave"></canvas>
+      </div>
+
+      <!-- 字幕轨：只读，每句一块 -->
+      <div class="sb-trk" id="trkSrt" hidden>
+        <div class="sb-trk-h">
+          <span class="trk-dot srt"></span><b>字幕</b>
+          <span class="tstate srt" id="srtState">参考层</span>
+          <button class="tbtn tp" id="btnCuePlay" type="button" title="播当前这条字幕">▶</button>
+          <button class="tbtn" id="btnCuePrev" type="button" title="上一条字幕">◀</button>
+          <button class="tbtn" id="btnCueNext" type="button" title="下一条字幕">▶</button>
+          <span class="spacer"></span>
+          <span class="hint" id="srtInfo"></span>
+        </div>
+        <canvas id="waveSrt"></canvas>
+      </div>
+
+      <div class="sb-playbar">
+        <button class="btn" id="btnPlayAll" type="button">▶ 播放</button>
+        <label class="mini-chk" title="单段试听时循环这一小段"><input type="checkbox" id="loopSeg"> 循环</label>
+        <select class="sel mini" id="speed" title="放慢听清起止与质感">
+          <option value="1" selected>1.0×</option>
+          <option value="0.75">0.75×</option>
+          <option value="0.5">0.5×</option>
+        </select>
+        <span class="zoombox">
+          <button class="btn mini" id="btnZoomOut" type="button" title="缩小（或滚轮）">−</button>
+          <button class="btn mini" id="btnZoomIn" type="button" title="放大（或滚轮）">+</button>
+          <button class="btn mini" id="btnZoomFit" type="button" title="看全长（或双击导航窗）">全</button>
+          <b class="mono" id="zoomPct">100%</b>
+        </span>
+        <span class="mono" id="playTime">0:00 / 0:00</span>
+        <span class="hint" id="waveHint"></span>
+        <span class="hint" id="segStat"></span>
+      </div>
+    </div>
+
+    <div class="sb-empty" id="empty">
+      左边选一个素材 → 点「① 准备素材」<br>
+      <span class="hint">会用分离引擎把台词人声去掉，留下的音效再按事件切开</span>
+    </div>
+
+    <div class="sb-list" id="segList" hidden></div>
+
+    <footer class="sb-foot" id="foot" hidden>
+      <label class="mini-chk"><input type="checkbox" id="selAll"> 全选</label>
+      <span class="hint" id="selStat">已选 0 段</span>
+      <span class="spacer"></span>
+      <button class="btn mini ghost" id="btnAutoName" type="button" title="按字幕给每段起名（第 N 条后）">✎ 按字幕命名</button>
+      <button class="btn mini ghost" id="btnDup" type="button" title="找出听感相同的片段">⧉ 查重</button>
+      <button class="btn mini ghost warn" id="btnDupDel" type="button" hidden>删掉重复</button>
+      <button class="btn mini ghost" id="btnExport" type="button" title="导出勾选（没勾就全部）的时间清单">⤓ 清单</button>
+      <button class="btn primary" id="btnFootSave" type="button" disabled>存入选中片段</button>
+    </footer>
+    <div class="hint sb-duphint" id="dupHint" hidden></div>
+  </section>
+</main>
+
+<!-- 右键菜单 / 悬浮提示 / 帮助气泡：都在 body 下，避免被父级的 overflow 裁掉 -->
+<div class="sb-menu" id="ctxMenu" hidden></div>
+<div class="sb-tip" id="tip" hidden></div>
+<div class="sb-help" id="helpPop" hidden>
+  <div class="sb-help-h"><b id="helpTitle"></b><button class="iconbtn" id="helpClose" type="button">✕</button></div>
+  <div class="sb-help-b" id="helpBody"></div>
+</div>
+
+<!-- 片段处理（首尾静音 / 变速 / 变调 …）：选多条就是批量 -->
+<div class="sb-modal" id="opsPop" hidden>
+  <div class="sb-modal-box wide">
+    <div class="sb-modal-h"><b id="opsTitle">处理选中片段</b></div>
+    <div class="sb-modal-b" id="opsBody"></div>
+    <div class="sb-modal-f">
+      <button class="btn" id="opsAudition" type="button" title="只试听第一条的结果（走服务端同一套算法）">▶ 试听第一条</button>
+      <button class="btn ghost" id="opsClear" type="button">清空处理</button>
+      <span class="spacer"></span>
+      <button class="btn" id="opsCancel" type="button">取消</button>
+      <button class="btn primary" id="opsOk" type="button">应用到选中</button>
+    </div>
+  </div>
+</div>
+
+<!-- 对位预览 -->
+<div class="sb-modal" id="mapPop" hidden>
+  <div class="sb-modal-box wide">
+    <div class="sb-modal-h"><b>对位预览</b><span class="hint" id="mapSum"></span></div>
+    <div class="sb-modal-b" id="mapBody"></div>
+    <div class="sb-modal-f">
+      <button class="btn" id="mapCancel" type="button">关闭</button>
+      <span class="spacer"></span>
+      <button class="btn primary" id="mapOk" type="button">写入工程</button>
+    </div>
+  </div>
+</div>
+
+<!-- 警告窗：重新切分会丢手工编辑时用，避免一按就清空 -->
+<div class="sb-modal" id="askPop" hidden>
+  <div class="sb-modal-box">
+    <div class="sb-modal-h"><b id="askTitle">确认</b></div>
+    <div class="sb-modal-b" id="askBody"></div>
+    <div class="sb-modal-f">
+      <button class="btn" id="askCancel" type="button">取消</button>
+      <button class="btn primary" id="askOk" type="button">确定</button>
+    </div>
+  </div>
+</div>
+
+<audio id="auProc" preload="auto"></audio>
+<audio id="auRaw" preload="auto"></audio>
+<div class="toast" id="toast" hidden></div>
+
+<script src="/sfxbench-assets/libfolders.js?v=20261104c"></script>
+<script src="/sfxbench-assets/sfxbench.js?v=20261104k"></script>
+</body>
+</html>

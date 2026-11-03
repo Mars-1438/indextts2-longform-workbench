@@ -44,12 +44,23 @@ SCENE_RE = re.compile(
 CHAPTER_RE = re.compile(
     r"^\s*(?:第\s*[0-9零一二三四五六七八九十百千万]+\s*[章节回幕集篇]|"
     r"chapter\s+\d+|part\s+\d+|#{1,3}\s*\S|序章|楔子|尾声|后记|番外)", re.I)
+# 剧本头部常见的「【场景】…【人物】…【字数】…」：这是**元信息**，不是正文。
+# 以前不认它，一行【人物】会被当成正文/台词，括号里的角色说明也会被当动作备注吃掉。
+SCRIPT_META_RE = re.compile(
+    r"^\s*[【\[]\s*(场景|地点|时间|人物|角色|人物表|出场人物|字数|备注|说明|标题|风格|基调)"
+    r"\s*[】\]]\s*[:：]?\s*(.*)$")
+
 FORMULA_RE = re.compile(r"(?:[=＝].*[×÷+\-*/^]|\\frac|\\sum|∑|∫|\b[a-zA-Z]\s*=\s*[^，。]{0,20}$|例题|思考题|练习题|习题)")
 ACTION_RE = re.compile(r"[（(【\[]([^）)】\]]{0,80})[）)】\]]")
 PAREN_RE = re.compile(r"[（(]([^）)]{0,80})[）)]")
 PAUSE_RE = re.compile(
     r"[【\[（(]\s*(?:停顿|静默|暂停|停|pause)\s*[:：]?\s*"
     r"([0-9]+(?:\.[0-9]+)?)\s*(毫秒|ms|秒|s)?\s*[】\]）)]", re.I)
+# 「（停顿 3 秒）」「【留白 2 秒】」这类**静默标记**里也有数字+秒：
+# 判「这像不像字幕稿」时必须先摘掉，否则两处停顿就能把引导稿判成 srt。
+PAUSE_ANY_RE = re.compile(
+    r"[【\[（(]\s*(?:停顿|静默|暂停|留白|静场|等待|呼吸|间隔|休息|空拍|停|pause)"
+    r"\s*[:：]?\s*[0-9]+(?:\.[0-9]+)?\s*(?:毫秒|ms|秒|s)?\s*[】\]）)]", re.I)
 PUNCT_RE = re.compile(r"[。！？!?…，,；;：:.、]")
 
 # ---------------------------------------------------------------- 时间码
@@ -1066,6 +1077,102 @@ def _paren_split(text):
     return [(t, p) for t, p in out if t.strip()]
 
 
+def _parse_characters(text):
+    """「嘉然（活泼吃货，软乎乎）、乃琳（从容温柔，会打趣）」 → [{name, traits}]。
+
+    先按顿号 / 分号切（**不按逗号**：括号里的属性常带逗号），再拆名字和括号里的属性。
+    """
+    out, seen = [], set()
+    for part in re.split(r"[、；;]+", str(text or "")):
+        part = part.strip(" 　.。")
+        if not part:
+            continue
+        m = re.match(r"^(.{1,12}?)\s*[（(]([^）)]{0,60})[）)]\s*$", part)
+        if m:
+            name = m.group(1).strip()
+            traits = [x.strip(" 　") for x in re.split(r"[、，,；;/]", m.group(2)) if x.strip(" 　")]
+        else:
+            name, traits = part[:12].strip(), []
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append({"name": name, "traits": traits[:8]})
+        if len(out) >= 40:
+            break
+    return out
+
+
+def _script_meta(src):
+    """从原文前 40 行抓【场景】【人物】【字数】这类头部元信息。"""
+    out = {"scene": "", "characters": [], "note": "", "extra": {}}
+    text = src.get("raw") or src.get("text") or ""
+    for ln in text.replace("\r", "\n").split("\n")[:40]:
+        m = SCRIPT_META_RE.match(ln.strip())
+        if not m:
+            continue
+        key, val = m.group(1), (m.group(2) or "").strip()
+        if not val:
+            continue
+        if key in ("场景", "地点"):
+            out["scene"] = out["scene"] or val[:80]
+        elif key in ("人物", "角色", "人物表", "出场人物"):
+            if not out["characters"]:
+                out["characters"] = _parse_characters(val)
+        elif key in ("字数", "时间"):
+            out["extra"][key] = val[:40]
+        else:
+            out["note"] = out["note"] or val[:200]
+    return out
+
+
+_HEAD_TC_RE = re.compile(r"^[\[［]?\s*\d{1,2}[:：]\d{2}([:：]\d{2})?(\.\d+)?\s*[\]］]?")
+_HEAD_PUNCT_END = "。！？!?…；;，,、）)】」』"
+
+
+def _source_head(src, groups=None):
+    """原文「头部」= 正文开始之前的那几行（【场景】【人物】【字数】/ 标题 / 顶部时间码）。
+
+    以前取「前 12 个非空行」，剧本第 5 行就进正文了 —— 于是这些正文行既在这里
+    出现一次、又在原稿正文里出现一次，台本页的「原文本预览」就整段重复。
+    现在只取**正文开始前**的部分：遇到第一句台词/正文就停。
+    """
+    text = src.get("raw") or src.get("text") or ""
+    lines = [x.strip() for x in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    seg_texts = set()
+    for g in (groups or []):
+        for s in (g.get("segments") or []):
+            t = _norm_space(str(s.get("text") or ""))
+            if t:
+                seg_texts.add(t)
+
+    head, seen_meta, started = [], False, False
+    for t in lines[:60]:
+        if not t:
+            continue
+        if len(head) >= 16:
+            break
+        if SCRIPT_META_RE.match(t):                      # 【场景】【人物】【字数】…
+            head.append(t)
+            seen_meta = True
+            continue
+        if _norm_space(t) in seg_texts:                   # 已经进正文了
+            break
+        m = SPEAKER_RE.match(t)
+        if m and len(m.group(1)) <= 12:                   # 「角色：台词」= 正文，停
+            break
+        if _HEAD_TC_RE.match(t):                          # 顶部那行时间码
+            head.append(t)
+            started = True
+            continue
+        if not seen_meta and not started and len(t) <= 40 and not t[-1] in _HEAD_PUNCT_END:
+            head.append(t)                                # 正文前的标题行
+            started = True
+            continue
+        break
+    # 双保险：和正文任意一句完全一样的，不重复展示
+    return [t for t in head if _norm_space(t) not in seg_texts][:16]
+
+
 def _speaker_of(line):
     m = SPEAKER_RE.match(line)
     if not m:
@@ -1089,12 +1196,37 @@ def inspect_document(filename, data):
 
 
 def _looks_srt(text):
-    head = (text or "")[:4000]
+    """这段文字像不像字幕稿。
+
+    以前「有一个时间码 + 任意箭头/波浪线」就判 srt —— 剧本里写一行 `[00:00:00]` 开头，
+    整篇就被当成一条字幕，后面的角色前缀全废。现在：
+      · 有明确区间箭头（--> ⇒ →）→ 单条也算；
+      · 只有零散时间码 → 至少 2 条才算（一条时间点不足以构成字幕稿）；
+      · 「（停顿 3 秒）」「【留白 2 秒】」这类静默标记里的数字先摘掉 ——
+        引导稿/冥想稿常写好几处停顿，不能因此被当成字幕稿。
+    """
+    head = _strip_pause_marks((text or "")[:4000])
     if not head:
         return False
-    # 只要有「时间码 + 箭头/波浪线」就按字幕稿处理（箭头写法五花八门：--> → ⇒ ~ 至）
-    return bool(re.search(r"(?:-{1,3}>|→|⇒|~|～|至|到)", head)
-                and _TC_RE.search(_tc_fold(head)))
+    if not _TC_RE.search(_tc_fold(head)):
+        return False
+    has_arrow = bool(re.search(r"-{1,3}>|⇒|→", head))
+    if has_arrow:
+        return True
+    try:
+        _cues, st = parse_timeline(head)
+        n = int(st.get("tc") or 0)
+    except Exception:  # noqa: BLE001
+        n = 0
+    return n >= 2
+
+
+def _strip_pause_marks(text):
+    """把「（停顿 3 秒）」「【静默 5s】」这类静默标记换成等长空白。
+
+    换空白而不是删掉：字符位置不变，后面按行号/偏移做的东西不受影响。
+    """
+    return PAUSE_ANY_RE.sub(lambda m: " " * len(m.group(0)), text or "")
 
 
 def _looks_fountain(text):
@@ -1281,7 +1413,8 @@ def detect(src, pairs=None):
         tc_ranges = sum(1 for c in src["cues"] if c.get("end") is not None)
     if not tc:
         try:
-            _cs, _st = parse_timeline(src.get("raw") or text)
+            # 静默标记里的「3 秒」不是时间码：先摘掉再数（否则引导稿会被判成字幕稿）
+            _cs, _st = parse_timeline(_strip_pause_marks(src.get("raw") or text))
             tc, tc_ranges = _st.get("tc", 0), _st.get("ranges", 0)
         except Exception:  # noqa: BLE001
             tc, tc_ranges = 0, 0
@@ -1309,6 +1442,11 @@ def detect(src, pairs=None):
             weak_lines += 1
     if weak_lines:
         quotes += weak_lines
+
+    meta_heads = 0
+    for l in (src.get("text") or src.get("raw") or "").split("\n")[:40]:
+        if SCRIPT_META_RE.match(l.strip()):
+            meta_heads += 1
 
     tag_hits, tag_kw = 0, 0
     for m in TAG_ANY_RE.finditer(text):
@@ -1345,6 +1483,9 @@ def detect(src, pairs=None):
     elif bare >= 2:
         s = min(0.92, 0.5 + 0.08 * min(5, bare))
         e.append(f"检测到 {bare} 处「短名字独占一行 + 紧跟台词」的剧本写法")
+    if meta_heads >= 2:
+        s = min(1.0, s + 0.2)
+        e.append(f"检测到 {meta_heads} 行剧本元信息（【场景】/【人物】/【字数】）")
     if scenes:
         s = min(1.0, s + 0.12)
         e.append(f"检测到 {scenes} 个场景头（INT./EXT./第 x 场）")
@@ -1409,6 +1550,7 @@ def detect(src, pairs=None):
         "ranked": [{"cls": c, "score": sc, "name": CLASS_MAP[c]["name"],
                     "icon": CLASS_MAP[c]["icon"]} for c, sc in ranked],
         "stats": {"lines": len(lines), "timecodes": tc, "tc_ranges": tc_ranges,
+                  "meta_heads": meta_heads,
                   "roles": len(roles),
                   "role_lines": role_colon, "bare_cues": bare, "scenes": scenes,
                   "quotes": quotes, "tags": tag_hits, "tag_kw": tag_kw,
@@ -1595,6 +1737,18 @@ def _script_blocks(text, styled=None, role_style="auto"):
     for idx, s in enumerate(norm):
         if not s:
             continue
+        # 【场景】/【人物】/【字数】…：元信息，不能当正文（尤其【人物】那行会被拆成台词）
+        mmeta = SCRIPT_META_RE.match(s)
+        if mmeta:
+            key, val = mmeta.group(1), (mmeta.group(2) or "").strip()
+            if key in ("场景", "地点"):
+                scene_val = val or s
+                blocks.append({"text": scene_val, "kind": "scene",
+                               "scene": scene_val, "chapter": chapter})
+            else:
+                blocks.append({"text": s, "kind": "meta", "meta": (key, val),
+                               "chapter": chapter})
+            continue
         style_name = (styled[idx].get("style") if styled and idx < len(styled) else "") or ""
         if "heading" in style_name or style_name.startswith("标题") or s.startswith("#"):
             chapter = s.lstrip("# ").strip()
@@ -1659,6 +1813,7 @@ def _plan_script(src, o):
     state = {"scene": None, "chapter": None}
     pending = []
     buf = None
+    characters = []
 
     def push(seg):
         g = seg["group"]
@@ -1715,6 +1870,17 @@ def _plan_script(src, o):
             if scene_note:
                 pending.append(f"场景：{raw}")
             continue
+        if bkind == "meta":
+            # 头部元信息：只说一次，不进正文（【人物】那行尤其不能当台词）
+            key, val = (b.get("meta") or ("", ""))
+            if key in ("人物", "角色", "人物表", "出场人物") and not characters:
+                characters = _parse_characters(val)
+            elif key in ("场景", "地点") and val and scene_note and not state["scene"]:
+                state["scene"] = val[:80]
+                pending.append(f"场景：{val[:80]}")
+            elif val and key in ("备注", "说明"):
+                pending.append(f"{key}：{val}"[:200])
+            continue
         if bkind == "action":
             if action_note and raw:
                 pending.append(raw)
@@ -1745,7 +1911,8 @@ def _plan_script(src, o):
     flush()
 
     out = _finish(groups, order)
-    return out, issues, {"blocks": len(blocks), "role_style": role_style}
+    return out, issues, {"blocks": len(blocks), "role_style": role_style,
+                         "characters": characters}
 
 
 # ---------------------------------------------------------------- 小说类
@@ -2408,4 +2575,10 @@ def plan(src, cls=None, opts=None):
         "issues": issues[:200],
         "stats": stats,
         "opts": cfg,
+        # 剧本头部【人物】解析出来的角色卡（前端导入预览可一键建人物）
+        "characters": extra.get("characters") or [],
+        # 原文头部（【场景】【人物】这类）：前端「原文本预览」要能一字不差地看到。
+        # 只取正文开始之前的那几行 —— 不能取「前 N 行」，否则正文会重复出现一次。
+        "source_head": _source_head(src, groups),
+        "script_meta": (_script_meta(src) if cid in ("script", "novel") else {}),
     }

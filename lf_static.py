@@ -17,8 +17,8 @@ import os
 # 打包脚本（tools/make_patch.py）和测试只用到 asset_files / missing_required，
 # 它们跑在没装 fastapi 的轻量环境里；serve_asset 内部再导入即可。
 
-# 两个页面都要用的脚本（工作台的「中立层」：生成参数字段表 + 预设控件）
-CORE_ASSETS = ("emoctl.js", "genparams.js")
+# 各页面都要用的脚本（中立层：生成参数字段表 / 预设控件 / 素材文件夹组件）
+CORE_ASSETS = ("emoctl.js", "genparams.js", "libfolders.js")
 
 # 各页自己的资源。`"前缀.*"` 表示「这个前缀下的都放行」。
 # 注意：**页面自己的 .html 也要列进来** —— 打包清单就是读这里生成的，
@@ -27,6 +27,8 @@ CORE_ASSETS = ("emoctl.js", "genparams.js")
 PAGE_ASSETS = {
     "longform": ("longform.html", "longform.js", "longform.css"),
     "timeline": ("timeline.*",),
+    # 高级音效处理台：独立页面（从素材导入台点进来），资源全在 sfxbench.* 下
+    "sfxbench": ("sfxbench.*",),
 }
 
 # 每个页面必须有这几类资源，缺一个就说明白名单写漏了（打包前会硬校验）

@@ -1221,3 +1221,9 @@ html[data-theme="dark"] .bulkbar { box-shadow: 0 8px 24px rgba(0, 0, 0, .5); }
 }
 .markerrow .mi, .markerrow .mt, .markerrow .mpin, .markerrow .mfromtag { flex: none; }
 .mbulk-btns .btn { white-space: nowrap; }
+
+/* 素材库的文件夹条（与工作台 / 音效台共用组件 libfolders.js） */
+#mediaFolders:empty { display: none; }
+#mediaFolders { margin: 2px 0 4px; }
+#mediaFolders .lfb-crumb { font-size: 10.5px; }
+#mediaFolders .lfb-chip { padding: 4px 7px; font-size: 10px; }

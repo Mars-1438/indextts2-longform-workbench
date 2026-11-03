@@ -17,6 +17,7 @@
 import io
 import math
 import os
+import re
 import shutil
 import time
 import uuid
@@ -42,7 +43,8 @@ from longform_api import (
     _load_materials, _load_script, _load_settings, _log, _lf_root, _mat_add_from_audio, _mat_dir,
     _merge_runtime, _new_uid, _normalize_line, _now, _read_audio_any, _read_json,
     _safe_sid, _safe_title, _save_script, _script_dir, _start_render, _usable,
-    _UIDS_RE, _write_json, resolve_ref, sfx_item, sfx_path_of,
+    _UIDS_RE, _write_json, resolve_ref, sfx_item, sfx_path_of, _sfxb_job,
+    _sfxb_proc, _num_name, _pad_width, _nat_key,
 )
 
 try:
@@ -980,6 +982,353 @@ def _initial_timeline(sid):
         table[line.get("uid")] = (round(cursor, 4), round(base_dur, 4))
         cursor += base_dur + int(_eff(line, script)["pause"]) / 1000.0
     return table
+
+
+def _orig_points(script, clips):
+    """(原片时间 → 当前时间轴时间) 的锚点，**只用每行的起点**。
+
+    为什么不用"行尾 = start + dur"：没生成中文时，行 dur 是按字数估的（5 个字 ≈ 1s），
+    拿它当锚点会把一句 6 秒的日文映射成 1 秒（实测压缩比 0.167，音效全挤在开头）。
+    起点是可靠的（打轴/导入给的就是它），句内位置就按相邻两句的起点线性过渡。
+    """
+    by_uid = {c.get("uid"): c for c in clips
+              if c.get("kind") == "voice" and c.get("uid")}
+    pts = []
+    for ln in script.get("lines") or []:
+        if ln.get("kind") == "tag":
+            continue
+        c = by_uid.get(ln.get("uid"))
+        t0 = ln.get("t0")
+        if c is None or t0 is None:
+            continue
+        try:
+            pts.append((float(t0), float(c["start"])))
+        except (TypeError, ValueError, KeyError):
+            continue
+    if not pts:
+        return []
+    pts.sort()
+    out = []
+    for a, b in pts:
+        if out and a - out[-1][0] < 0.05:
+            continue                      # 同一时刻两行（拆分句）：保留先到的
+        out.append((a, b))
+    if out[0][0] > 0.05:
+        # 第一句之前还有内容（片头）：按同样的偏移往前推，别从 0 突然开始
+        out.insert(0, (0.0, out[0][1] - out[0][0]))
+    return out
+
+
+def _map_orig(t, pts):
+    """原片时间 → 新时间。锚点区间内按局部斜率（句子越短压得越狠），区间外按 1:1 外推。"""
+    if not pts:
+        return None
+    if t <= pts[0][0]:
+        return pts[0][1] + (t - pts[0][0])
+    if t >= pts[-1][0]:
+        return pts[-1][1] + (t - pts[-1][0])
+    for (a0, b0), (a1, b1) in zip(pts, pts[1:]):
+        if a0 <= t <= a1:
+            if a1 - a0 < 1e-6:
+                return b0
+            return b0 + (t - a0) * (b1 - b0) / (a1 - a0)
+    return pts[-1][1]
+
+
+def _cue_units(script, clips):
+    """把台本的行按「字幕条」分组，并带上这条字幕在时间轴上占的区间。
+
+    一条 SRT 字幕被拆成几行时，这些行的 t0/t1 完全一样（导入时就是这么写的），
+    所以按 t0 聚回一条：文本拼起来、t1 取最大、时间轴区间取这些片段的首尾。
+    返回的每一项：
+      {t0, t1, tl0, tl1, idx, uids, text, dur_o, dur_t}
+    dur_o = 原音里这条字幕多长，dur_t = 中文时间轴上这条字幕多长。
+    """
+    by_uid = {c.get("uid"): c for c in clips
+              if c.get("kind") == "voice" and c.get("uid")}
+    units, cur = [], None
+    for i, ln in enumerate(script.get("lines") or []):
+        if ln.get("kind") == "tag":
+            continue
+        c = by_uid.get(ln.get("uid"))
+        t0 = ln.get("t0")
+        if c is None or t0 is None:
+            continue
+        try:
+            t0 = float(t0)
+            tl0 = float(c.get("start") or 0)
+            tld = float(c.get("dur") or 0)
+        except (TypeError, ValueError):
+            continue
+        t1 = ln.get("t1")
+        try:
+            t1 = float(t1) if t1 is not None else None
+        except (TypeError, ValueError):
+            t1 = None
+        if t1 is not None and t1 <= t0 + 0.02:
+            t1 = None
+        text = (ln.get("text") or "").strip()
+        if cur is not None and abs(t0 - cur["t0"]) < 0.05:
+            cur["idx"].append(i + 1)
+            cur["uids"].append(ln.get("uid"))
+            cur["tl1"] = max(cur["tl1"], tl0 + tld)
+            if t1 is not None:
+                cur["t1"] = max(cur["t1"] or t1, t1)
+            if text:
+                cur["text"] = (cur["text"] + "\n" + text).strip()
+            continue
+        cur = {"t0": t0, "t1": t1, "tl0": tl0, "tl1": tl0 + tld,
+               "idx": [i + 1], "uids": [ln.get("uid")], "text": text}
+        units.append(cur)
+    for u in units:
+        u["dur_o"] = (u["t1"] - u["t0"]) if u["t1"] is not None else 0.0
+        u["dur_t"] = max(0.0, u["tl1"] - u["tl0"])
+    return units
+
+
+def _cue_key(text):
+    """字幕文本的比对键：去掉标点/空白/括号，只留字。"""
+    return re.sub(r"[\s，。！？、,.!?；;：:\"'“”‘’()（）\[\]【】<>《》…—-]", "", str(text or ""))
+
+
+def _cue_align(src_cues, units):
+    """把「处理台里载入的字幕」和「工程里的字幕条」对齐。
+
+    返回 (idx_map, info)：
+      idx_map[i] = 第 i 条源字幕对应的工程字幕下标（None = 对不上）
+      info = {mode, src, dst, matched, text_ratio, same_times}
+
+    为什么要对齐而不是直接拿绝对时间算：
+    处理台载入的 srt 可能是**别的版本**（重新断句、整体前移/后移、甚至是从本工程
+    导出再改过的），它的 t0/t1 和工程的 t0/t1 根本不是一个坐标系。这时候按绝对时间
+    映射，音效会整体漂到别的句子上去 —— 用户反馈的「本来跟着第 12 句，换音色后
+    跑到别处」就是这么来的。序号 + 文本对得上时，两边的第 i 条就是同一句话。
+    """
+    n_src, n_dst = len(src_cues or []), len(units or [])
+    info = {"mode": "time", "src": n_src, "dst": n_dst, "matched": 0,
+            "text_ratio": 0.0, "offset": 0.0}
+    if not n_src or not n_dst:
+        return None, info
+
+    # 两边时间码是不是同一个坐标系：逐条 t0 差值的中位数（用来提示「字幕可能不是同一份」）
+    try:
+        diffs = sorted(float(src_cues[i].get("t0") or 0) - float(units[i].get("t0") or 0)
+                       for i in range(min(n_src, n_dst)))
+        info["offset"] = round(diffs[len(diffs) // 2], 3) if diffs else 0.0
+    except (TypeError, ValueError):
+        info["offset"] = 0.0
+
+    src_keys = [_cue_key(c.get("text")) for c in src_cues]
+    dst_keys = [_cue_key(u.get("text")) for u in units]
+
+    # ① 条数一样：直接按序号（最常见，也最稳）
+    if n_src == n_dst:
+        same = sum(1 for a, b in zip(src_keys, dst_keys)
+                   if a and b and (a == b or a in b or b in a))
+        ratio = same / float(n_dst or 1)
+        info.update({"mode": "index", "matched": n_dst, "text_ratio": round(ratio, 3)})
+        return list(range(n_dst)), info
+
+    # ② 条数不同：按文本逐条找（顺序不动的前提下做贪心匹配）
+    idx_map, j, matched = [], 0, 0
+    for i, k in enumerate(src_keys):
+        hit = None
+        for step in range(0, max(1, n_dst - j)):
+            jj = j + step
+            if jj >= n_dst:
+                break
+            dk = dst_keys[jj]
+            if k and dk and (k == dk or k in dk or dk in k):
+                hit = jj
+                break
+        idx_map.append(hit)
+        if hit is not None:
+            matched += 1
+            j = hit + 1
+    ratio = matched / float(n_src or 1)
+    info.update({"mode": "text" if ratio >= 0.5 else "time",
+                 "matched": matched, "text_ratio": round(ratio, 3)})
+    if ratio < 0.5:
+        return None, info          # 文本也对不上 → 退回纯时间映射
+    return idx_map, info
+
+
+def _map_cue(t, src_cues, units, idx_map=None, pre=0.25):
+    """原片时间 → (时间轴时间, 说明)：按「第几条字幕」对位。
+
+    和 _map_sentence 的区别：那个用**工程自己的** t0/t1 判「t 在哪句」，
+    要求两边时间码同源；这里用**载入的那份字幕**判句子，再按序号找到工程里对应的
+    那条，所以字幕整体平移 / 重新断句也不会串句。
+
+    pre：允许音效比台词早起 0.25 秒（呼气、开门声常压在台词前面），仍算同一句。
+    """
+    if not src_cues or not units:
+        return None, {"kind": "none"}
+    n = min(len(src_cues), len(units))
+    idx_map = idx_map or list(range(n))
+
+    def _unit_at(i):
+        j = idx_map[i] if i < len(idx_map) else None
+        if j is None or j >= len(units):
+            return None
+        return units[j]
+
+    # ① 句内（含 0.25s 预卷）
+    for i in range(n):
+        c = src_cues[i]
+        try:
+            c0, c1 = float(c.get("t0") or 0), float(c.get("t1") or 0)
+        except (TypeError, ValueError):
+            continue
+        if c1 <= c0 + 0.02:
+            continue
+        if not (c0 - pre <= t <= c1 + 1e-3):
+            continue
+        u = _unit_at(i)
+        if u is None:
+            continue
+        off = max(-pre, min(t - c0, c1 - c0))
+        ratio = (u["dur_t"] / (c1 - c0)) if (c1 - c0) > 0.05 else 1.0
+        at = u["tl0"] + off * ratio
+        at = min(max(at, u["tl0"]), max(u["tl0"], u["tl1"]))
+        return at, {"kind": "in", "cue": i + 1, "prev": u, "offset": round(off, 3),
+                    "ratio": round(ratio, 3)}
+
+    # ② 句间空档：按前后两条字幕的边界插值
+    prev_i = nxt_i = None
+    for i in range(n):
+        try:
+            if float(src_cues[i].get("t0") or 0) <= t:
+                prev_i = i
+            elif nxt_i is None:
+                nxt_i = i
+        except (TypeError, ValueError):
+            continue
+    if prev_i is not None and nxt_i is not None:
+        u0, u1 = _unit_at(prev_i), _unit_at(nxt_i)
+        c0, c1 = src_cues[prev_i], src_cues[nxt_i]
+        if u0 is not None and u1 is not None:
+            try:
+                e0 = float(c0.get("t1") or 0)
+                s1 = float(c1.get("t0") or 0)
+            except (TypeError, ValueError):
+                e0 = s1 = 0.0
+            gap_o = s1 - e0
+            gap_t = u1["tl0"] - u0["tl1"]
+            ratio = (gap_t / gap_o) if gap_o > 0.05 else 1.0
+            at = u0["tl1"] + (t - e0) * ratio
+            return at, {"kind": "gap", "cue": prev_i + 1, "prev": u0, "next": u1,
+                        "offset": round(t - e0, 3), "ratio": round(ratio, 3)}
+
+    # ③ 片头 / 片尾：贴着首尾那条，1:1 平移
+    if prev_i is None and nxt_i is not None:
+        u = _unit_at(nxt_i)
+        if u is not None:
+            c0 = float(src_cues[nxt_i].get("t0") or 0)
+            return max(0.0, u["tl0"] - (c0 - t)), {
+                "kind": "head", "cue": nxt_i + 1, "next": u,
+                "offset": round(t - c0, 3), "ratio": 1.0}
+    if prev_i is not None:
+        u = _unit_at(prev_i)
+        if u is not None:
+            c1 = float(src_cues[prev_i].get("t1") or 0)
+            return u["tl1"] + (t - c1), {"kind": "tail", "cue": prev_i + 1, "prev": u,
+                                         "offset": round(t - c1, 3), "ratio": 1.0}
+    return None, {"kind": "none"}
+
+
+def _pick_timebase(want, total_src, src_cues, units):
+    """决定「素材的时间码是按哪一版音频算的」。
+
+    返回 (timebase, note)，timebase ∈ {orig, cue}。
+
+    两条路用的是**不同**的时间来源：
+      · cue  → 用「处理台里载入的字幕」定位第几条，再按序号找工程里那条。
+               前提：素材和载入的字幕同一版（都是原片，或都是工程混音）。
+      · orig → 直接用工程台本里的 t0/t1（那是**原片**的字幕时间，换音色不会改它）。
+               前提：素材是原片。
+
+    所以判断只需要问一句：素材总长更接近「载入字幕的末尾」还是「台本里的原片时间末尾」？
+      · 接近字幕末尾      → 素材和字幕同源 → cue（按序号，最稳）
+      · 接近原片时间末尾  → 素材是原片，但载入的字幕不是原片那版 → orig + 提醒换字幕
+      · 都远              → 素材两版都不是（多半导错文件）→ orig 兜底 + 强警告
+
+    选错了的代价很大：实测换音色后 13 句里有 10 句落错位置，所以默认交给它自动判。
+    """
+    if want in ("orig", "cue"):
+        return want, "manual"
+    cue_end = max([float(c.get("t1") or 0) for c in (src_cues or [])] or [0.0])
+    # 台本里的原片时间末尾：t1 优先，没有就 t0（换音色不会改这两个值）
+    orig_ends = []
+    for u in (units or []):
+        v = u.get("t1")
+        if v is None:
+            v = u.get("t0")
+        try:
+            orig_ends.append(float(v or 0))
+        except (TypeError, ValueError):
+            pass
+    orig_end = max(orig_ends or [0.0])
+    if total_src <= 0 or (cue_end <= 0 and orig_end <= 0):
+        return "orig", "no_info"
+    tol = max(1.0, total_src * 0.03)      # 3% / 至少 1 秒（导出多几百毫秒不算不同源）
+    d_cue = abs(total_src - cue_end) if cue_end > 0 else 9e9
+    d_orig = abs(total_src - orig_end) if orig_end > 0 else 9e9
+    if d_cue <= tol:
+        return "cue", ("both" if d_orig <= tol else "match_cue")
+    if d_orig <= tol:
+        return "orig", "match_orig"       # 素材是原片，但载入的字幕不是这一版
+    return "orig", "mismatch"
+
+
+def _map_sentence(t, units):
+    """原片时间 → (时间轴时间, 说明)。按「第几句 / 句内偏移 / 句间空档」来算。
+
+    和 _map_orig 的区别：那条用相邻两句的**起点**做分段线性，句内位置只是估计；
+    这里用每条字幕自己的 [t0,t1] × [片段起, 片段止] 做局部映射，
+    所以「第 12 句说到一半出现的关门声」能落在中文那一句的同一相对位置。
+
+    返回 (at, info)：info.kind 是 in / gap / head / tail，
+    并带上 prev / next（第几句、文本前 20 字）与 offset（相对这句起点或句尾）。
+    """
+    if not units:
+        return None, {"kind": "none"}
+    # 句内
+    for u in units:
+        if u["t1"] is None:
+            continue
+        if u["t0"] - 1e-3 <= t <= u["t1"] + 1e-3:
+            ratio = (u["dur_t"] / u["dur_o"]) if u["dur_o"] > 0.05 else 1.0
+            at = u["tl0"] + (t - u["t0"]) * ratio
+            return at, {"kind": "in", "prev": u, "offset": round(t - u["t0"], 3),
+                        "ratio": round(ratio, 3)}
+    # 句间 / 片头片尾
+    prev = None
+    nxt = None
+    for u in units:
+        if u["t0"] <= t:
+            prev = u
+        elif nxt is None:
+            nxt = u
+            break
+    if prev is not None and prev["t1"] is not None:
+        if nxt is not None and nxt["t0"] > prev["t1"] + 1e-3:
+            span_o = nxt["t0"] - prev["t1"]
+            span_t = nxt["tl0"] - (prev["tl1"] if prev["tl1"] > prev["tl0"] else prev["tl0"])
+            ratio = (span_t / span_o) if span_o > 0.05 else 1.0
+            at = prev["tl1"] + (t - prev["t1"]) * ratio
+            return at, {"kind": "gap", "prev": prev, "next": nxt,
+                        "offset": round(t - prev["t1"], 3), "ratio": round(ratio, 3)}
+        at = prev["tl1"] + (t - prev["t1"])
+        return at, {"kind": "tail", "prev": prev, "offset": round(t - prev["t1"], 3),
+                    "ratio": 1.0}
+    if nxt is not None:
+        at = nxt["tl0"] - (nxt["t0"] - t)
+        return at, {"kind": "head", "next": nxt, "offset": round(t - (nxt["t0"] or 0), 3),
+                    "ratio": 1.0}
+    u = units[0]
+    return u["tl0"] + (t - u["t0"]), {"kind": "head", "next": u,
+                                      "offset": round(t - u["t0"], 3), "ratio": 1.0}
 
 
 def _build(sid, script=None, project=None):
@@ -2769,7 +3118,7 @@ def register_timeline(app, deps=None):
         sid = _safe_sid(sid)
         d = _media_dir(sid)
         items = []
-        for fn in sorted(os.listdir(d)):
+        for fn in sorted(os.listdir(d), key=_nat_key):
             if not fn.lower().endswith((".wav", ".flac", ".ogg", ".mp3")):
                 continue
             path = os.path.join(d, fn)
@@ -2895,6 +3244,241 @@ def register_timeline(app, deps=None):
             p["sfx"] = [s for s in p["sfx"] if s["media"] != base]
             _write_json(_proj_path(sid), p)
         return {"ok": True}
+
+    @_LF.post("/lf/tl/{sid}/import-sfx")
+    def tl_import_sfx(sid: str, req: dict = Body(...)):
+        """把「音频处理台」的片段按**原始时间**插进时间轴。
+
+        和「拖进素材轨」的区别：这里会自动换算时间。原片 12.4 秒的关门声，
+        中文配完只剩 4 分钟的时候，它该落在哪儿？——按台本行 t0/t1 与片段 start/dur
+        组成的锚点表做映射。policy:
+          sentence（推荐）按「那条字幕」自己的 [t0,t1] → 中文片段的 [起,止] 局部映射，
+                   所以句内出现的音效落在同一相对位置；句间空档按前后两句插值；
+          follow 按所在句的起点分段线性（句内是估算，老逻辑保留）；
+          abs    按全片总时长比；snap 算完吸到句边界；
+          seq    不做换算，直接接在最后一条素材后面（工程没有原始时间码时的兜底）。
+
+        dry_run=true 只算不写：返回每一段会落在哪一句、偏移多少、目标时间是多少，
+        前端拿它做「对位预览」，确认后再发一次真正的写入 —— 只有一条实现路径，
+        预览和实际结果不可能对不上。
+        """
+        sid = _safe_sid(sid)
+        job = str(req.get("job") or "")
+        items = req.get("items") or []
+        # 默认保持老行为（follow），新客户端会显式传 sentence；
+        # 别让旧调用方/脚本因为默认值变了就悄悄换算法。
+        policy = str(req.get("policy") or "follow").lower()
+        if policy not in ("sentence", "follow", "abs", "snap", "seq"):
+            policy = "follow"
+        dry = bool(req.get("dry_run"))
+        meta = _sfxb_job(job)
+        if not meta:
+            raise HTTPException(404, "音频处理台的作业已过期，回去重新准备素材")
+        if not items:
+            raise HTTPException(400, "没有要插入的片段")
+
+        script = _load_script(sid)
+        proj = _load_project(sid)
+        built = _build(sid, script, proj)
+        clips = [c for t in built["tracks"] for c in t["clips"]]
+        pts = _orig_points(script, clips)
+        units = _cue_units(script, clips) if policy == "sentence" else []
+        if policy == "sentence" and not units:
+            raise HTTPException(400, "这个工程还没有带时间码的句子：先在台本里从 SRT 导入字幕，"
+                                     "或把换算方式改成「不做换算」")
+        # 处理台里载入的那份字幕（前端发过来）。按「第几条字幕」对位，
+        # 而不是拿绝对时间去比 —— 两份 srt 的时间码可能根本不是同一套。
+        src_cues = []
+        for c in (req.get("cues") or [])[:5000]:
+            if not isinstance(c, dict):
+                continue
+            try:
+                t0 = float(c.get("t0"))
+                t1 = float(c.get("t1"))
+            except (TypeError, ValueError):
+                continue
+            if t1 <= t0 + 0.005:
+                continue
+            src_cues.append({"t0": t0, "t1": t1, "text": str(c.get("text") or "")})
+        # 时间基准（素材的时间码是按哪一版音频算的）：
+        #   orig = 素材是**原片**，时间码和工程的 t0/t1 同一套 → 直接用工程句子定位；
+        #   cue  = 素材是**重新生成后**的音频，时间码跟处理台里载入的字幕同一套 →
+        #          先用载入的字幕定位「第几条」，再按序号找工程里那条（整句变长变短也不串句）。
+        # auto（默认）：拿「素材总长」去比「载入字幕的末尾」和「工程时间轴的末尾」，
+        #   谁近就是谁。这一步很关键 —— 用户根本分不清自己手上的素材是哪一版，
+        #   选错了会整段偏（实测换音色后 13 句里有 10 句落错位置）。
+        want_tb = str(req.get("timebase") or "auto").lower()
+        if want_tb not in ("orig", "cue", "auto"):
+            want_tb = "auto"
+        idx_map, align = (None, None)
+        if policy == "sentence" and src_cues:
+            idx_map, align = _cue_align(src_cues, units)
+        if policy not in ("seq", "sentence") and not pts:
+            raise HTTPException(400, "这个工程的台本没有原始时间码（不是从字幕/时间码导入的），"
+                                     "没法按原时间换算；先按「依次接在末尾」插入，或重新导入带时间码的台本")
+        # 总长只算语音：素材片段是"待插入的东西"，把它们算进去会让 abs 的系数
+        # 随每次插入而变大（实测第二次插入系数从 0.67 漂到 2.33）
+        voice_end = [c["start"] + c["dur"] for c in clips if c.get("kind") == "voice"]
+        new_total = max(voice_end + [0.0]) or max([c["start"] + c["dur"] for c in clips] + [0.0])
+        orig_total = max([a for a, _ in pts] + [0.0]) if pts else 0.0
+        k_abs = (new_total / orig_total) if orig_total > 0 else 1.0
+
+        sfx_ids = [t["id"] for t in proj["tracks"] if t.get("kind") == "sfx"] or ["sfx"]
+        track = str(req.get("track") or sfx_ids[0])
+        if track not in sfx_ids:
+            track = sfx_ids[0]
+
+        data, sr = _read_audio_any(meta["wav"])
+        if data.ndim == 1:
+            data = data[:, None]
+        total_src = len(data) / float(sr or SR)
+
+        # 定「素材时间」：拿素材总长去比两边的末尾，谁近算谁的。
+        timebase, tb_note = _pick_timebase(want_tb, total_src, src_cues, units)
+        if align is not None:
+            align["timebase"] = timebase
+            align["timebase_auto"] = (want_tb == "auto")
+            align["timebase_note"] = tb_note
+            align["src_dur"] = round(total_src, 2)
+            if units:
+                # orig_end = 台本里的原片时间末尾；axis_end = 新音频铺出来的时间轴末尾
+                align["orig_end"] = round(max(
+                    [float(u.get("t1") or u.get("t0") or 0) for u in units] or [0]), 2)
+                align["axis_end"] = round(max([u.get("tl1") or 0 for u in units] or [0]), 2)
+            if src_cues:
+                align["cue_end"] = round(max([c.get("t1") or 0 for c in src_cues] or [0]), 2)
+
+        # seq 的起点：现有素材片段的最右端
+        seq_at = max([float(s.get("start") or 0) + float(s.get("dur") or 0)
+                      for s in proj.get("sfx") or []] + [0.0])
+        bounds = [b for _, b in pts]
+        made, skipped = [], 0
+
+        def _brief(u):
+            if not u:
+                return None
+            txt = (u.get("text") or "").replace("\n", " ").strip()
+            return {"idx": (u.get("idx") or [None])[0], "idx_all": u.get("idx"),
+                    "text": (txt[:28] + ("…" if len(txt) > 28 else "")),
+                    "t0": round(u.get("t0") or 0, 2), "t1": round(u.get("t1") or 0, 2) if u.get("t1") is not None else None,
+                    "tl0": round(u.get("tl0") or 0, 3), "tl1": round(u.get("tl1") or 0, 3),
+                    "dur_o": round(u.get("dur_o") or 0, 2), "dur_t": round(u.get("dur_t") or 0, 2)}
+
+        for k, it in enumerate(items):
+            try:
+                a = max(0.0, float(it.get("start") or 0))
+                b = min(total_src, float(it.get("end") or 0))
+            except (TypeError, ValueError):
+                skipped += 1
+                continue
+            if b - a < 0.02:
+                skipped += 1
+                continue
+            seg = data[int(a * sr):int(b * sr)]
+            if not len(seg):
+                skipped += 1
+                continue
+            try:
+                seg, sr_out, labels = _sfxb_proc(seg, sr, it.get("ops"))
+            except Exception as e:  # noqa: BLE001
+                _log("timeline: import-sfx proc failed %.2f: %s", a, e, level="warning")
+                skipped += 1
+                continue
+            if not len(seg):
+                skipped += 1
+                continue
+            dur = len(seg) / float(sr_out or sr)
+            seq_info = None
+            override = it.get("at")
+            if override not in (None, ""):
+                try:
+                    at = max(0.0, float(override))
+                    ratio = 1.0
+                    seq_info = {"kind": "manual", "prev": None, "next": None,
+                                "offset": 0.0, "ratio": 1.0}
+                except (TypeError, ValueError):
+                    override = None
+            snapped = False
+            if override in (None, ""):
+                if policy == "seq":
+                    at = seq_at
+                    seq_at += dur + 0.05
+                    ratio = 1.0
+                    seq_info = {"kind": "seq", "prev": None, "next": None,
+                                "offset": 0.0, "ratio": 1.0}
+                elif policy == "abs":
+                    at = a * k_abs
+                    ratio = k_abs
+                    seq_info = {"kind": "abs", "prev": None, "next": None,
+                                "offset": 0.0, "ratio": round(k_abs, 3)}
+                elif policy == "sentence":
+                    if timebase == "cue" and src_cues and idx_map is not None:
+                        at, info = _map_cue(a, src_cues, units, idx_map)
+                    else:
+                        at, info = _map_sentence(a, units)
+                    at = at if at is not None else 0.0
+                    ratio = info.get("ratio") or 1.0
+                    seq_info = {"kind": info.get("kind"), "prev": _brief(info.get("prev")),
+                                "next": _brief(info.get("next")),
+                                "offset": info.get("offset") or 0.0,
+                                "ratio": info.get("ratio") or 1.0}
+                else:
+                    at = _map_orig(a, pts)
+                    # 老接口返回的 ratio 是「这一段原时间被压缩了多少」，保留给调用方看
+                    try:
+                        ratio = (((_map_orig(b, pts) or at) - at) / (b - a)) if b > a else 1.0
+                    except Exception:  # noqa: BLE001
+                        ratio = 1.0
+                    seq_info = {"kind": "follow", "prev": None, "next": None,
+                                "offset": 0.0, "ratio": round(ratio, 3)}
+                if policy == "snap" and bounds:
+                    near = min(bounds, key=lambda x: abs(x - at))
+                    if abs(near - at) <= 0.4:
+                        at, snapped = near, True
+                    seq_info["snapped"] = snapped
+            at = max(0.0, round(float(at), 4))
+
+            # 编号位数跟着「这一批几段」走：%02d 会在第 100 段变成 _100，
+            # 按名字排序就插到 _10 后面（合并素材时顺序全乱）
+            name = "sfxb_%s_%s.wav" % (job[:8], _num_name("", k + 1, len(items)).lstrip("_"))
+            item_id = None
+            if not dry:
+                dst = os.path.join(_media_dir(sid), name)
+                try:
+                    sf.write(dst, np.clip(seg, -1, 1), int(sr_out or sr), subtype="PCM_16")
+                except Exception as e:  # noqa: BLE001
+                    _log("timeline: import-sfx write failed %s: %s", name, e, level="warning")
+                    skipped += 1
+                    continue
+                item = {"id": _new_uid(), "media": name,
+                        "name": str(it.get("name") or "").strip()[:60],
+                        "start": at, "dur": round(dur, 4), "track": track,
+                        "gain": 1.0, "pan": 0.0, "offset": 0.0,
+                        "orig": {"t0": round(a, 3), "t1": round(b, 3), "policy": policy}}
+                proj.setdefault("sfx", []).append(item)
+                item_id = item["id"]
+            made.append({"i": k, "id": item_id, "start": at, "dur": round(dur, 4),
+                         "orig": {"t0": round(a, 3), "t1": round(b, 3), "policy": policy},
+                         "ratio": round(ratio, 3) if ratio else 1.0,
+                         "snapped": bool(snapped), "labels": labels, "map": seq_info,
+                         "warn": bool(ratio and (ratio < 0.7 or ratio > 1.3))})
+
+        if not made:
+            raise HTTPException(400, "这些片段都太短或超出素材范围，没有可插入的东西")
+        if dry:
+            return {"ok": True, "dry": True, "count": len(made), "skipped": skipped,
+                    "policy": policy, "units": len(units), "anchors": len(pts),
+                    "align": align, "warn": sum(1 for m in made if m["warn"]),
+                    "items": made}
+        proj["duration"] = max(float(proj.get("duration") or 0),
+                              max(x["start"] + x["dur"] for x in made))
+        _save_project(sid, proj)
+        _log("timeline: import-sfx %s -> %d 段（%s，锚点 %d，句 %d）",
+             sid, len(made), policy, len(pts), len(units))
+        return {"ok": True, "dry": False, "count": len(made), "skipped": skipped,
+                "policy": policy, "units": len(units), "anchors": len(pts),
+                "align": align, "warn": sum(1 for m in made if m["warn"]),
+                "items": made}
 
     @_LF.post("/lf/tl/{sid}/media/from-sfx")
     def tl_media_from_sfx(sid: str, req: dict = Body(...)):
@@ -3174,7 +3758,8 @@ def register_timeline(app, deps=None):
                             tag += f"_x{c['speed']:.2f}"
                         # 倒放已移除
                         if include_audio:
-                            fname = (f"{c['index']:04d}_"
+                            wpad = _pad_width(len(script.get("lines") or []), 4)
+                            fname = (f"{int(c['index'] or 0):0{wpad}d}_"
                                      f"{_safe_title((c['text'] or '')[:22], 'line')}{tag}.wav")
                             dst = os.path.join(stage, "audio", fname)
                             if not os.path.exists(dst):

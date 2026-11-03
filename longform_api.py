@@ -33,6 +33,7 @@ import io
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import shutil
@@ -71,10 +72,22 @@ DEFAULT_PAUSE = 200         # 行间默认停顿（毫秒）
 PAUSE_MIN, PAUSE_MAX = 0, 30000   # 停顿上限 30s：正念 / 引导稿里「停顿 10 秒」要能落下来
 HOLD_MAX = 30000            # 标签行留白上限（毫秒）
 MAX_LINE_CHARS = 400
+MAX_RAW_ORIGIN = 4 * 1024 * 1024   # 「导入原稿」原样存一份（够 100 万字左右的中文）
 HISTORY_KEEP = 20            # 每个台本保留的历史副本数
 
+# 句中 / 句间「音效标签」的内置预设。只是**候选**，不是硬编码：
+# 用户可以在「设置 → 标签库」里增删（内置的删掉会记进 hidden，不再出现在候选里）。
 DEFAULT_TAGS = ["音效1", "音效2", "音效3", "摩擦音", "揉捏", "呼吸", "耳语",
-                "亲吻", "翻页", "水声", "衣物摩擦", "留白"]
+                "亲吻", "翻页", "水声", "衣物摩擦", "留白",
+                "脚步", "开门", "关门", "雨声", "风声", "心跳",
+                "叹气", "笑声", "吞咽", "拍打", "震动", "铃铛",
+                "玻璃", "转场", "BGM"]
+
+# 音色 / 人物用的「属性标签」预设（傲娇、冰山美人这类）。
+TRAIT_PRESETS = ["傲娇", "冰山美人", "温柔", "清冷", "活泼", "元气", "病娇", "腹黑",
+                 "天然呆", "成熟御姐", "少年音", "少女音", "正太", "大叔", "老人",
+                 "童声", "旁白", "群杂", "解说", "机械音", "气声", "低沉", "清亮",
+                 "沙哑", "慵懒", "严肃", "甜"]
 
 _UIDS_RE = re.compile(r"[^0-9a-zA-Z_-]")
 _SAFE_NAME_RE = re.compile(r'[\\/:*?"<>|\r\n\t]+')
@@ -82,6 +95,42 @@ _SAFE_NAME_RE = re.compile(r'[\\/:*?"<>|\r\n\t]+')
 _LOCK = threading.RLock()
 _RENDERS = {}
 _ACTIVE = {"sid": None}
+
+# 批量入库上下文：一次存几百上千个片段时，如果每个片段都「读整份索引 + 写整份索引」，
+# 耗时是 O(n²)（实测 5 段 78ms/段，100 段已经 1.3s/段）。这里在一个线程里把索引
+# 缓存在内存，循环结束再落一次盘 —— 1000 段从十几分钟降到几秒。
+_BATCH = threading.local()
+
+
+def _batch_idx(kind):
+    """批量入库时返回共享索引；不在批量里就返回 None。"""
+    return getattr(_BATCH, kind, None)
+
+
+def _batch_begin():
+    """开始一批：把三个库的索引读进内存（惰性，用到哪个读哪个也行，这里先都读）。"""
+    _BATCH.media = _load_materials()
+    _BATCH.sfx = _load_sfx()
+    _BATCH.refs = _load_refs()
+
+
+def _batch_commit():
+    """结束一批：把改动过的索引落盘一次。异常路径也要调（放在 finally）。"""
+    def _save_refs_idx(idx):
+        _write_json(_refs_index_path(), idx)
+
+    for kind, save in (("media", _save_materials), ("sfx", _save_sfx),
+                       ("refs", _save_refs_idx)):
+        idx = getattr(_BATCH, kind, None)
+        if idx is not None:
+            try:
+                save(idx)
+            except Exception as e:  # noqa: BLE001
+                _log("longform: batch save %s failed: %s", kind, e, level="warning")
+            try:
+                delattr(_BATCH, kind)
+            except AttributeError:
+                pass
 
 
 # ================================ 基础工具 =====================================
@@ -121,6 +170,28 @@ def _script_dir(sid: str) -> str:
 def _safe_title(name: str, fallback="台本") -> str:
     name = _SAFE_NAME_RE.sub("", str(name or "")).strip().strip(".")
     return name[:60] or fallback
+
+
+# ---------------------------- 批量编号 / 按名字排序 ----------------------------
+# 一次存 / 导上百个文件时，名字里的序号必须**按总数补够位**：
+# `_01 … _99 _100` 这种两位补零，按字符串排会变成 01,02,…,100,101,…,109,11,110…
+# 用户看到的就是「到第 100 个跳过去了」——外部软件（剪映 / PR）合并素材也是按名字排的，
+# 所以位数不够等于把顺序搞乱。这里统一用「按总数算位数」，2 位起步、上不封顶。
+def _pad_width(total: int, min_w: int = 2) -> int:
+    n = max(1, int(total or 0))
+    return max(int(min_w), len(str(n)))
+
+
+def _num_name(base: str, k: int, total: int, min_w: int = 2, sep: str = "_") -> str:
+    """`原音` + 1 / 1000 → `原音_0001`（位数跟着总数走，永远能按名字排序）。"""
+    return "%s%s%0*d" % (base, sep, _pad_width(total, min_w), int(k))
+
+
+def _nat_key(name: str):
+    """自然排序键：名字里的数字按数值比（1,2,10 而不是 1,10,2）。"""
+    s = str(name or "")
+    return [(0, int(t)) if t.isdigit() else (1, t.lower())
+            for t in re.split(r"(\d+)", s) if t != ""]
 
 
 # JSON 落盘：唯一临时名 + 串行化 + 重试
@@ -491,6 +562,419 @@ def _save_materials(idx):
     _write_json(_mat_index_path(), idx)
 
 
+# ---------------------------- 置顶（三个库共用） ----------------------------
+# 置顶只改排序，不动文件：pin 存成时间戳，谁最后置顶谁排最前（可以置顶多个）。
+# 三个库（音色 / 音效 / 导入台素材）共用同一套字段和排序，所以时间轴页读同一份
+# 索引时也是置顶在前，不用在那边再写一遍。
+_PIN_KINDS = ("refs", "sfx", "media")
+
+
+def _pin_sort(items):
+    """置顶的在前（后置顶的更靠前），其余按创建时间倒序。"""
+    return sorted(items, key=lambda x: (-(float(x.get("pin") or 0)),
+                                        -(float(x.get("created") or 0))))
+
+
+# ---------------------------- 素材文件夹（三个库共用） ----------------------------
+# 文件夹**只是索引里的一个字符串字段** `items[].folder`（例如 "ASMR/喘息"），不搬文件。
+# 这么做的好处：移动/改名是改一个字段，不会因为 os.replace 失败留下半套数据；
+# 删文件夹也绝不会删音频 —— 里面的素材回到「未归档」，随时能重新归类。
+# 三个库（音色 refs / 音效 sfx / 导入台 media）共用同一套字段与接口，
+# 所以工作台、时间轴、音效台看到的目录结构完全一致。
+_FOLDER_MAX_LEN = 120
+_FOLDER_MAX_DEPTH = 5
+_FOLDER_MAX_COUNT = 300
+
+
+def _norm_folder(path):
+    """规范化文件夹路径：统一斜杠、去掉空段与 . / ..、限深限长。
+
+    只保留「相对路径」语义 —— 绝对路径、盘符、.. 全被压掉，避免前端传进来
+    一个能穿出库目录的字符串（虽然文件夹字段不参与文件系统操作，但脏数据
+    会让目录树长得莫名其妙）。
+    """
+    s = str(path or "").replace("\\", "/").strip()
+    parts = []
+    for raw in s.split("/"):
+        p = raw.strip()
+        if not p or p in (".", ".."):
+            continue
+        p = re.sub(r'[\\:*?"<>|\x00-\x1f]+', "_", p).strip(" .")
+        if not p:
+            continue
+        parts.append(p[:32])
+        if len(parts) >= _FOLDER_MAX_DEPTH:
+            break
+    return "/".join(parts)[:_FOLDER_MAX_LEN]
+
+
+def _folder_paths(idx):
+    """索引里登记过的文件夹 + 条目上实际出现过的（老数据没登记也认）。"""
+    out = set()
+    for f in idx.get("folders") or []:
+        p = _norm_folder(f.get("path") if isinstance(f, dict) else f)
+        if p:
+            out.add(p)
+    for it in idx.get("items") or []:
+        p = _norm_folder(it.get("folder"))
+        if p:
+            out.add(p)
+    # 补父级：有 a/b 就一定有 a，目录树不会出现"孤儿深层目录"
+    for p in list(out):
+        parts = p.split("/")
+        for i in range(1, len(parts)):
+            out.add("/".join(parts[:i]))
+    return out
+
+
+def _folder_list(idx):
+    """给前端的目录清单（count 是**直属**数量，子目录另算）。"""
+    counts = {}
+    for it in idx.get("items") or []:
+        p = _norm_folder(it.get("folder"))
+        if p:
+            counts[p] = counts.get(p, 0) + 1
+    out = []
+    for p in sorted(_folder_paths(idx)):
+        out.append({"path": p, "name": p.split("/")[-1],
+                    "parent": p.rsplit("/", 1)[0] if "/" in p else "",
+                    "depth": p.count("/"), "count": counts.get(p, 0)})
+    return out
+
+
+def _store_folders(idx, paths):
+    idx["folders"] = [{"path": p} for p in sorted(paths if isinstance(paths, set) else set(paths))]
+
+
+def _load_kind_idx(kind):
+    if kind == "refs":
+        return _load_refs()
+    if kind == "sfx":
+        return _load_sfx()
+    return _load_materials()
+
+
+def _save_kind_idx(kind, idx):
+    if kind == "refs":
+        _write_json(_refs_index_path(), idx)
+    elif kind == "sfx":
+        _save_sfx(idx)
+    else:
+        _save_materials(idx)
+
+
+# ---------------------------- 高级音效处理台 ----------------------------
+# 独立页面 /sfxbench：一段音声「去掉人声 → 按声音事件切成一堆音效 → 挑一部分入库」。
+#
+# 为什么要落盘一个作业目录 longform/sfxb/<job>/source.wav：
+# 分离 30 分钟素材要几十秒到几分钟，而切分参数（最小间隔/门限/最小时长）是要反复试的。
+# 分离只做一次、结果落盘，之后每次调参只读这一个 wav，改一个数字立刻看到新分段。
+_SFXB_KEEP = 8                      # 只留最近几个作业（源音频动辄几十 MB）
+_SFXB = {"jobs": {}, "lock": threading.Lock()}
+
+
+def _sfxb_dir():
+    d = os.path.join(_lf_root(), "sfxb")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _sfxb_mono(x):
+    x = np.asarray(x, dtype="float32")
+    return x.mean(axis=1) if x.ndim > 1 else x
+
+
+def _sfxb_job(job):
+    """取作业元信息。内存里没有就回读 meta.json —— 进程重启后旧作业不该立刻作废。"""
+    j = str(job or "")
+    if not j:
+        return None
+    m = _SFXB["jobs"].get(j)
+    if m and os.path.exists(m.get("wav") or ""):
+        return m
+    p = os.path.join(_sfxb_dir(), j, "meta.json")
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            m = json.load(f)
+        if os.path.exists(m.get("wav") or ""):
+            _SFXB["jobs"][j] = m
+            return m
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _sfxb_gc(keep=None):
+    """按磁盘上作业目录的 mtime 清理，只留最近 keep 个。
+
+    以前只按内存字典记账 —— 进程一重启字典就空，旧目录永远留在盘上，
+    「只留 8 个」从第一天起就没生效过（实测积累到 16 个 / 361MB）。
+    这里每次 prepare 顺手扫一遍，删的是最旧的几个，不批量删。
+    """
+    keep = int(keep or _SFXB_KEEP)
+    root = _sfxb_dir()
+    try:
+        dirs = [os.path.join(root, d) for d in os.listdir(root)
+                if os.path.isdir(os.path.join(root, d))]
+        dirs.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    except OSError:
+        return
+    for p in dirs[keep:]:
+        if _rm_tree(p, budget=1.0):
+            _SFXB["jobs"].pop(os.path.basename(p), None)
+
+
+_SFXB_OP_KEYS = ("trim_silence", "fade", "gain_db", "speed", "pitch",
+                 "normalize", "reverse", "denoise", "filter")
+
+
+def _sfxb_ops(ops):
+    """清洗片段级处理项。裁剪 / 分离 / 格式转换不在这里做 —— 切分已经给了范围。"""
+    if not isinstance(ops, dict):
+        return {}
+    out = {}
+    for k in _SFXB_OP_KEYS:
+        v = ops.get(k)
+        if v in (None, False, "", 0):
+            continue
+        if k in ("gain_db", "speed", "pitch"):
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                continue
+            if k == "speed" and abs(v - 1.0) < 1e-3:
+                continue
+            if k == "pitch" and abs(v) < 0.05:
+                continue
+            if k == "gain_db" and abs(v) < 0.05:
+                continue
+        elif k == "denoise":
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                continue
+            if v <= 0:
+                continue
+        elif k in ("fade", "filter", "normalize", "trim_silence"):
+            if not isinstance(v, dict) or not any(v.values()):
+                continue
+        out[k] = v
+    return out
+
+
+def _sfxb_proc(seg, sr, ops):
+    """片段 → 处理后的片段。返回 (data, sr, labels)；没有处理项时原样返回。"""
+    clean = _sfxb_ops(ops)
+    if not clean:
+        return seg, sr, []
+    data, sr2, labels = _apply_ops(seg, sr, clean)
+    return data, sr2, labels
+
+
+def _sfxb_env(x, sr, points=1400):
+    """给前端画总波形用的包络（每块的峰值）。不传整段音频，几十分钟也只有几 KB。"""
+    m = _sfxb_mono(x)
+    n = len(m)
+    if n == 0:
+        return []
+    block = max(1, n // points)
+    out = []
+    for i in range(0, n - block + 1, block):
+        out.append(round(float(np.abs(m[i:i + block]).max()), 4))
+    return out
+
+
+def _sfxb_db(x, sr, hop=0.02, win=0.04):
+    """逐帧 RMS（dB）。用前缀和算，几十分钟素材也不用等。"""
+    m = _sfxb_mono(x)
+    n = len(m)
+    h = max(1, int(hop * sr))
+    w = max(h, int(win * sr))
+    pad = w // 2
+    y = np.pad(m.astype(np.float64), (pad, pad), mode="constant")
+    c = np.concatenate(([0.0], np.cumsum(y * y)))
+    starts = np.arange(0, max(1, n), h)
+    a = starts
+    b = np.minimum(starts + w, len(y))
+    e = (c[b] - c[a]) / np.maximum(1, b - a)
+    return 10.0 * np.log10(np.maximum(e, 1e-12)), h
+
+
+def _sfxb_foreground(x, sr):
+    """减掉「稳态背景」：沿时间对每个频点取中位数当噪声床，只留事件。
+
+    连续雨声/风扇/空调这种床，在「按间隔切」里会把整段连成一片 —— 先把它拿走，
+    短促事件之间的间隔才浮得出来。切完还是从原音上取片段，不会把床真的删掉。
+    """
+    import librosa
+    m = _sfxb_mono(x)
+    S = librosa.stft(m, n_fft=1024, hop_length=256)
+    mag = np.abs(S)
+    bed = np.median(mag, axis=1, keepdims=True) * 1.25
+    fg = np.maximum(mag - bed, 0.0) * np.exp(1j * np.angle(S))
+    return librosa.istft(fg, hop_length=256, length=len(m)).astype("float32")
+
+
+def _sfxb_runs(x, sr, min_gap=0.35, thresh_db=10.0):
+    """找「连续有声段」（秒）。门限 = 底噪 + N dB，但至少低于峰值 6dB。"""
+    db, h = _sfxb_db(x, sr)
+    if not len(db):
+        return []
+    floor = float(np.percentile(db, 8))
+    top = float(np.percentile(db, 99.5))
+    # 连续声音（一整段音乐、一屋子雨声）里底噪≈峰值，只按「底噪+N」算会把整段判成静音、
+    # 一段都切不出来。所以再夹一道「至少低于峰值 6dB」。
+    thr = min(floor + float(thresh_db), top - 6.0)
+    active = db > thr
+    runs, i, N = [], 0, len(active)
+    while i < N:
+        if not active[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < N and active[j + 1]:
+            j += 1
+        runs.append([i * h, (j + 1) * h])
+        i = j + 1
+    merged = []
+    gap_n = max(0.0, float(min_gap)) * sr
+    for a, b in runs:
+        if merged and (a - merged[-1][1]) < gap_n:
+            merged[-1][1] = b
+        else:
+            merged.append([a, b])
+    return [(a / float(sr), b / float(sr)) for a, b in merged]
+
+
+def _sfxb_srt_runs(cues, total, min_gap=0.35):
+    """把「字幕区间」的补集算成候选片段。
+
+    cues 是 [[起, 止], ...]（秒），可能来自 SRT，也可能是手输。
+    两条字幕之间那段如果短于 min_gap，说明只是句间停顿，不是音效，并到一起去掉。
+    """
+    spans = []
+    for c in (cues or []):
+        try:
+            a, b = float(c[0]), float(c[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        a = max(0.0, min(float(total), a))
+        b = max(0.0, min(float(total), b))
+        if b - a > 0.01:
+            spans.append((a, b))
+    if not spans:
+        return []
+    spans.sort()
+    merged = [list(spans[0])]
+    for a, b in spans[1:]:               # 有重叠/相接的字幕先并起来
+        if a <= merged[-1][1] + 0.01:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+
+    runs, prev = [], 0.0
+    for a, b in merged:
+        if a - prev > 0.01:
+            runs.append((prev, a))
+        prev = max(prev, b)
+    if total - prev > 0.01:
+        runs.append((prev, total))
+
+    # 相邻两段之间只隔了一条很短的台词 → 并成一段（那句台词不值得把音效切成两半）
+    out = []
+    for a, b in runs:
+        if out and a - out[-1][1] < float(min_gap):
+            out[-1][1] = b
+        else:
+            out.append([a, b])
+    return [(a, b) for a, b in out]
+
+
+def _sfxb_fingerprint(x, sr, a, b, n_mels=32):
+    """片段的"长相"：对数梅尔谱沿时间取平均，去均值后归一化。
+
+    用途是找"同一段音效在原片里出现很多次"（关门声出现 20 次、只入库一次）。
+    不去比波形 —— 每次出现都带不同的底噪和相位，比波形会一个都匹配不上。
+    """
+    import librosa
+    mono = _sfxb_mono(x)
+    i, j = int(max(0.0, a) * sr), int(min(len(mono) / float(sr), b) * sr)
+    if j - i < 1024:
+        return None
+    seg = mono[i:j].astype("float32")
+    S = np.abs(librosa.stft(seg, n_fft=1024, hop_length=256)) ** 2
+    mel = librosa.feature.melspectrogram(S=S, sr=sr, n_mels=n_mels, fmin=60, fmax=8000)
+    v = np.log(mel + 1e-8).mean(axis=1)
+    v = v - float(v.mean())
+    n = float(np.linalg.norm(v))
+    return None if n < 1e-9 else (v / n)
+
+
+def _sfxb_pack(raw, mono, sr, total, min_len, pad):
+    """把 (起, 止) 列表打包成前端要的分段对象：夹到 [0,total]、丢掉太短的、算峰值/电平。"""
+    out = []
+    for s0, e0 in raw:
+        s = max(0.0, s0 - pad)
+        e = min(total, e0 + pad)
+        if e - s < float(min_len):
+            continue
+        seg = mono[int(s * sr):int(e * sr)]
+        if not len(seg):
+            continue
+        pmax = float(np.abs(seg).max())
+        rms = float(np.sqrt(np.mean(seg.astype(np.float64) ** 2)) + 1e-12)
+        out.append({"i": len(out), "start": round(s, 3), "end": round(e, 3),
+                    "dur": round(e - s, 3), "peak": round(pmax, 4),
+                    "rms_db": round(20 * np.log10(rms), 1)})
+        if len(out) >= 4000:          # 再多就不是「挑音效」而是切碎了
+            break
+    return out
+
+
+def _sfxb_segments(x, sr, mode="gap", min_gap=0.35, min_len=0.2, thresh_db=10.0, pad=0.03,
+                   cues=None):
+    """把一段音频切成「声音事件」。
+
+    mode = gap  按静音间隔（默认，最稳）
+    mode = fg   先减稳态背景再按间隔（连续环境音里挑事件）
+    mode = onset 按起始点（谱通量峰；节奏型/打击类更贴）
+    mode = srt  按字幕间隔 —— 字幕区间是"在说话"，取补集就是音效候选区。
+                有字幕时这个比 RMS 准得多：RMS 只知道"有没有声音"，
+                而台词和音效都有声音，分不开。
+    """
+    mono = _sfxb_mono(x)
+    total = len(mono) / float(sr)
+    if total <= 0.05:
+        return [], False
+    raw = []
+    if mode == "onset":
+        try:
+            import librosa
+            ts = librosa.onset.onset_detect(y=mono, sr=sr, hop_length=256,
+                                            backtrack=False, units="time")
+            times = [0.0] + [float(t) for t in ts if 0.02 < float(t) < total - 0.02] + [total]
+            raw = [(times[i], times[i + 1]) for i in range(len(times) - 1)]
+        except Exception:  # noqa: BLE001
+            mode = "gap"
+    if mode == "srt":
+        raw = _sfxb_srt_runs(cues, total, min_gap)
+    fell_back = False
+    if not raw and mode == "fg":
+        # 减完背景什么都没剩（整段是稳态噪声/长音）→ 先记一笔，下面退回按原信号切
+        raw = _sfxb_runs(_sfxb_foreground(x, sr), sr, min_gap, thresh_db)
+        fell_back = not raw
+    if not raw:
+        raw = _sfxb_runs(mono, sr, min_gap, thresh_db)
+
+    out = _sfxb_pack(raw, mono, sr, total, min_len, pad)
+    if not out and mode == "fg":
+        # 减背景后剩下的都被「最短片段」滤掉了：退回按原信号切，并告诉前端为什么
+        out = _sfxb_pack(_sfxb_runs(mono, sr, min_gap, thresh_db),
+                         mono, sr, total, min_len, pad)
+        fell_back = True
+    return out, fell_back
+
+
 # ---------------------------- 音效素材库 ----------------------------
 # 与「素材库」分开存：音效是成品音（咔哒、脚步、风声），生命周期比中间素材长，
 # 会被台本标签引用（tag.sfx.mid），所以索引单独放 longform/sfx/index.json。
@@ -556,6 +1040,8 @@ SETTINGS_DEFAULT = {
         "format": "wav", "bitDepth": "16", "rate": "44100",
         "channels": 2, "dmode": "visible",
     },
+    # 人物标签：跨台本。autoVoice = 智能导入时按「人物 → 音色」自动设音色（只改音色）。
+    "voice": {"autoVoice": True},
 }
 _SETTINGS_CACHE = {"mtime": None, "data": None}
 
@@ -576,7 +1062,8 @@ def _load_settings():
     raw = _read_json(path, {}) if mt is not None else {}
     if not isinstance(raw, dict):
         raw = {}
-    out = {"tl": dict(SETTINGS_DEFAULT["tl"]), "mix": dict(SETTINGS_DEFAULT["mix"])}
+    out = {"tl": dict(SETTINGS_DEFAULT["tl"]), "mix": dict(SETTINGS_DEFAULT["mix"]),
+           "voice": dict(SETTINGS_DEFAULT["voice"])}
 
     tl = raw.get("tl") if isinstance(raw.get("tl"), dict) else {}
     for k in ("lockVoice", "snap", "hoverIns"):
@@ -597,6 +1084,10 @@ def _load_settings():
     if mx.get("dmode") in ("visible", "full"):
         out["mix"]["dmode"] = mx["dmode"]
 
+    vc = raw.get("voice") if isinstance(raw.get("voice"), dict) else {}
+    if "autoVoice" in vc:
+        out["voice"]["autoVoice"] = bool(vc["autoVoice"])
+
     _SETTINGS_CACHE["mtime"] = mt
     _SETTINGS_CACHE["data"] = out
     return out
@@ -615,6 +1106,9 @@ def _save_settings(patch):
     """只接受认识的键 + 合法值；非法值**保持原样**（不是退回默认）。"""
     cur = _load_settings()
     if isinstance(patch, dict):
+        vc = patch.get("voice")
+        if isinstance(vc, dict) and "autoVoice" in vc:
+            cur["voice"]["autoVoice"] = bool(vc["autoVoice"])
         for sec in ("tl", "mix"):
             sub = patch.get(sec)
             if not isinstance(sub, dict):
@@ -629,7 +1123,7 @@ def _save_settings(patch):
                 elif (sec, k) == ("mix", "channels"):
                     if v in (1, 2, "1", "2"):
                         cur[sec][k] = int(v)
-    tmp = {"tl": cur["tl"], "mix": cur["mix"]}
+    tmp = {"tl": cur["tl"], "mix": cur["mix"], "voice": cur["voice"]}
     _write_json(_settings_path(), tmp)
     _SETTINGS_CACHE["mtime"] = None
     _SETTINGS_CACHE["data"] = None
@@ -902,26 +1396,44 @@ def _apply_ops(data, sr, ops):
 
     sp = ops.get("separate") or None
     if sp and sp.get("mode") in ("vocals", "instrumental"):
-        # 默认 Demucs（效果好一截）。不可用/装坏了就退回中置提取，
-        # 不让整条素材处理失败 —— 用户至少还能拿到一版可用的结果。
+        # 引擎按优先级排队：用户选的那个先试，挂了就降级（BS-Roformer → Demucs → 中置提取），
+        # 绝不让一条素材因为「模型没配好」整条处理失败。
         engine = (sp.get("engine") or "demucs").lower()
+        chain = {"roformer": ["roformer", "demucs", "dsp"],
+                 "demucs": ["demucs", "dsp"],
+                 "dsp": ["dsp"]}.get(engine) or ["demucs", "dsp"]
+        q = str(sp.get("quality") or "std").lower()
+        rs = float(sp.get("residual") or 0.0)
         t0 = time.time()
         done = False
-        if engine == "demucs":
+        for eng in chain:
             try:
-                data = _demucs_separate(data, sr, sp["mode"])
-                labels.append("人声" if sp["mode"] == "vocals" else "伴奏")
-                labels.append("Demucs")
-                _log("longform: demucs %s done in %.1fs (%.1fs audio)",
-                     sp["mode"], time.time() - t0, len(data) / float(sr))
-                done = True
+                if eng == "roformer":
+                    data2 = _roformer_separate(data, sr, sp["mode"], sp.get("rmodel"), rs)
+                    mark = "BS-Roformer"
+                elif eng == "demucs":
+                    data2 = _demucs_separate(data, sr, sp["mode"], q, rs)
+                    mark = "Demucs"
+                else:
+                    data2 = _separate(data, sr, sp["mode"], float(sp.get("strength") or 0.65))
+                    mark = "中置提取"
             except Exception as e:  # noqa: BLE001
-                _log("longform: demucs failed (%s), fallback to center extract", e, level="warning")
-        if not done:
-            data = _separate(data, sr, sp["mode"], float(sp.get("strength") or 0.65))
+                _log("longform: separate %s via %s failed (%s: %s)",
+                     sp["mode"], eng, type(e).__name__, e, level="warning")
+                continue
+            data = data2
+            done = True
             labels.append("人声" if sp["mode"] == "vocals" else "伴奏")
-            if engine == "demucs":
-                labels.append("中置提取（Demucs 不可用）")
+            labels.append(mark if eng == chain[0] else f"{mark}（替代）")
+            if eng == "demucs" and q != "std":
+                labels.append("精细分离" if q == "fine" else "快速分离")
+            if rs > 0 and sp["mode"] == "instrumental":
+                labels.append(f"残留抑制{int(round(rs * 100))}%")
+            _log("longform: separate %s via %s done in %.1fs (%.1fs audio)",
+                 sp["mode"], eng, time.time() - t0, len(data) / float(sr))
+            break
+        if not done:
+            raise HTTPException(400, "人声分离失败：BS-Roformer / Demucs / 中置提取都不可用")
 
     dn = ops.get("denoise")
     if dn:
@@ -1067,7 +1579,7 @@ def _band_filter(data, sr, hp=None, lp=None):
     return np.asarray(x, dtype="float32"), labels
 
 
-def _save_ref_audio(data, sr, name, src_name=""):
+def _save_ref_audio(data, sr, name, src_name="", folder=""):
     """把任意波形存成「模型能吃的音色」：单声道 + 22050 + PCM16 WAV + 内容哈希去重。
 
     上传音色、以及「导入台 → 存入音色库」都走这里，保证两条入口产出的文件完全一致。
@@ -1090,18 +1602,27 @@ def _save_ref_audio(data, sr, name, src_name=""):
         if not os.path.exists(path):
             with open(path, "wb") as f:
                 f.write(normalized)
-        idx = _load_refs()
+        idx = _batch_idx("refs")
+        own = idx is None
+        if own:
+            idx = _load_refs()
         item = next((r for r in idx["items"] if r["id"] == digest), None)
         if item is None:
             item = {"id": digest, "file": fn, "created": _now()}
             idx["items"].append(item)
         item["name"] = _safe_title(name or digest, digest)
         item.update({"dur": dur, "sr": AUDIO_SR, "source": src_name})
-        _write_json(_refs_index_path(), idx)
+        # 从导入台的某个目录存成音色时，跟着进同一目录（省得再回头归类一次）
+        fld = _norm_folder(folder)
+        if fld:
+            item["folder"] = fld
+            _store_folders(idx, _folder_paths(idx))
+        if own:
+            _write_json(_refs_index_path(), idx)
     return item
 
 
-def _mat_add_from_audio(data, sr, name, source, kind="audio", op="", parent=""):
+def _mat_add_from_audio(data, sr, name, source, kind="audio", op="", parent="", folder=""):
     """把波形存成「导入台」里的中转素材（44.1k WAV，保留声道）。"""
     x = np.asarray(data, dtype="float32")
     if x.ndim == 1:
@@ -1119,10 +1640,19 @@ def _mat_add_from_audio(data, sr, name, source, kind="audio", op="", parent=""):
             "dur": round(len(x) / float(MAT_SR), 2), "sr": MAT_SR,
             "ch": int(1 if x.ndim == 1 else x.shape[1]),
             "size": os.path.getsize(path), "created": int(time.time())}
+    fld = _norm_folder(folder)
+    if fld:
+        item["folder"] = fld
     with _LOCK:
-        idx = _load_materials()
+        idx = _batch_idx("media")
+        own = idx is None
+        if own:
+            idx = _load_materials()
         idx["items"].append(item)
-        _save_materials(idx)
+        if fld:                                  # 新文件夹顺手登记，空目录也能留下来
+            _store_folders(idx, _folder_paths(idx))
+        if own:
+            _save_materials(idx)
     return item
 
 
@@ -1158,8 +1688,12 @@ def _push_trash_manifest(rec):
         _write_json(_trash_manifest_path(), man)
 
 
-def _trash_material(idx, it):
-    """把一个中转素材移进 materials/.trash（不真删，可找回）。"""
+def _trash_material(idx, it, sink=None):
+    """把一个中转素材移进 materials/.trash（不真删，可找回）。
+
+    sink：批量清理时传一个 list，把回收站记录攒起来由调用方一次写入 ——
+    每次删都重写整份 manifest 的话，清 800 个要 20 秒以上（每次 O(n)）。
+    """
     src = os.path.join(_mat_dir(), os.path.basename(it.get("file") or ""))
     trash_name = f"{it['id']}_{os.path.basename(it.get('file') or '')}"
     if os.path.exists(src):
@@ -1170,15 +1704,34 @@ def _trash_material(idx, it):
                 os.remove(src)
             except OSError:
                 pass
-        _push_trash_manifest({
+        rec = {
             "trash_file": trash_name, "orig_file": os.path.basename(it.get("file") or ""),
             "id": it.get("id"), "name": it.get("name"), "kind": it.get("kind"),
             "source": it.get("source"), "op": it.get("op"), "parent": it.get("parent"),
             "dur": it.get("dur"), "sr": it.get("sr"), "ch": it.get("ch"),
             "size": it.get("size"), "created": it.get("created"),
             "trashed_at": int(time.time()),
-        })
+        }
+        if sink is None:
+            _push_trash_manifest(rec)
+        else:
+            sink.append(rec)
     idx["items"] = [x for x in idx["items"] if x.get("id") != it.get("id")]
+
+
+def _push_trash_manifests(recs):
+    """一次写入多条回收站记录（批量删除用）。"""
+    recs = [r for r in (recs or []) if r]
+    if not recs:
+        return
+    with _LOCK:
+        man = _load_trash_manifest()
+        keys = {r.get("trash_file") for r in recs}
+        man["items"] = [x for x in man["items"] if x.get("trash_file") not in keys]
+        man["items"].extend(recs)
+        if len(man["items"]) > 500:
+            man["items"] = man["items"][-500:]
+        _write_json(_trash_manifest_path(), man)
 
 
 _DEPTH = {"PCM_16": 16, "PCM_24": 24, "PCM_32": 32, "FLOAT": 32, "DOUBLE": 64,
@@ -1319,7 +1872,46 @@ def _demucs_get_model():
     return st["model"]
 
 
-def _demucs_separate(data, sr, mode="vocals", shifts=1):
+# Demucs 推理预算：shifts（随机时移平均次数）/ overlap（分段重叠）
+# 越精细越干净，代价是线性变慢 —— fast 约 1×、std 约 2×、fine 约 4×
+_DEMUCS_QUALITY = {"fast": (1, 0.25), "std": (2, 0.5), "fine": (4, 0.75)}
+
+
+def _suppress_vocal_residual(inst, voc, amount):
+    """压掉伴奏里残留的人声（Demucs 取伴奏时最明显的那层「电音」）。
+
+    做法：拿 vocals 轨的幅度谱当噪声模型，在伴奏的幅度谱上做过减（over-subtraction），
+    时间方向 3 帧平均避免留下音乐噪声，并按 amount 留一个保底比例（免得把伴奏抽空）。
+    amount=0 → 原样返回；1 → 最狠（伴奏高频会略空）。
+    """
+    a = float(np.clip(amount or 0.0, 0.0, 1.0))
+    if a <= 0 or inst is None or voc is None or len(inst) == 0 or len(voc) == 0:
+        return inst
+    n = min(len(inst), len(voc))
+    inst = np.asarray(inst[:n], dtype="float32")
+    voc = np.asarray(voc[:n], dtype="float32")
+    k = np.ones(3, dtype="float32") / 3.0
+
+    def one(y, v):
+        Sy, win = _stft(y)
+        Sv, _ = _stft(v)
+        my, mv = np.abs(Sy), np.abs(Sv)
+        mv = np.apply_along_axis(lambda r: np.convolve(r, k, mode="same"), 1, mv)
+        fac = 0.6 + 2.4 * a                 # 过减因子 0.6~3.0
+        floor = my * (0.35 - 0.25 * a)      # 保底 35%→10%
+        clean = np.maximum(my - fac * mv, floor)
+        return _istft(clean * np.exp(1j * np.angle(Sy)), win, 512, len(y))
+
+    if inst.ndim == 1:
+        return one(inst, voc if voc.ndim == 1 else voc.mean(axis=1))
+    out = np.zeros_like(inst)
+    for c in range(inst.shape[1]):
+        vc = voc[:, c] if (voc.ndim > 1 and c < voc.shape[1]) else (voc if voc.ndim == 1 else voc.mean(axis=1))
+        out[:, c] = one(np.ascontiguousarray(inst[:, c]), np.ascontiguousarray(vc))
+    return out
+
+
+def _demucs_separate(data, sr, mode="vocals", quality="std", residual=0.0):
     """Demucs 分离：返回与输入同采样率、同声道数的波形。
 
     模型固定吃 44.1k 双声道；内部先升采样、归一化（官方 recipe），
@@ -1340,6 +1932,7 @@ def _demucs_separate(data, sr, mode="vocals", shifts=1):
         work = _resample_audio(work, sr0, 44100)
 
     model = _demucs_get_model()
+    shifts, overlap = _DEMUCS_QUALITY.get(str(quality or "std").lower(), _DEMUCS_QUALITY["std"])
     st = _DEMUCS
     with st["lock"]:
         wav = torch.from_numpy(np.ascontiguousarray(work.T))
@@ -1347,13 +1940,17 @@ def _demucs_separate(data, sr, mode="vocals", shifts=1):
         wav = (wav - ref.mean()) / (ref.std() + 1e-8)
         with torch.no_grad():
             out = apply_model(model, wav[None].to(st["device"]), device=st["device"],
-                              shifts=int(shifts or 1), split=True, overlap=0.25, progress=False)[0]
+                              shifts=int(shifts), split=True, overlap=float(overlap),
+                              progress=False)[0]
         out = out.cpu() * ref.std() + ref.mean()
 
     names = list(getattr(model, "sources", ["drums", "bass", "other", "vocals"]))
     if mode == "instrumental":
         keep = [i for i, n in enumerate(names) if n != "vocals"]
         y = out[keep].sum(dim=0).numpy().T
+        if float(residual or 0) > 0:
+            # 伴奏里剩下的「电音」＝人声轨的残影，用 vocals 轨压一遍再交出去
+            y = _suppress_vocal_residual(y, out[names.index("vocals")].numpy().T, residual)
     else:
         y = out[names.index("vocals")].numpy().T
 
@@ -1364,15 +1961,686 @@ def _demucs_separate(data, sr, mode="vocals", shifts=1):
     return np.ascontiguousarray(y, dtype="float32")
 
 
+# ---------------------------- BS-Roformer（可选，模型自备） ----------------------------
+# 和 Demucs 的定位不一样：Demucs 的权重我们塞进了 vendor2/torch，开箱就能用；
+# BS-Roformer 单个权重 200MB~1.6GB，打进补丁包不现实，而且它更像「发烧选项」。
+# 所以这里只做三件事：扫目录 → 扫到就挂上去当引擎 → 扫不到就静默退回 Demucs。
+# 装不装、下不下模型完全由用户决定，工作台只负责提示和给地址。
+_ROF = {"models": [], "dir": "", "scanned": 0.0, "sep": None, "key": "",
+        "lock": threading.RLock(), "state": {}}
+_ROF_W_EXT = (".ckpt", ".pth", ".safetensors", ".th")
+_ROF_C_EXT = (".yaml", ".yml")
+# Roformer 系（人声分离里公认最干净的一档）；其它架构也能跑，只是不优先推荐
+_ROF_FAMILY = ("bs_roformer", "mel_band_roformer", "bs_conformer",
+               "mel_band_conformer", "bs_polarformer")
+# pymss 认的架构名。yaml 里只有写在这些名字上才算「声明了架构」——
+# 很多配置（例如 bs_roformer_voc_hyperacev2）的 model: 是个嵌套映射
+# （model: 换行 dim: 256 …），不设白名单就会把 dim 当成架构名。
+_ROF_ARCHS = set(_ROF_FAMILY) | {"htdemucs", "mdx23c", "scnet", "bandit", "bandit_v2",
+                                 "apollo", "vr", "legacy_demucs", "legacy_tasnet"}
+
+
+def _roformer_dir():
+    """模型放哪：默认 <整合包>/vendor2/roformer/，可用 LF_ROFORMER_DIR 覆盖。"""
+    d = (os.environ.get("LF_ROFORMER_DIR") or "").strip()
+    if d:
+        return os.path.abspath(os.path.expanduser(d))
+    root = _D.get("project_dir") or os.getcwd()
+    return os.path.join(root, "vendor2", "roformer")
+
+
+def _roformer_mtype(cfg_path, weights_name):
+    """猜架构：先读 yaml 里的声明，读不出来再按文件名猜，都不行交给 pymss 自动识别。
+
+    不 import yaml —— 只为读一行，没必要加依赖。但要注意两个坑：
+      · 只认 `model: <架构名>` 这一种写法。像 bs_roformer_voc_hyperacev2 的配置，
+        `model:` 后面是个嵌套映射（换行接 `dim: 256`），用 \\s* 会把 dim 当成架构名；
+      · 所以这里用 [ \\t]* + 白名单双保险，认不出就返回空串，让 pymss 自己判。
+    """
+    if cfg_path:
+        try:
+            with open(cfg_path, "r", encoding="utf-8", errors="ignore") as f:
+                head = f.read(16384)
+            for key in ("model", "model_type", "architecture"):
+                m = re.search(r"^[ \t]*%s[ \t]*:[ \t]*[\"']?([A-Za-z0-9_\-]+)" % key, head, re.M)
+                if m and m.group(1).lower() in _ROF_ARCHS:
+                    return m.group(1).lower()
+        except OSError:
+            pass
+    n = (weights_name or "").lower()
+    if "mel_band" in n or "melband" in n:
+        return "mel_band_roformer"
+    if "roformer" in n or n.startswith("bs_") or "_bs_" in n:
+        return "bs_roformer"
+    if "htdemucs" in n:
+        return "htdemucs"
+    if "mdx23" in n:
+        return "mdx23c"
+    if "scnet" in n:
+        return "scnet"
+    for a in ("bandit_v2", "bandit", "apollo"):
+        if a in n:
+            return a
+    return ""
+
+
+# 同一个目录里可能同时放人声、气声、语音、卡拉OK 等不同用途的权重。
+# 文件名是唯一稳定的线索（yaml 里没有"我是干什么的"这种字段），所以按关键词判角色；
+# 判不出来的一律 other，排在 vocal 后面，不会抢默认位。
+_ROF_ROLE_WORDS = (
+    ("aspiration", ("aspiration", "breath")),
+    ("karaoke", ("karaoke",)),
+    ("speech", ("speech",)),
+    ("vocal", ("vocal", "voc_", "voice", "sing")),
+)
+_ROF_ROLE_ORDER = {"vocal": 0, "other": 1, "speech": 2, "karaoke": 3, "aspiration": 4}
+
+
+def _roformer_role(name):
+    n = (name or "").lower()
+    for role, words in _ROF_ROLE_WORDS:
+        if any(w in n for w in words):
+            return role
+    return "other"
+
+
+def _roformer_scan(force=False):
+    """扫模型目录，返回 [{name, path, config, type, size}]。
+
+    只看两层：用户可能把整个模型盘指过来，深递归会卡住首屏。
+    结果缓存 3 秒，页面刷新时不必每次都遍历磁盘。
+    """
+    now = time.time()
+    if not force and now - _ROF["scanned"] < 3:
+        return _ROF["models"]
+    root = _roformer_dir()
+    _ROF["dir"] = root
+    out = []
+    if os.path.isdir(root):
+        base_depth = len(root.rstrip("\\/"))
+        for dirpath, dirnames, filenames in os.walk(root):
+            if len(dirpath) - base_depth > 160:      # 太深就不看了
+                dirnames[:] = []
+                continue
+            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+            cfgs = [f for f in filenames if f.lower().endswith(_ROF_C_EXT)]
+            for f in sorted(filenames):
+                if f.startswith(".") or not f.lower().endswith(_ROF_W_EXT):
+                    continue
+                p = os.path.join(dirpath, f)
+                try:
+                    size = os.path.getsize(p)
+                except OSError:
+                    continue
+                if size < 5 * 1024 * 1024:           # 几百 KB 的多半是没下完的半截文件
+                    continue
+                stem = os.path.splitext(f)[0]
+                cfg = ""
+                for c in (stem + ".yaml", stem + ".yml"):
+                    if c in filenames:
+                        cfg = os.path.join(dirpath, c)
+                        break
+                if not cfg and len(cfgs) == 1:
+                    cfg = os.path.join(dirpath, cfgs[0])
+                out.append({"name": f, "stem": stem, "path": p, "config": cfg,
+                            "type": _roformer_mtype(cfg, f), "size": int(size)})
+    # 排序：先按角色（人声分离排最前），再 Roformer 系优先，最后按体积从大到小。
+    # 只按体积排会出事：气声模型 797MB 比人声模型 275MB 大，会抢到"默认选中"，
+    # 而它产出的是 aspiration/other，没有人声轨 —— 人声分离直接报"没产出人声轨"。
+    for m in out:
+        m["role"] = _roformer_role(m["name"])
+    out.sort(key=lambda m: (_ROF_ROLE_ORDER.get(m["role"], 9),
+                            m["type"] not in _ROF_FAMILY, -m["size"], m["name"]))
+    _ROF["models"] = out
+    _ROF["scanned"] = now
+    return out
+
+
+def _pymss_state():
+    """推理后端在不在（不 import pymss，只查 spec + 版本号，很快）。"""
+    st = _ROF["state"]
+    if st.get("tried"):
+        return st
+    ok, reason, ver = False, "", ""
+    try:
+        if importlib.util.find_spec("pymss") is not None:
+            ok = True
+            try:
+                from importlib.metadata import version as _v
+                ver = _v("pymss")
+            except Exception:  # noqa: BLE001
+                ver = ""
+        else:
+            reason = "没装推理后端 pymss"
+    except (ImportError, ValueError) as e:  # noqa: BLE001
+        reason = f"{type(e).__name__}: {e}"
+    st.update({"tried": True, "ok": ok, "version": ver, "reason": reason})
+    return st
+
+
+def _roformer_status(force=False):
+    models = _roformer_scan(force=force)
+    py = _pymss_state()
+    root = _ROF["dir"]
+    ready = bool(models) and bool(py.get("ok"))
+    if not models:
+        why = ("模型目录里还没有模型文件" if os.path.isdir(root) else "还没有建模型目录")
+    elif not py.get("ok"):
+        why = "检测到模型，但缺少推理后端 pymss"
+    else:
+        why = ""
+    try:                       # 目录在项目里就给个相对路径，界面上命令不至于长得离谱
+        rel = os.path.relpath(root, _D.get("project_dir") or os.getcwd())
+        if rel.startswith(".."):
+            rel = ""
+    except ValueError:
+        rel = ""
+    return {"ok": True, "dir": root, "rel": rel, "exists": os.path.isdir(root),
+            "models": models,
+            "pymss": {"ok": bool(py.get("ok")), "version": py.get("version") or "",
+                      "reason": py.get("reason") or ""},
+            "ready": ready, "reason": why,
+            "pick": (models[0]["name"] if models else "")}
+
+
+def _roformer_work_dir():
+    d = os.path.join(_lf_root(), "roformer_work")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _roformer_in_dir():
+    """分离任务的输入目录（每次一个子目录，跑完就删）。
+
+    必须**跟 store_dirs（roformer_work）分开**：process_folder 会把目录里的子目录
+    也当成一条音轨去解码，然后报 "Permission denied"（实测踩到过）。
+    """
+    d = os.path.join(_lf_root(), "roformer_in")
+    os.makedirs(d, exist_ok=True)
+    # 顺手清掉上次异常退出留下的目录（一次一个 rmtree，不做批量删）
+    try:
+        for name in os.listdir(d)[:8]:
+            q = os.path.join(d, name)
+            if os.path.isdir(q):
+                _rm_tree(q, budget=0.8)
+    except OSError:
+        pass
+    return d
+
+
+def _roformer_get_separator(m):
+    """按模型路径缓存一个 MSSeparator（加载一次权重要几十秒，不能每次都重来）。
+
+    store_dirs 故意只给一个目录：不同模型的 stem 名不一样（vocals/other、
+    vocals/instrumental…），给字典容易键对不上而「什么都没产出」。输出统一丢一个
+    目录里，再按文件名认领，稳得多。
+    """
+    key = "%s|%s|%s" % (m["path"], m.get("config") or "", os.path.getmtime(m["path"]))
+    with _ROF["lock"]:
+        if _ROF["sep"] is not None and _ROF["key"] == key:
+            return _ROF["sep"], _ROF["work"]
+        import torch  # noqa: F401
+        from pymss import MSSeparator
+        work = _roformer_work_dir()
+        dev = "cpu"
+        try:
+            dev = "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:  # noqa: BLE001
+            dev = "cpu"
+        t0 = time.time()
+        sep = MSSeparator(
+            model_type=(m.get("type") or "auto"),
+            model_path=m["path"],
+            config_path=m.get("config") or "",
+            device=dev,
+            output_format="wav",
+            store_dirs=work,
+            audio_params={"wav_bit_depth": "FLOAT"},
+        )
+        _log("longform: BS-Roformer loaded (%s, %s) on %s in %.1fs",
+             m["name"], m.get("type") or "auto", dev, time.time() - t0)
+        _ROF["sep"], _ROF["key"], _ROF["work"] = sep, key, work
+        return sep, work
+
+
+def _roformer_pick(paths, words):
+    for p in paths:
+        n = os.path.basename(p).lower()
+        if any(w in n for w in words):
+            return p
+    return ""
+
+
+def _roformer_separate(data, sr, mode="vocals", model_name=None, residual=0.0):
+    """用 BS-Roformer 分离人声 / 伴奏，返回与输入同采样率、同声道数的波形。
+
+    走的是 pymss 的官方 API（MIT）：把音频写成临时 wav → process_folder → 读回结果。
+    中间态落盘换来的是「不依赖它内部的私有接口」，升级 pymss 也不用跟着改。
+    """
+    models = _roformer_scan()
+    if not models:
+        raise RuntimeError("没有检测到 BS-Roformer 模型（%s 是空的）" % _roformer_dir())
+    m = next((x for x in models if x["name"] == model_name or x["stem"] == model_name), None)
+    if m is None:
+        # 没指定就用"人声"角色的那个；只有气声/卡拉OK 模型时才退到第一个
+        m = next((x for x in models if x.get("role") == "vocal"), models[0])
+    if m.get("role") == "aspiration":
+        raise RuntimeError("「%s」是气声提取模型（只出 aspiration/other 两轨），"
+                           "不能当人声分离用；请换一个 vocal 模型" % m["name"])
+
+    x = np.asarray(data, dtype="float32")
+    if x.ndim == 1:
+        x = x[:, None]
+    stereo = x.shape[1] >= 2
+    work_in = x[:, :2] if stereo else np.repeat(x, 2, axis=1)
+    sr0 = int(sr or AUDIO_SR)
+    if sr0 != 44100:
+        work_in = _resample_audio(work_in, sr0, 44100)
+
+    with _ROF["lock"]:
+        sep, work = _roformer_get_separator(m)
+        # 每次一个唯一前缀 + 独立输入目录：
+        #   1) 不删整个 work —— 那是个「循环删一堆 wav」的操作，删多了会被批量删除守卫
+        #      直接把进程 kill 掉（实测把服务杀了）；而且旧文件还会被 process_folder 再跑一遍；
+        #   2) 输入目录**不能放在 work 下面** —— process_folder 会把子目录当成一条音轨
+        #      去解码，然后报 "Permission denied"（也是实测踩到的）；
+        #   3) 输出由 store_dirs 决定，落在 work 里，名字是「输入名_乐器.wav」，
+        #      所以用唯一前缀认领，跑完只删自己这三个文件。
+        tok = uuid.uuid4().hex[:8]
+        stem = "job" + tok
+        indir = os.path.join(_roformer_in_dir(), stem)
+        os.makedirs(indir, exist_ok=True)
+        src = os.path.join(indir, stem + ".wav")
+        work_in = np.ascontiguousarray(work_in, dtype="float32")
+        np.clip(work_in, -1.0, 1.0, out=work_in)
+        outs = []
+        t0 = time.time()
+        try:
+            sf.write(src, work_in, 44100, subtype="FLOAT", format="WAV")
+            sep.process_folder(indir)
+            outs = [os.path.join(work, f) for f in sorted(os.listdir(work))
+                    if f.startswith(stem + "_") and f.lower().endswith(".wav")]
+            _log("longform: roformer %s -> %d stem(s) in %.1fs (%.1fs audio)",
+                 m["name"], len(outs), time.time() - t0, len(data) / float(sr or AUDIO_SR))
+
+            def _rd(p):
+                if not p:
+                    return None
+                try:
+                    d, s2 = _read_audio_any(p)
+                    d = np.asarray(d, dtype="float32")
+                    if d.ndim == 1:
+                        d = d[:, None]
+                    if int(s2) != 44100:
+                        d = _resample_audio(d, s2, 44100)
+                    # 单声道模型出来的 1 列，跟输入的 2 列对不上，先补成双声道再算
+                    if d.shape[1] == 1 and work_in.shape[1] > 1:
+                        d = np.repeat(d, work_in.shape[1], axis=1)
+                    return d
+                except Exception:  # noqa: BLE001
+                    return None
+
+            voc = _rd(_roformer_pick(outs, ("vocal", "voice", "sing")))
+            if voc is None:
+                raise RuntimeError("模型没有产出人声轨（%s）；确认权重和 yaml 是配套的" % m["name"])
+            inst = None
+            if mode != "vocals":
+                inst = _rd(_roformer_pick(outs, ("instrument", "inst", "other", "accomp", "no_vocal")))
+        finally:
+            # 只清自己这次产生的：输入目录整棵（一次 rmtree）+ work 里那几个 stem
+            _rm_tree(indir, budget=0.8)
+            for f in outs:
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+
+        if mode == "vocals":
+            y = voc
+        else:
+            if inst is None:
+                # 没单独给伴奏轨就用「原曲 − 人声」，两者相加严格还原输入
+                n = min(len(work_in), len(voc))
+                inst = work_in[:n] - voc[:n]
+            y = inst
+            if float(residual or 0) > 0:
+                y = _suppress_vocal_residual(y, voc, residual)
+
+    if sr0 != 44100:
+        y = _resample_audio(y, 44100, sr0)
+    if not stereo:
+        y = y.mean(axis=1, keepdims=True)
+    return np.ascontiguousarray(y, dtype="float32")
+
+
+# ------------------------- 音色标签（角色 → 音色） -------------------------
+# 用途：智能导入会把台词按角色分组（行上的 `group`）。如果角色名同时是某个音色的标签，
+# 这里就能把「这个角色」直接对到「那个音色」，导入时或事后一键套上。
+# 只动音色（ref），不动情感 / 停顿 / 采样 —— 那些随台本和情绪变，强行套只会更麻烦。
+
+MAX_TAGS = 12
+TAG_MAX_LEN = 24
+
+
+def _split_tags(v):
+    """字符串（逗号 / 顿号 / 分号 / 斜杠 / 空格分隔）或数组 → 干净标签列表。"""
+    if v is None:
+        return []
+    raw = []
+    if isinstance(v, (list, tuple)):
+        for x in v:
+            raw.extend(_split_tags(x))
+        return raw
+    text = str(v)
+    for sep in ("，", ",", "、", ";", "；", "|", "/", "\n", "\t"):
+        text = text.replace(sep, " ")
+    raw = [x.strip() for x in text.split(" ") if x.strip()]
+    return raw
+
+
+def _clean_tags(v):
+    """去重（忽略大小写与全半角空格）、限长限量。"""
+    out, seen = [], set()
+    for t in _split_tags(v):
+        t = _safe_title(t, "")[:TAG_MAX_LEN].strip()
+        if not t:
+            continue
+        k = _tag_key(t)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(t)
+        if len(out) >= MAX_TAGS:
+            break
+    return out
+
+
+def _tag_key(s):
+    """标签 / 角色名的比较键：去所有空白、小写、全角括号转半角。"""
+    t = str(s or "")
+    t = (t.replace("（", "(").replace("）", ")").replace("　", " ")
+         .replace("【", "[").replace("】", "]"))
+    t = re.sub(r"\s+", "", t)
+    return t.lower()
+
+
+def _tag_index(refs=None):
+    """标签 → 音色列表（同名标签挂多个音色时，靠前的优先：置顶 → 新→旧）。"""
+    idx = {}
+    for it in _pin_sort((refs if refs is not None else _load_refs()["items"])):
+        for t in (it.get("tags") or []):
+            k = _tag_key(t)
+            if k:
+                idx.setdefault(k, []).append(it)
+    return idx
+
+
+def _name_variants(name):
+    """角色名 → 候选写法。
+
+    「阿澈（低声）」→ 阿澈；「第一章 · 阿澈」→ 第一章 / 阿澈；
+    「阿澈/小夏」→ 拆成两个。逐段去匹配标签，避免因为分组名带了场景前缀就认不出来。
+    """
+    out = []
+
+    def push(x):
+        x = str(x or "").strip(" 　-—_·:：[]()（）")
+        if not x:
+            return
+        k = _tag_key(x)
+        if k and k not in [ _tag_key(y) for y in out ]:
+            out.append(x)
+
+    push(name)
+    bare = re.sub(r"[\(（\[【].*?[\)）\]】]", "", str(name or "")).strip()
+    push(bare)
+    for part in re.split(r"[·・/、|\-—_:：\s]+", bare or str(name or "")):
+        push(part)
+    return out
+
+
+def _match_ref(name, index, allow_fuzzy=True):
+    """角色名 → (ref, 命中的标签, 是否模糊)。精确优先，其次「名字里包含某个标签」。"""
+    if not name:
+        return None, "", False
+    variants = _name_variants(name)
+    for i, v in enumerate(variants):
+        hit = index.get(_tag_key(v))
+        if hit:
+            # 只有「分组名和标签完全一致」才算精确；去括号 / 拆前缀之后才对上的，
+            # 标成近似（界面上带「≈」），免得用户以为名字本来就一样。
+            key = _tag_key(v)
+            tag = next((t for t in (hit[0].get("tags") or []) if _tag_key(t) == key), v)
+            return hit[0], tag, i > 0
+    if not allow_fuzzy:
+        return None, "", False
+    # 模糊：分组名里包含某个标签（标签至少 2 字，避免「A」这种单字误配一片）
+    best = None
+    for v in variants:
+        kv = _tag_key(v)
+        if len(kv) < 3:
+            continue
+        for k, refs in index.items():
+            if len(k) >= 2 and k in kv:
+                if best is None or len(k) > best[0]:
+                    best = (len(k), k, refs[0])
+    if best:
+        for t in (best[2].get("tags") or []):
+            if _tag_key(t) == best[1]:
+                return best[2], t, True
+        return best[2], "", True
+    return None, "", False
+
+
+# ------------------------------ 标签库（可自定义） ------------------------------
+# 两类：trait（属性标签：音色 / 人物用）、sfx（音效标签：句中 / 句间用）。
+# 预设是常量，用户的增删记在 longform/taglib.json：
+#   added  = 自定义新增；hidden = 被删掉的预设（不物理删，升级后还能回来）。
+TAG_KINDS = ("trait", "sfx")
+
+
+def _taglib_path():
+    return os.path.join(_lf_root(), "taglib.json")
+
+
+def _load_taglib():
+    raw = _read_json(_taglib_path(), {})
+    if not isinstance(raw, dict):
+        raw = {}
+    out = {"added": {k: [] for k in TAG_KINDS}, "hidden": {k: [] for k in TAG_KINDS}}
+    for sec in ("added", "hidden"):
+        sub = raw.get(sec) if isinstance(raw.get(sec), dict) else {}
+        for k in TAG_KINDS:
+            out[sec][k] = _clean_tags(sub.get(k))
+    return out
+
+
+def _taglib_save(d):
+    _write_json(_taglib_path(), {"version": 1,
+                                 "added": d.get("added") or {},
+                                 "hidden": d.get("hidden") or {}})
+
+
+def _tag_presets(kind):
+    return list(TRAIT_PRESETS if kind == "trait" else DEFAULT_TAGS)
+
+
+def _tag_list(kind):
+    """候选标签：预设（去掉 hidden）+ 自定义（按加入顺序）。"""
+    lib = _load_taglib()
+    hidden = {_tag_key(x) for x in lib["hidden"].get(kind) or []}
+    out, seen = [], set()
+    for name in _tag_presets(kind):
+        k = _tag_key(name)
+        if k in hidden or k in seen:
+            continue
+        seen.add(k)
+        out.append(name)
+    for name in lib["added"].get(kind) or []:
+        k = _tag_key(name)
+        if k in hidden or k in seen:
+            continue
+        seen.add(k)
+        out.append(name)
+    return out
+
+
+def _tag_full(kind):
+    preset = {_tag_key(x) for x in _tag_presets(kind)}
+    return [{"name": x, "builtin": _tag_key(x) in preset} for x in _tag_list(kind)]
+
+
+# ------------------------- 人物标签库（跨台本） -------------------------
+# 和音色上的自由标签不是一回事：
+#   · 人物库里的每一条 = 一个人物，有**一个**人名标签（+ 别名）、**多个**属性标签
+#     （傲娇 / 冰山美人 / 旁白…），并可以绑定一个音色；
+#   · 智能导入时先按人名（含别名）匹配人物，命中就用它绑定的音色；
+#     没命中才回落到「音色上的属性标签」。
+# 这样同一个角色在不同章节 / 不同台本里写「阿澈」「澈哥」都能自动对上同一个音色。
+
+CHAR_MAX = 400
+
+
+def _chars_path():
+    return os.path.join(_lf_root(), "characters.json")
+
+
+def _load_chars():
+    raw = _read_json(_chars_path(), {})
+    if not isinstance(raw, dict):
+        raw = {}
+    items = raw.get("items")
+    if not isinstance(items, list):
+        items = []
+    out = []
+    for it in items[:CHAR_MAX]:
+        if not isinstance(it, dict):
+            continue
+        name = _safe_title(str(it.get("name") or "").strip(), "")[:24].strip()
+        if not name:
+            continue
+        cid = re.sub(r"[^0-9a-zA-Z_-]", "", str(it.get("id") or ""))[:24]
+        out.append({
+            "id": cid or ("c" + uuid.uuid4().hex[:10]),
+            "name": name,
+            "aliases": _clean_tags(it.get("aliases"))[:8],
+            "traits": _clean_tags(it.get("traits"))[:12],
+            "ref": str(it.get("ref") or "")[:48],
+            "note": str(it.get("note") or "")[:200],
+            "created": int(it.get("created") or 0),
+            "updated": int(it.get("updated") or 0),
+        })
+    return {"version": 1, "items": out}
+
+
+def _save_chars(data):
+    _write_json(_chars_path(), {"version": 1, "items": (data or {}).get("items") or []})
+
+
+def _char_index(chars=None):
+    """人名 / 别名（归一后） → 人物。同名时后建的覆盖不到前面（先到先得）。"""
+    idx = {}
+    for c in ((chars or _load_chars())["items"]):
+        for n in [c["name"]] + list(c.get("aliases") or []):
+            k = _tag_key(n)
+            if k:
+                idx.setdefault(k, c)
+    return idx
+
+
+def _char_conflict(name, aliases, chars, skip_id=""):
+    """新建 / 改名时查重：人名和别名不能和别人的撞。返回撞上的那个名字。"""
+    keys = {_tag_key(name)} | {_tag_key(a) for a in (aliases or [])}
+    keys.discard("")
+    for c in chars["items"]:
+        if c["id"] == skip_id:
+            continue
+        for n in [c["name"]] + list(c.get("aliases") or []):
+            if _tag_key(n) in keys:
+                return n
+    return ""
+
+
+def _char_voice(c):
+    """人物绑定的音色 → (id, 显示名)。绑的是内置音色也认。"""
+    rid = (c or {}).get("ref") or ""
+    if not rid:
+        return "", ""
+    try:
+        path = resolve_ref(rid)
+    except Exception:  # noqa: BLE001
+        path = None
+    if not path:
+        return "", ""
+    name = ""
+    try:
+        for it in _load_refs()["items"]:
+            if it["id"] == rid:
+                name = it.get("name") or rid
+                break
+    except Exception:  # noqa: BLE001
+        pass
+    return rid, (name or rid)
+
+
+def _resolve_voice(name, char_idx=None, tag_idx=None):
+    """分组名 → 用哪个音色。**人物优先，音色属性标签兜底。**
+
+    返回 {ref, source, label, char, char_name, traits, fuzzy, ref_name}
+    source: character / character-no-voice / ref-tag / none
+    """
+    blank = {"ref": "", "source": "none", "label": "", "char": "", "char_name": "",
+             "traits": [], "fuzzy": False, "ref_name": ""}
+    if not name:
+        return blank
+    chars = char_idx if char_idx is not None else _char_index()
+    tags = tag_idx if tag_idx is not None else _tag_index()
+    variants = _name_variants(name)
+    # ① 人物：原名 / 去括号 / 拆段后完全一致
+    for i, v in enumerate(variants):
+        c = chars.get(_tag_key(v))
+        if c:
+            rid, rname = _char_voice(c)
+            return {"ref": rid, "ref_name": rname,
+                    "source": "character" if rid else "character-no-voice",
+                    "label": c["name"], "char": c["id"], "char_name": c["name"],
+                    "traits": list(c.get("traits") or []), "fuzzy": i > 0}
+    # ② 人物：分组名里包含人名（「第一幕 阿澈」拆不开时兜底）
+    best = None
+    for v in variants:
+        kv = _tag_key(v)
+        if len(kv) < 3:
+            continue
+        for k, c in chars.items():
+            if len(k) >= 2 and k in kv and (best is None or len(k) > best[0]):
+                best = (len(k), c)
+    if best:
+        c = best[1]
+        rid, rname = _char_voice(c)
+        return {"ref": rid, "ref_name": rname,
+                "source": "character" if rid else "character-no-voice",
+                "label": c["name"], "char": c["id"], "char_name": c["name"],
+                "traits": list(c.get("traits") or []), "fuzzy": True}
+    # ③ 音色上的属性标签（老逻辑：分组名 = 某个音色的标签）
+    ref, tag, fuzzy = _match_ref(name, tags)
+    if ref:
+        return {"ref": ref["id"], "ref_name": ref.get("name") or ref["id"],
+                "source": "ref-tag", "label": tag, "char": "", "char_name": "",
+                "traits": [tag], "fuzzy": fuzzy}
+    return blank
+
+
 def _all_ref_options():
     items = []
-    for it in _load_refs()["items"]:
+    for it in _pin_sort(_load_refs()["items"]):
         items.append({"id": it["id"], "name": it.get("name") or it["id"],
                       "group": "我的音色", "dur": it.get("dur"), "editable": True,
+                      "folder": it.get("folder") or "",
+                      "tags": list(it.get("tags") or []),
                       "uses": list(it.get("uses") or [])})
     pro = os.path.join(_D["project_dir"], "prompts")
     if os.path.isdir(pro):
-        for fn in sorted(os.listdir(pro)):
+        for fn in sorted(os.listdir(pro), key=_nat_key):
             if not fn.lower().endswith((".wav", ".mp3", ".flac", ".ogg")):
                 continue
             info = _audio_info(os.path.join(pro, fn))
@@ -1380,7 +2648,7 @@ def _all_ref_options():
                           "group": "主程序 prompts", "dur": info["dur"], "editable": False})
     ex = os.path.join(_D["project_dir"], "examples")
     if os.path.isdir(ex):
-        for fn in sorted(os.listdir(ex)):
+        for fn in sorted(os.listdir(ex), key=_nat_key):
             if not fn.lower().endswith(".wav"):
                 continue
             info = _audio_info(os.path.join(ex, fn))
@@ -2617,6 +3885,8 @@ def _export_lines_zip(script, uids, naming="index_text", prefix="",
     zip_path = os.path.join(out_dir, zip_name)
     wanted = set(uids) if uids else None
     count, skipped = 0, 0
+    # 序号位数跟着行数走（最少 4 位）：一万行的台本也不会出现 10000 排在 1000 前面
+    w = _pad_width(len(script["lines"]), 4)
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for idx, line in enumerate(script["lines"], start=1):
             if wanted is not None and line["uid"] not in wanted:
@@ -2626,12 +3896,13 @@ def _export_lines_zip(script, uids, naming="index_text", prefix="",
                 continue
             src = os.path.join(_script_dir(sid), "audio", os.path.basename(line["out"]))
             text = re.sub(r'[\\/:*?"<>|\r\n\t]', "", line.get("text") or "")[:12]
+            num = "%0*d" % (w, idx)
             if naming == "index":
-                name = f"{idx:04d}.{ext}"
+                name = f"{num}.{ext}"
             elif naming == "text":
                 name = f"{text or line['uid']}.{ext}"
             else:
-                name = f"{idx:04d}_{text}.{ext}" if text else f"{idx:04d}.{ext}"
+                name = f"{num}_{text}.{ext}" if text else f"{num}.{ext}"
             if fmt == "wav" and int(sample_rate or AUDIO_SR) == AUDIO_SR and int(channels or 1) <= 1:
                 # 默认参数：原始文件就是 22050 单声道 WAV，直接打包，不重编码
                 zf.write(src, arcname=name)
@@ -2750,6 +4021,36 @@ def _export_md(script, fmt="md", opts=None):
 # 再加上导出的工程 zip、导出的混音、删除后进回收站（不真删）、
 # 以及打包导出时改名留下的 .trash_* 暂存目录。
 # 这里把可清理的东西分类扫出来，让用户自己勾着删。
+
+def _rm_tree(path, budget=2.0):
+    """逐文件删掉一个目录。**不要用 shutil.rmtree**。
+
+    这个运行环境对「一次删整个目录 / 几百个文件」有批量删除守卫，
+    触发后会让进程直接 SystemExit —— 表现为「点一下准备素材，服务没了」。
+    逐文件删 + 时间预算，删不完下次接着来，最坏只是留个空目录。
+    """
+    if not os.path.isdir(path):
+        return True
+    t0 = time.time()
+    try:
+        for dp, dns, fns in os.walk(path, topdown=False):
+            for fn in fns:
+                if time.time() - t0 > budget:
+                    return False
+                try:
+                    os.remove(os.path.join(dp, fn))
+                except OSError:
+                    pass
+            for dn in dns:
+                try:
+                    os.rmdir(os.path.join(dp, dn))
+                except OSError:
+                    pass
+        os.rmdir(path)
+        return True
+    except OSError:
+        return False
+
 
 def _size_of(path):
     """文件/目录 → (字节数, 文件数)。目录会递归，跳过符号链接。"""
@@ -2875,7 +4176,34 @@ def _storage_plan(root):
                 it["files"].append(p)
     plan.append(it)
 
-    # 7) 日志
+    # 7) 音效台的分离作业（每个都存着整条源音频，几十 MB 很常见）
+    it = entries([], "sfxb", "音效台分离作业",
+                 "高级音效处理台「① 准备素材」留下的作业副本（默认只留最近 8 个）；"
+                 "删了下次要重新去人声，切好的片段也一起没了",
+                 safe=True, default=False)
+    sfxb = os.path.join(lf, "sfxb")
+    if os.path.isdir(sfxb):
+        dirs = [os.path.join(sfxb, n) for n in os.listdir(sfxb)
+                if os.path.isdir(os.path.join(sfxb, n))]
+        # 最近那个可能正开着音效台（页面还握着 job id），永远留着
+        dirs.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        it["dirs"].extend(dirs[1:])
+    plan.append(it)
+
+    # 8) 模型分离中间文件（BS-Roformer / Demucs 跑完本该自己删，异常退出会留下）
+    it = entries([], "roformer", "分离中间文件",
+                 "BS-Roformer 的输入 / 输出临时 wav，正常跑完就删；异常退出会留下几个",
+                 default=True)
+    for sub in ("roformer_work", "roformer_in"):
+        d = os.path.join(lf, sub)
+        if os.path.isdir(d):
+            for name in os.listdir(d):
+                p = os.path.join(d, name)
+                if os.path.isfile(p) or os.path.isdir(p):
+                    (it["files"] if os.path.isfile(p) else it["dirs"]).append(p)
+    plan.append(it)
+
+    # 9) 日志
     it = entries([], "logs", "运行日志", "服务日志，删了不影响功能", default=False)
     lg = os.path.join(root, "logs")
     if os.path.isdir(lg):
@@ -2885,7 +4213,7 @@ def _storage_plan(root):
                 it["files"].append(p)
     plan.append(it)
 
-    # 8) 孤立音频：台本目录里没有行引用的 wav（重生成换名字后会留下）
+    # 10) 孤立音频：台本目录里没有行引用的 wav（重生成换名字后会留下）
     it = entries([], "orphan", "孤立音频",
                  "台本目录里没有任何一句引用的 wav（重新生成换过文件名后会留下）",
                  safe=False, default=False)
@@ -2906,7 +4234,7 @@ def _storage_plan(root):
                     it["files"].append(os.path.join(aud, fn))
     plan.append(it)
 
-    # 9) 工程里的素材副本（和音效库/素材库里同名同大小的那份重复）
+    # 11) 工程里的素材副本（和音效库/素材库里同名同大小的那份重复）
     it = entries([], "dupes", "工程里的重复素材",
                  "和「音效库 / 素材库」里同名同大小的工程副本；删了不影响库，"
                  "但那几个用到它的台本会失去素材（要重新拖进来）",
@@ -3011,6 +4339,20 @@ def register_longform(app, api, deps):
         # 白名单在 lf_static.py（两页共用一份，加新脚本只改那里）
         from lf_static import serve_asset
         return serve_asset(web_dir, "longform", name)
+
+    @app.get("/sfxbench", include_in_schema=False)
+    def sfxbench_page():
+        """高级音效处理台：独立页面（不挤在导入台里，波形和片段列表需要横向空间）。"""
+        path = os.path.join(web_dir, "sfxbench.html")
+        if not os.path.exists(path):
+            raise HTTPException(404, "sfxbench.html 缺失（补丁包不完整）")
+        return FileResponse(path, media_type="text/html; charset=utf-8",
+                            headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"})
+
+    @app.get("/sfxbench-assets/{name}", include_in_schema=False)
+    def sfxbench_asset(name: str):
+        from lf_static import serve_asset
+        return serve_asset(web_dir, "sfxbench", name)
 
     # ---- 存储清理 -----------------------------------------------------------
     @lf.get("/lf/storage/scan")
@@ -3178,7 +4520,8 @@ def register_longform(app, api, deps):
             "ok": True,
             "model": tts.state(),
             "refs": _all_ref_options(),
-            "tags": DEFAULT_TAGS,
+            "ref_folders": _folder_list(_load_refs()),
+            "tags": _tag_list("sfx"),
             "defaults": _DEFAULT_PARAMS,
             "sampling": _DEFAULT_SAMPLING,
             "limits": {"pause_min": PAUSE_MIN, "pause_max": PAUSE_MAX,
@@ -3277,6 +4620,345 @@ def register_longform(app, api, deps):
             _write_json(_refs_index_path(), idx)
         return {"ok": True, "ref": item}
 
+    # ---- 标签库（属性标签 / 音效标签，可自定义） --------------------------
+    @lf.get("/lf/taglib")
+    def lf_taglib():
+        return {"ok": True, "traits": _tag_full("trait"), "sfx": _tag_full("sfx")}
+
+    @lf.post("/lf/taglib")
+    def lf_taglib_add(req: dict = Body(default=None)):
+        """新增自定义标签；如果删过同名预设，再加回来等于恢复。"""
+        req = req or {}
+        kind = str(req.get("kind") or "trait")
+        if kind not in TAG_KINDS:
+            raise HTTPException(400, "标签类型不对")
+        names = _clean_tags(req.get("name") or req.get("names"))
+        if not names:
+            raise HTTPException(400, "标签名不能为空")
+        with _LOCK:
+            lib = _load_taglib()
+            have = {_tag_key(x) for x in _tag_list(kind)}
+            for nm in names:
+                k = _tag_key(nm)
+                lib["hidden"][kind] = [x for x in lib["hidden"][kind] if _tag_key(x) != k]
+                if k not in have:
+                    lib["added"][kind].append(nm)
+                    have.add(k)
+            _taglib_save(lib)
+        return {"ok": True, "kind": kind, "name": names[0],
+                "traits": _tag_full("trait"), "sfx": _tag_full("sfx")}
+
+    @lf.delete("/lf/taglib")
+    def lf_taglib_del(kind: str = "trait", name: str = ""):
+        """删标签：预设 → 记进 hidden（不物理删），自定义 → 移除。
+
+        已经打在音色 / 人物上的标签**不动** —— 这里只是"候选里不再出现"。
+        """
+        if kind not in TAG_KINDS:
+            raise HTTPException(400, "标签类型不对")
+        nm = str(name or "").strip()
+        if not nm:
+            raise HTTPException(400, "缺少标签名")
+        k = _tag_key(nm)
+        with _LOCK:
+            lib = _load_taglib()
+            lib["added"][kind] = [x for x in lib["added"][kind] if _tag_key(x) != k]
+            if k in {_tag_key(x) for x in _tag_presets(kind)}:
+                if k not in {_tag_key(x) for x in lib["hidden"][kind]}:
+                    lib["hidden"][kind].append(nm)
+            _taglib_save(lib)
+        return {"ok": True, "kind": kind, "name": nm,
+                "traits": _tag_full("trait"), "sfx": _tag_full("sfx")}
+
+    # ---- 人物标签库（跨台本） ----------------------------------------------
+    @lf.get("/lf/characters")
+    def lf_characters(sid: str = ""):
+        """人物库 + 当前台本里的使用情况。
+
+        `used` = 这个台本里有多少句的分组名命中它（含别名）；`matched` = 其中已经
+        用上它绑定音色的句数。`candidates` = 台本里出现、但人物库还没有的分组名。
+        """
+        chars = _load_chars()
+        idx = _char_index(chars)
+        items = []
+        usage = {}
+        cand = {}
+        if sid:
+            try:
+                script = _load_script(_safe_sid(sid))
+            except Exception:  # noqa: BLE001
+                script = {"lines": []}
+            for ln in (script.get("lines") or []):
+                if ln.get("kind") == "tag":
+                    continue
+                g = (ln.get("group") or "").strip()
+                if not g:
+                    continue
+                hit = None
+                for v in _name_variants(g):
+                    hit = idx.get(_tag_key(v))
+                    if hit:
+                        break
+                if hit:
+                    d = usage.setdefault(hit["id"], {"used": 0, "matched": 0})
+                    d["used"] += 1
+                    cur = (ln.get("ov") or {}).get("ref")
+                    if cur and cur == hit.get("ref"):
+                        d["matched"] += 1
+                else:
+                    cand[g] = cand.get(g, 0) + 1
+        for c in sorted(chars["items"], key=lambda x: (-int(x.get("updated") or 0), x["name"])):
+            rid, rname = _char_voice(c)
+            u = usage.get(c["id"]) or {}
+            items.append(dict(c, ref=rid, ref_name=rname,
+                              ref_missing=bool(c.get("ref") and not rid),
+                              used=u.get("used", 0), matched=u.get("matched", 0)))
+        # 属性标签汇总：人物上的 + 音色上的（音色标签也能直接当属性用）
+        agg = {}
+        for c in chars["items"]:
+            for t in c.get("traits") or []:
+                a = agg.setdefault(_tag_key(t), {"tag": t, "chars": 0, "refs": 0})
+                a["chars"] += 1
+        for it in _load_refs()["items"]:
+            for t in it.get("tags") or []:
+                a = agg.setdefault(_tag_key(t), {"tag": t, "chars": 0, "refs": 0})
+                a["refs"] += 1
+        traits = sorted(agg.values(), key=lambda x: (-(x["chars"] + x["refs"]), x["tag"]))
+        return {"ok": True, "items": items, "count": len(items),
+                "traits": traits,
+                "candidates": [{"name": k, "lines": v} for k, v in
+                               sorted(cand.items(), key=lambda x: -x[1])][:60],
+                "auto_voice": bool(_load_settings()["voice"].get("autoVoice"))}
+
+    @lf.post("/lf/characters")
+    def lf_char_new(req: dict = Body(default=None)):
+        """新建人物：一个人名标签（唯一）+ 任意多个属性标签 + 可选绑定音色。"""
+        req = req or {}
+        name = _safe_title(str(req.get("name") or "").strip(), "")[:24].strip()
+        if not name:
+            raise HTTPException(400, "人物名不能为空")
+        aliases = _clean_tags(req.get("aliases"))[:8]
+        traits = _clean_tags(req.get("traits"))
+        with _LOCK:
+            chars = _load_chars()
+            if len(chars["items"]) >= CHAR_MAX:
+                raise HTTPException(400, "人物太多（上限 %d）" % CHAR_MAX)
+            dup = _char_conflict(name, aliases, chars)
+            if dup:
+                raise HTTPException(400, "「%s」已经在人物库里了" % dup)
+            rid, rname = _char_voice({"ref": str(req.get("ref") or "")})
+            item = {"id": "c" + uuid.uuid4().hex[:10], "name": name,
+                    "aliases": aliases, "traits": traits, "ref": rid,
+                    "note": str(req.get("note") or "")[:200],
+                    "created": int(time.time()), "updated": int(time.time())}
+            chars["items"].append(item)
+            _save_chars(chars)
+        _log("longform: character + %s（%s）", name, ",".join(traits) or "-")
+        return {"ok": True, "item": dict(item, ref_name=rname)}
+
+    @lf.patch("/lf/characters/{cid}")
+    def lf_char_save(cid: str, req: dict = Body(default=None)):
+        req = req or {}
+        with _LOCK:
+            chars = _load_chars()
+            item = next((c for c in chars["items"] if c["id"] == cid), None)
+            if not item:
+                raise HTTPException(404, "人物不存在")
+            if "name" in req:
+                name = _safe_title(str(req.get("name") or "").strip(), item["name"])[:24].strip()
+                if not name:
+                    raise HTTPException(400, "人物名不能为空")
+                aliases = (_clean_tags(req.get("aliases"))[:8] if "aliases" in req
+                           else list(item.get("aliases") or []))
+                dup = _char_conflict(name, aliases, chars, skip_id=cid)
+                if dup:
+                    raise HTTPException(400, "「%s」已经在人物库里了" % dup)
+                item["name"] = name
+                item["aliases"] = aliases
+            elif "aliases" in req:
+                new_aliases = _clean_tags(req.get("aliases"))[:8]
+                dup = _char_conflict(item["name"], new_aliases, chars, skip_id=cid)
+                if dup:
+                    raise HTTPException(400, "「%s」已经在人物库里了" % dup)
+                item["aliases"] = new_aliases
+            if "traits" in req:
+                item["traits"] = _clean_tags(req.get("traits"))
+            if "ref" in req:
+                rid, _rn = _char_voice({"ref": str(req.get("ref") or "")})
+                item["ref"] = rid
+            if "note" in req:
+                item["note"] = str(req.get("note") or "")[:200]
+            item["updated"] = int(time.time())
+            _save_chars(chars)
+            rid, rname = _char_voice(item)
+        return {"ok": True, "item": dict(item, ref_name=rname)}
+
+    @lf.delete("/lf/characters/{cid}")
+    def lf_char_del(cid: str):
+        """删人物**不动音色、不动台本**：只是以后导入时不再自动对上。"""
+        with _LOCK:
+            chars = _load_chars()
+            item = next((c for c in chars["items"] if c["id"] == cid), None)
+            if not item:
+                raise HTTPException(404, "人物不存在")
+            chars["items"] = [c for c in chars["items"] if c["id"] != cid]
+            _save_chars(chars)
+        _log("longform: character - %s", item.get("name"))
+        return {"ok": True}
+
+    @lf.post("/lf/characters/bulk")
+    def lf_char_bulk(req: dict = Body(default=None)):
+        """按名字批量新建（从台本分组名来）：已存在 / 和别名冲突的都跳过。"""
+        req = req or {}
+        names = _clean_tags(req.get("names"))[:60]
+        rid, _rn = _char_voice({"ref": str(req.get("ref") or "")})
+        traits = _clean_tags(req.get("traits"))
+        made, skipped = [], []
+        with _LOCK:
+            chars = _load_chars()
+            for nm in names:
+                if _char_conflict(nm, [], chars) or len(chars["items"]) >= CHAR_MAX:
+                    skipped.append(nm)
+                    continue
+                item = {"id": "c" + uuid.uuid4().hex[:10], "name": nm[:24],
+                        "aliases": [], "traits": list(traits), "ref": rid,
+                        "note": "", "created": int(time.time()),
+                        "updated": int(time.time())}
+                chars["items"].append(item)
+                made.append(item["name"])
+            if made:
+                _save_chars(chars)
+        _log("longform: characters bulk + %d（跳过 %d）", len(made), len(skipped))
+        return {"ok": True, "created": made, "skipped": skipped, "count": len(made)}
+
+    @lf.put("/lf/refs/{rid}/tags")
+    def lf_ref_tags(rid: str, req: dict = Body(default=None)):
+        """设置一个音色的标签（整体替换）。标签是「角色名 → 音色」的桥梁：
+
+        智能导入按「阿澈：…」分了组，只要某个音色上标了 `阿澈`，
+        导入时或「智能识别人物」就能把那一组自动套上这个音色。
+        """
+        req = req or {}
+        tags = _clean_tags(req.get("tags"))
+        with _LOCK:
+            idx = _load_refs()
+            item = next((x for x in idx["items"] if x["id"] == rid), None)
+            if not item:
+                raise HTTPException(404, "音色不存在")
+            if tags:
+                item["tags"] = tags
+            else:
+                item.pop("tags", None)
+            item["tag_at"] = _now()
+            _write_json(_refs_index_path(), idx)
+        return {"ok": True, "id": rid, "tags": tags}
+
+    @lf.get("/lf/tags")
+    def lf_tag_library():
+        """标签库：所有音色上的标签 + 各自挂了哪些音色。
+
+        同名标签挂多个音色时，`refs` 按「置顶 → 新→旧」排，第一个就是自动套用会用到的那个。
+        """
+        refs = _pin_sort(_load_refs()["items"])
+        agg = {}
+        for it in refs:
+            for t in (it.get("tags") or []):
+                k = _tag_key(t)
+                if not k:
+                    continue
+                a = agg.setdefault(k, {"tag": t, "key": k, "count": 0, "refs": []})
+                a["count"] += 1
+                a["refs"].append({"id": it["id"], "name": it.get("name") or it["id"]})
+        items = sorted(agg.values(), key=lambda x: (-x["count"], x["tag"]))
+        return {"ok": True, "items": items, "count": len(items)}
+
+    @lf.post("/lf/auto-voice")
+    def lf_auto_voice(req: dict = Body(default=None)):
+        """智能识别人物：按「行分组名（= 角色名）」匹配音色标签，把对应音色套上去。
+
+        只改音色（`ov.ref`），不碰情感 / 停顿 / 采样 —— 那些随台本和情绪变，自动套只会添乱。
+        `dry_run=true` 只算不写，用来先把结果摆给人看。
+        `overwrite=false`（默认）时，已经有单独指定音色的行保持不动。
+        """
+        req = req or {}
+        sid = _safe_sid(req.get("sid") or "")
+        dry = bool(req.get("dry_run"))
+        overwrite = bool(req.get("overwrite"))
+        fuzzy = req.get("fuzzy") is not False
+        script = _load_script(sid)
+        lines = script.get("lines") or []
+        char_idx = _char_index()
+        tag_idx = _tag_index()
+        by_uid = {ln.get("uid"): ln for ln in lines}
+
+        groups = {}
+        no_group = 0
+        for ln in lines:
+            if ln.get("kind") == "tag":
+                continue
+            g = (ln.get("group") or "").strip()
+            if not g:
+                no_group += 1
+                continue
+            d = groups.setdefault(g, {"lines": 0, "uids": []})
+            d["lines"] += 1
+            d["uids"].append(ln.get("uid"))
+
+        matched, unmatched, no_voice, changed = [], [], [], 0
+        for name, d in groups.items():
+            res = _resolve_voice(name, char_idx, tag_idx)
+            if res["source"] == "none" or (res["fuzzy"] and not fuzzy):
+                unmatched.append({"name": name, "lines": d["lines"]})
+                continue
+            if not res["ref"]:
+                # 人物认出来了，但还没绑音色：这不是"没对上"，提示去绑一个
+                no_voice.append({"name": name, "lines": d["lines"],
+                                 "char": res["char"], "char_name": res["char_name"] or res["label"],
+                                 "traits": res["traits"]})
+                continue
+            ref = {"id": res["ref"], "name": res["ref_name"]}
+            tag = res["label"]
+            is_fuzzy = res["fuzzy"]
+            applied = kept = 0
+            for uid in d["uids"]:
+                ln = by_uid.get(uid)
+                if not ln:
+                    continue
+                cur = (ln.get("ov") or {}).get("ref")
+                if cur == ref["id"]:
+                    kept += 1
+                    continue
+                if cur and not overwrite:
+                    kept += 1          # 已经手动指定过别的音色：默认不动
+                    continue
+                applied += 1
+                if not dry:
+                    ln["ov"] = ln.get("ov") or {}
+                    ln["ov"]["ref"] = ref["id"]
+                    # 来源标记：只给界面看（_eff 只读白名单键，不会进生成参数）
+                    ln["ov"]["ref_src"] = res["source"]
+                    if res.get("char_name"):
+                        ln["ov"]["ref_char"] = res["char_name"]
+                    if ln.get("status") in ("done", "error"):
+                        ln["status"] = "stale"
+            changed += applied
+            matched.append({"name": name, "tag": tag, "fuzzy": is_fuzzy,
+                            "ref": ref["id"], "ref_name": ref.get("name") or ref["id"],
+                            "source": res["source"], "char": res["char_name"],
+                            "traits": res["traits"],
+                            "lines": d["lines"], "applied": applied, "kept": kept})
+        matched.sort(key=lambda x: (-x["applied"], x["name"]))
+        if not dry and changed:
+            script["updated"] = _now()
+            _save_script(script)
+            _log("longform: auto-voice %s -> %d 行 / %d 角色（人物 %d · 标签 %d）",
+                 sid, changed, len(matched), len(char_idx), len(tag_idx))
+        return {"ok": True, "dry": dry, "sid": sid, "changed": changed,
+                "lines": sum(d["lines"] for d in groups.values()),
+                "no_group": no_group, "tags": len(tag_idx), "chars": len(char_idx),
+                "matched": matched, "unmatched": unmatched, "no_voice": no_voice,
+                "script": None if dry else _load_script(sid)}
+
     @lf.delete("/lf/refs/{rid}")
     def lf_ref_delete(rid: str):
         with _LOCK:
@@ -3291,6 +4973,77 @@ def register_longform(app, api, deps):
             except OSError:
                 pass
         return {"ok": True}
+
+    @lf.post("/lf/refs/bulk")
+    def lf_refs_bulk(req: dict = Body(default=None)):
+        """音色批量操作：删除 / 移动文件夹 / 加标签 / 去标签 / 置顶 / 取消置顶。
+
+        为什么必须有批量接口：前端一个个发请求的话，每个请求都要「读整份索引 + 写整份」，
+        Windows 上删 50 个就要几十秒（而且中间状态全落在盘上）。这里只读写一次。
+        """
+        req = req or {}
+        action = str(req.get("action") or "").strip()
+        ids = [str(x) for x in (req.get("ids") or []) if x]
+        if not ids:
+            raise HTTPException(400, "没有选中任何音色")
+        ids_set = set(ids[:2000])
+        if action not in ("delete", "move", "tags_add", "tags_del", "pin", "unpin"):
+            raise HTTPException(400, "action 只能是 delete / move / tags_add / tags_del / pin / unpin")
+        folder = _norm_folder(req.get("folder")) if action == "move" else ""
+        tags = _clean_tags(req.get("tags")) if action in ("tags_add", "tags_del") else []
+        if action in ("tags_add", "tags_del") and not tags:
+            raise HTTPException(400, "先选一个标签")
+        moved = deleted = 0
+        with _LOCK:
+            idx = _load_refs()
+            if action == "delete":
+                gone = [x for x in idx["items"] if x.get("id") in ids_set]
+                idx["items"] = [x for x in idx["items"] if x.get("id") not in ids_set]
+                for it in gone:
+                    try:
+                        os.remove(os.path.join(_refs_dir(), os.path.basename(it.get("file") or "")))
+                        deleted += 1
+                    except OSError:
+                        pass
+            elif action == "move":
+                for it in idx["items"]:
+                    if it.get("id") not in ids_set:
+                        continue
+                    if folder:
+                        it["folder"] = folder
+                    else:
+                        it.pop("folder", None)
+                    moved += 1
+                if folder:
+                    _store_folders(idx, _folder_paths(idx))
+            elif action in ("tags_add", "tags_del"):
+                for it in idx["items"]:
+                    if it.get("id") not in ids_set:
+                        continue
+                    cur = [t for t in (it.get("tags") or []) if t]
+                    if action == "tags_add":
+                        for t in tags:
+                            if t not in cur:
+                                cur.append(t)
+                    else:
+                        drop = {t.lower() for t in tags}
+                        cur = [t for t in cur if t.lower() not in drop]
+                    if cur:
+                        it["tags"] = cur
+                    else:
+                        it.pop("tags", None)
+                    it["tag_at"] = _now()
+            else:
+                pin = time.time() if action == "pin" else 0
+                for it in idx["items"]:
+                    if it.get("id") in ids_set:
+                        if pin:
+                            it["pin"] = pin
+                        else:
+                            it.pop("pin", None)
+                        moved += 1
+            _write_json(_refs_index_path(), idx)
+        return {"ok": True, "action": action, "count": moved or deleted, "ids": list(ids_set)}
 
     # ---- 素材库（前期准备：视频抽音频 / 去伴奏 / 降噪 / 标准化 …）--------------
     # ---- ffmpeg：状态 / 探测 / 指定路径 / 上传 ----
@@ -3365,6 +5118,7 @@ def register_longform(app, api, deps):
     def lf_media_caps():
         ff = _ffmpeg_bin()
         dm = _demucs_state(probe_only=True)
+        ro = _roformer_status()
         return {"ok": True, "ffmpeg": bool(ff), "ffmpeg_path": ff,
                 "video": bool(ff),
                 "audio_formats": sorted(x.lstrip(".") for x in AUDIO_EXTS),
@@ -3374,14 +5128,194 @@ def register_longform(app, api, deps):
                            "model": "htdemucs", "reason": dm["reason"],
                            "weights": dm.get("weights") or "",
                            "offline": bool(dm.get("weights"))},
+                "roformer": {"ready": bool(ro["ready"]), "reason": ro["reason"],
+                             "count": len(ro["models"]), "dir": ro["dir"],
+                             "pick": ro["pick"]},
                 "resample": "soxr",
                 "max_mb": MAT_MAX_BYTES // 1048576}
+
+    # ---- BS-Roformer（可选模型）：检测 / 打开目录 / 试跑 ----
+    @lf.get("/lf/sepro/status")
+    def lf_sepro_status(force: bool = False):
+        return _roformer_status(force=bool(force))
+
+    @lf.post("/lf/sepro/open")
+    def lf_sepro_open():
+        """在工作台里点「打开模型目录」——目录不存在就先建出来，免得用户自己找。"""
+        root = _roformer_dir()
+        try:
+            os.makedirs(root, exist_ok=True)
+        except OSError as e:
+            raise HTTPException(500, "建目录失败：%s" % e)
+        try:
+            if os.name == "nt":
+                os.startfile(root)  # noqa: S606  windows 专用，等价于双击
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", root])
+            else:
+                subprocess.Popen(["xdg-open", root])
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "path": root, "error": "%s: %s" % (type(e).__name__, e)}
+        return {"ok": True, "path": root}
+
+    @lf.post("/lf/sepro/test")
+    def lf_sepro_test(payload: dict = Body(default=None)):
+        """试跑一次（3 秒合成音），确认「模型 + 后端」这套组合真的能跑。
+
+        不拿用户的素材试——试跑失败时不应该连累正在处理的东西。
+        """
+        payload = payload or {}
+        mname = (payload.get("model") or "").strip() or None
+        t0 = time.time()
+        sr = 44100
+        t = np.arange(sr * 3, dtype="float32") / sr
+        left = 0.25 * np.sin(2 * np.pi * 220 * t) + 0.02 * np.random.randn(t.size)
+        right = 0.25 * np.sin(2 * np.pi * 330 * t) + 0.02 * np.random.randn(t.size)
+        x = np.stack([left, right], axis=1).astype("float32")
+        try:
+            y = _roformer_separate(x, sr, "vocals", mname, 0.0)
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(400, "试跑失败：%s: %s" % (type(e).__name__, e))
+        rms = float(np.sqrt(np.mean(np.square(y)))) if np.size(y) else 0.0
+        return {"ok": True, "ms": int((time.time() - t0) * 1000), "rms": round(rms, 5),
+                "model": mname or _roformer_status()["pick"]}
 
     @lf.get("/lf/media")
     def lf_media_list():
         idx = _load_materials()
-        items = sorted(idx["items"], key=lambda x: x.get("created") or 0, reverse=True)
-        return {"ok": True, "items": items, "count": len(items)}
+        items = _pin_sort(idx["items"])
+        return {"ok": True, "items": items, "count": len(items),
+                "folders": _folder_list(idx)}
+
+    # ---- 文件夹（三个库共用） ---------------------------------------------------
+    @lf.get("/lf/folders")
+    def lf_folders(kind: str = "sfx"):
+        """某个库的目录清单。count 只算直属素材，子目录的数量另算。"""
+        k = kind if kind in _PIN_KINDS else "sfx"
+        idx = _load_kind_idx(k)
+        return {"ok": True, "kind": k, "folders": _folder_list(idx)}
+
+    @lf.post("/lf/folders")
+    def lf_folder_op(req: dict = Body(default=None)):
+        """create / rename / delete / assign 四个动作，一次只做一件。
+
+        为什么不做成 REST 的 PUT/DELETE /folders/{path}：路径里带斜杠，
+        编码后前端容易写错（%2F 被反代吞掉），统一用 POST + JSON 最省事。
+        """
+        req = req or {}
+        kind = str(req.get("kind") or "")
+        action = str(req.get("action") or "").strip()
+        if kind not in _PIN_KINDS:
+            raise HTTPException(400, "kind 只能是 refs / sfx / media")
+        if action not in ("create", "rename", "delete", "assign"):
+            raise HTTPException(400, "action 只能是 create / rename / delete / assign")
+        if action == "assign":
+            path = _norm_folder(req.get("path"))
+        else:
+            path = _norm_folder(req.get("path"))
+            if not path:
+                raise HTTPException(400, "文件夹名不能为空")
+        with _LOCK:
+            idx = _load_kind_idx(kind)
+            paths = _folder_paths(idx)
+            moved = 0
+            if action == "create":
+                if len(paths) >= _FOLDER_MAX_COUNT:
+                    raise HTTPException(400, f"文件夹太多了（上限 {_FOLDER_MAX_COUNT} 个），先合并几个")
+                paths.add(path)
+            elif action == "rename":
+                new = _norm_folder(req.get("new_path") or req.get("name"))
+                if not new:
+                    raise HTTPException(400, "新文件夹名不能为空")
+                if path not in paths:
+                    raise HTTPException(404, "找不到这个文件夹")
+                if new != path and new in paths:
+                    raise HTTPException(400, "同名文件夹已经存在")
+                # 改名 = 自己 + 所有后代一起换前缀；素材上的 folder 同步改
+                kids = [p for p in paths if p == path or p.startswith(path + "/")]
+                for p in kids:
+                    paths.discard(p)
+                    paths.add(new + p[len(path):])
+                for it in idx["items"]:
+                    f = _norm_folder(it.get("folder"))
+                    if f == path or f.startswith(path + "/"):
+                        it["folder"] = new + f[len(path):]
+                        moved += 1
+                path = new
+            elif action == "delete":
+                if path not in paths:
+                    raise HTTPException(404, "找不到这个文件夹")
+                kids = [p for p in paths if p == path or p.startswith(path + "/")]
+                for p in kids:
+                    paths.discard(p)
+                # 只「取消归类」，绝不删文件：素材回到未归档，随时能重新归类
+                for it in idx["items"]:
+                    f = _norm_folder(it.get("folder"))
+                    if f == path or f.startswith(path + "/"):
+                        it.pop("folder", None)
+                        moved += 1
+            else:                                   # assign
+                ids = [str(x) for x in (req.get("ids") or []) if str(x)]
+                if not ids:
+                    raise HTTPException(400, "没有选中素材")
+                if path:
+                    paths.add(path)
+                want = set(ids)
+                for it in idx["items"]:
+                    if str(it.get("id")) not in want:
+                        continue
+                    if path:
+                        it["folder"] = path
+                    else:
+                        it.pop("folder", None)
+                    moved += 1
+            _store_folders(idx, paths)
+            _save_kind_idx(kind, idx)
+            folders = _folder_list(idx)
+        _log("longform: folder %s %s %r moved=%d", kind, action, path, moved)
+        return {"ok": True, "kind": kind, "action": action, "path": path,
+                "moved": moved, "folders": folders}
+
+    @lf.post("/lf/pin")
+    def lf_pin(req: dict = Body(default=None)):
+        """置顶 / 取消置顶。三个库通用：音色 refs、音效 sfx、导入台素材 media。
+
+        只往 index.json 里写一个 pin 时间戳，不碰任何音频文件；排序统一交给
+        _pin_sort。因为三个页面读的是同一份索引，所以在这里置顶之后，
+        台本页的音色下拉、时间轴页的音色库/音效库面板看到的顺序也是一样的。
+        """
+        req = req or {}
+        kind = str(req.get("kind") or "").strip()
+        mid = str(req.get("id") or "").strip()
+        on = bool(req.get("on", True))
+        if kind not in _PIN_KINDS:
+            raise HTTPException(400, "kind 只能是 refs / sfx / media")
+        if not mid:
+            raise HTTPException(400, "缺少 id")
+        with _LOCK:
+            if kind == "refs":
+                idx = _load_refs()
+            elif kind == "sfx":
+                idx = _load_sfx()
+            else:
+                idx = _load_materials()
+            it = next((x for x in idx["items"] if x.get("id") == mid), None)
+            if not it:
+                raise HTTPException(404, "找不到这条素材（可能已经删了）")
+            if on:
+                it["pin"] = round(time.time(), 3)   # 后置顶的排更前
+            else:
+                it.pop("pin", None)
+            if kind == "refs":
+                _write_json(_refs_index_path(), idx)
+            elif kind == "sfx":
+                _save_sfx(idx)
+            else:
+                _save_materials(idx)
+        _log("longform: pin %s %s -> %s", kind, mid, "on" if on else "off")
+        return {"ok": True, "kind": kind, "id": mid, "pin": it.get("pin") or 0}
 
     @lf.post("/lf/media/upload")
     def lf_media_upload(file: UploadFile = File(...), name: str = Form("")):
@@ -3565,7 +5499,8 @@ def register_longform(app, api, deps):
             raise HTTPException(413, f"作为音色太大（上限 {MAX_REF_BYTES // 1048576} MB），建议先裁剪")
         data, sr = _read_audio_any(path)
         item = _save_ref_audio(data, sr, req.get("name") or it.get("name") or it["id"],
-                               it.get("source") or it.get("name") or "")
+                               it.get("source") or it.get("name") or "",
+                               folder=it.get("folder") or "")
         _log("longform: material %s registered as ref %s", it["file"], item["id"])
         return {"ok": True, "ref": item}
 
@@ -3607,7 +5542,7 @@ def register_longform(app, api, deps):
         src = it.get("source") or it.get("name") or ""
 
         if target == "ref":
-            ref = _save_ref_audio(data, sr, name, src)
+            ref = _save_ref_audio(data, sr, name, src, folder=it.get("folder") or "")
             result = {"ok": True, "target": "ref", "ref": ref, "ops": labels,
                       "name": ref.get("name"), "dur": ref.get("dur"),
                       "sr": AUDIO_SR, "ch": 1}
@@ -3644,8 +5579,10 @@ def register_longform(app, api, deps):
         with _LOCK:
             idx = _load_materials()
             victims = [x for x in idx["items"] if (not ids) or x["id"] in ids]
+            sink = []
             for v in victims:
-                _trash_material(idx, v)
+                _trash_material(idx, v, sink=sink)
+            _push_trash_manifests(sink)          # 清单一次写完
             _save_materials(idx)
         _log("longform: import desk cleared %d item(s)", len(victims))
         return {"ok": True, "removed": len(victims)}
@@ -3681,12 +5618,371 @@ def register_longform(app, api, deps):
                                    "derived", op="收自音色库", parent=it["id"])
         return {"ok": True, "item": item}
 
+    # ---- 高级音效处理台 -----------------------------------------------------
+    # 三步：prepare（去人声、落作业文件）→ segment（反复调参切分）→ save（挑中的入库）
+    @lf.post("/lf/sfxb/prepare")
+    def lf_sfxb_prepare(req: dict = Body(default=None)):
+        """选中素材 →（可选）分离成人声 / 伴奏，或原样 → 存成作业文件，返回波形包络。
+
+        stem 决定「要留下哪一半」：
+          · instrumental（默认）= 去掉人声，留伴奏。切环境音 / 动作音 / 特殊音效；
+          · vocals = 去掉伴奏，留人声。切喘息、气声、耳语这类"人声但没台词"的素材；
+          · none = 不做分离（本来就是纯音效）。engine 选 none 也走这一档。
+        以前写死 instrumental，想只留人声就只能回导入台再处理一遍。
+        """
+        req = req or {}
+        mid = str(req.get("mid") or "").strip()
+        if not mid:
+            raise HTTPException(400, "先在左边选一个素材")
+        _idx, it = _mat_item_or_404(mid)
+        try:
+            data, sr = _read_audio_any(os.path.join(_mat_dir(), os.path.basename(it["file"])))
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(400, "这个素材读不出音频：%s" % e)
+
+        engine = (req.get("engine") or "roformer").lower()
+        quality = str(req.get("quality") or "std").lower()
+        residual = float(req.get("residual") or 0.0)
+        stem = str(req.get("stem") or "instrumental").lower()
+        if stem not in ("instrumental", "vocals", "none"):
+            stem = "instrumental"
+        if engine == "none":
+            stem = "none"
+        stem_label = {"instrumental": "去掉人声（留伴奏）", "vocals": "去掉伴奏（留人声）",
+                      "none": "原素材（未分离）"}[stem]
+        used, note = ("原素材（未分离）" if stem == "none" else ""), ""
+        mode = "vocals" if stem == "vocals" else "instrumental"
+        if stem != "none":
+            t0 = time.time()
+            order = {"roformer": ["roformer", "demucs", "dsp"],
+                     "demucs": ["demucs", "dsp"],
+                     "dsp": ["dsp"]}.get(engine) or ["demucs", "dsp"]
+            for eng in order:
+                try:
+                    if eng == "roformer":
+                        data = _roformer_separate(data, sr, mode, None, residual)
+                        used = "BS-Roformer"
+                    elif eng == "demucs":
+                        data = _demucs_separate(data, sr, mode, quality, residual)
+                        used = "Demucs"
+                    else:
+                        data = _separate(data, sr, mode, 0.65)
+                        used = "中置提取"
+                    break
+                except Exception as e:  # noqa: BLE001
+                    note = "%s 不可用：%s" % (eng, e)
+                    _log("longform: sfxb separate via %s failed (%s)", eng, e, level="warning")
+            _log("longform: sfxb prepare %s via %s in %.1fs", mid, used, time.time() - t0)
+
+        # 分离得干不干净，给个可判断的数：伴奏比原音低多少 dB。
+        # 纯人声素材（比如整段喘息）分离出来伴奏是空的 —— 20dB 以下基本等于没东西可切，
+        # 这时应该建议用户改用「不分离」直接从原音切，而不是在空轨上白挑十分钟。
+        env_raw = []
+        try:
+            src_data, src_sr = _read_audio_any(os.path.join(_mat_dir(), os.path.basename(it["file"])))
+            src_db = 20 * math.log10(float(np.sqrt(np.mean(
+                np.asarray(src_data, "float64") ** 2))) + 1e-12)
+            out_db = 20 * math.log10(float(np.sqrt(np.mean(
+                np.asarray(data, "float64") ** 2))) + 1e-12)
+            sep_db = round(out_db - src_db, 1)
+            # 原音轨要独立画一条波形（A/B 对照），包络一起算好带回去。
+            # 每块只取峰值、1400 个点，几十 KB，不值得再为它单独发一次请求。
+            env_raw = _sfxb_env(src_data, src_sr)
+        except Exception:  # noqa: BLE001
+            sep_db = 0.0
+
+        job = uuid.uuid4().hex[:10]
+        d = os.path.join(_sfxb_dir(), job)
+        os.makedirs(d, exist_ok=True)
+        wav = os.path.join(d, "source.wav")
+        _write_wav(wav, data, sr)
+        meta = {"job": job, "wav": wav, "sr": int(sr), "mid": mid,
+                "name": it.get("name") or "素材", "engine": used, "stem": stem,
+                "created": time.time(), "dur": round(len(data) / float(sr), 2),
+                "raw_dur": round(len(src_data) / float(src_sr), 2) if env_raw else 0.0,
+                "sep_db": sep_db}
+        try:                       # 落一份 meta：进程重启后光靠内存字典会"失忆"
+            with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False)
+        except OSError:
+            pass
+        with _SFXB["lock"]:
+            _SFXB["jobs"][job] = meta
+            _sfxb_gc()
+        return {"ok": True, "job": job, "sep_db": sep_db, "name": it.get("name") or "素材",
+                "engine": used, "stem": stem, "stem_label": stem_label,
+                "note": note, "sr": int(sr),
+                "dur": round(len(data) / float(sr), 2), "raw_dur": round(meta.get("raw_dur") or 0, 2),
+                "env": _sfxb_env(data, sr), "env_raw": env_raw,
+                "raw_url": "/api/v1/lf/sfxb/raw/%s" % job}
+
+    @lf.get("/lf/sfxb/audio/{job}")
+    def lf_sfxb_audio(job: str):
+        meta = _sfxb_job(job)
+        if not meta or not os.path.exists(meta["wav"]):
+            raise HTTPException(404, "作业已过期")
+        return FileResponse(meta["wav"], media_type="audio/wav")
+
+    @lf.get("/lf/sfxb/raw/{job}")
+    def lf_sfxb_raw(job: str):
+        """原音轨试听：直接送回素材文件本身。
+
+        为什么不复制一份到作业目录：6 分钟立体声 float32 就是 700MB 级，
+        为了 A/B 对照再存一份不值。素材文件本来就是只读的，直接流出去最省事。
+        """
+        meta = _sfxb_job(job)
+        if not meta:
+            raise HTTPException(404, "作业已过期，请重新准备素材")
+        try:
+            _idx, it = _mat_item_or_404(meta.get("mid") or "")
+        except HTTPException:
+            raise HTTPException(404, "原素材已经被删了，只剩处理后的那一轨")
+        path = os.path.join(_mat_dir(), os.path.basename(it["file"]))
+        if not os.path.exists(path):
+            raise HTTPException(404, "原素材文件不见了")
+        ext = os.path.splitext(path)[1].lower()
+        mime = {".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".aac": "audio/aac",
+                ".flac": "audio/flac", ".ogg": "audio/ogg", ".opus": "audio/ogg",
+                ".wav": "audio/wav", ".wv": "audio/x-wavpack"}.get(ext, "application/octet-stream")
+        return FileResponse(path, media_type=mime)
+
+    @lf.post("/lf/sfxb/segment")
+    def lf_sfxb_segment(req: dict = Body(default=None)):
+        """按参数切分（只读作业文件，很快，前端可以拖动就重算）。"""
+        req = req or {}
+        meta = _sfxb_job(req.get("job"))
+        if not meta:
+            raise HTTPException(404, "作业已过期，请重新点「① 准备素材」")
+        data, sr = _read_audio_any(meta["wav"])
+        mode = str(req.get("mode") or "gap")
+        if mode not in ("gap", "fg", "onset", "srt"):
+            mode = "gap"
+        cues = req.get("cues") or []
+        if mode == "srt" and not cues:
+            raise HTTPException(400, "按字幕切分需要先载入 SRT（或用「不分离」直接切）")
+        segs, fell_back = _sfxb_segments(
+            data, sr, mode=mode, cues=cues,
+            min_gap=float(req.get("min_gap") or 0.35),
+            min_len=float(req.get("min_len") or 0.2),
+            thresh_db=float(req.get("thresh_db") or 10.0),
+            pad=float(req.get("pad") or 0.03))
+        total = len(data) / float(sr)
+        if mode == "fg" and not segs:
+            mode = "gap"
+        return {"ok": True, "mode": mode, "fell_back": bool(fell_back), "count": len(segs),
+                "covered": round(sum(s["dur"] for s in segs), 2),
+                "dur": round(total, 2), "segments": segs}
+
+    @lf.post("/lf/sfxb/save")
+    def lf_sfxb_save(req: dict = Body(default=None)):
+        """把选中的片段切片入库。target = sfx（音效库）/ media（导入台）/ ref（音色库）。
+
+        每个片段可以带自己的 `ops`（首尾静音 / 淡入淡出 / 音量 / 变速 / 变调 / 标准化 …），
+        和导入台的处理是同一套实现（_apply_ops），所以两边结果一致。
+        变速与变调会改变长度：这里按**处理后的实际长度**入库，不再回头改片段范围。
+        """
+        req = req or {}
+        meta = _sfxb_job(req.get("job"))
+        if not meta:
+            raise HTTPException(404, "作业已过期，请重新准备素材")
+        items = req.get("items") or []
+        if not isinstance(items, list) or not items:
+            raise HTTPException(400, "没有勾选要保存的片段")
+        target = str(req.get("target") or "sfx").lower()
+        if target not in ("sfx", "media", "ref"):
+            target = "sfx"
+        folder = _norm_folder(req.get("folder"))
+        data, sr = _read_audio_any(meta["wav"])
+        total = len(data) / float(sr)
+        made, bad, failed = [], 0, []
+        # 一次存几百段时按批入库：索引只读一次、只在最后写一次（原来每段都读写整份索引，
+        # 100 段就要 1.3s/段，1000 段能跑十几分钟）
+        _batch_begin()
+        try:
+            made, bad, failed = _sfxb_save_items(items, data, sr, total, target, folder,
+                                                 meta, made, bad, failed)
+        finally:
+            _batch_commit()
+        _log("longform: sfxb save %d/%d -> %s (%d 跳过, %d 失败)",
+             len(made), len(items), target, bad, len(failed))
+        return {"ok": True, "count": len(made), "skipped": bad, "failed": failed[:8],
+                "target": target, "folder": folder, "items": made}
+
+    def _sfxb_save_items(items, data, sr, total, target, folder, meta, made, bad, failed):
+        """保存循环本体（放在 batch 上下文里跑，索引只落盘一次）。"""
+        for k, it in enumerate(items):
+            try:
+                a = max(0.0, float(it.get("start") or 0))
+                b = min(total, float(it.get("end") or 0))
+            except (TypeError, ValueError):
+                bad += 1
+                continue
+            if b - a < 0.02:
+                bad += 1
+                continue
+            seg = data[int(a * sr):int(b * sr)]
+            if not len(seg):
+                bad += 1
+                continue
+            try:
+                seg, sr2, labels = _sfxb_proc(seg, sr, it.get("ops"))
+            except Exception as e:  # noqa: BLE001
+                _log("longform: sfxb save proc failed %s: %s", a, e, level="warning")
+                failed.append("%.2fs: %s" % (a, e))
+                continue
+            if not len(seg):
+                bad += 1
+                continue
+            # 自动编号：位数跟着「这一次存多少段」走（120 段 → _001，1200 段 → _0001）。
+            # 固定 %02d 的话，第 100 段叫 _100，按名字排序会插到 _10 后面 ——
+            # 用户反馈的「到第 100 个就跳到 1000」就是这么来的。
+            name = (str(it.get("name") or "").strip()
+                    or _num_name(meta["name"], k + 1, len(items)))
+            op = "音效台 · %s" % (meta.get("engine") or "未分离")
+            if labels:
+                op += " + " + "+".join(dict.fromkeys(labels))
+            _t0 = time.time()
+            if target == "sfx":
+                made.append(_save_sfx_item(seg, sr2, name, meta["name"], "derived",
+                                           op=op, parent=meta.get("mid") or "",
+                                           folder=folder))
+            elif target == "ref":
+                made.append(_save_ref_audio(seg, sr2, name, meta["name"], folder=folder))
+            else:
+                made.append(_mat_add_from_audio(seg, sr2, name, meta["name"], "derived",
+                                                op=op, parent=meta.get("mid") or "",
+                                                folder=folder))
+            if os.environ.get("LF_PROF"):
+                _log("sfxb save #%d %.0fms len=%d", k + 1, (time.time() - _t0) * 1000, len(seg))
+        return made, bad, failed
+
+    @lf.post("/lf/sfxb/preview")
+    def lf_sfxb_preview(req: dict = Body(default=None)):
+        """试听「这一段 + 这套处理」的结果：落一个临时 wav 在作业目录里。
+
+        为什么不在前端算什么：变速 / 变调 / 首尾静音用的都是服务端同一套算法，
+        前端再实现一遍必然对不上；这里直接给出处理后的真实音频和时长。
+        """
+        req = req or {}
+        meta = _sfxb_job(req.get("job"))
+        if not meta:
+            raise HTTPException(404, "作业已过期，请重新准备素材")
+        data, sr = _read_audio_any(meta["wav"])
+        total = len(data) / float(sr)
+        try:
+            a = max(0.0, float(req.get("start") or 0))
+            b = min(total, float(req.get("end") or 0))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "片段范围不对")
+        if b - a < 0.02:
+            raise HTTPException(400, "片段太短")
+        seg = data[int(a * sr):int(b * sr)]
+        try:
+            seg, sr2, labels = _sfxb_proc(seg, sr, req.get("ops"))
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(400, "处理失败：%s" % e)
+        if not len(seg):
+            raise HTTPException(400, "处理后没有声音了（检查首尾静音 / 变速参数）")
+        name = "pv_%s.wav" % uuid.uuid4().hex[:8]
+        d = os.path.dirname(meta["wav"])
+        try:
+            _write_wav(os.path.join(d, name), seg, sr2)
+            # 只留最近 12 个试听文件，免得作业目录越堆越大
+            olds = sorted([f for f in os.listdir(d) if f.startswith("pv_") and f.endswith(".wav")],
+                          key=lambda f: os.path.getmtime(os.path.join(d, f)))
+            for f in olds[:-12]:
+                try:
+                    os.remove(os.path.join(d, f))
+                except OSError:
+                    pass
+        except OSError as e:
+            raise HTTPException(500, "试听文件写不进去：%s" % e)
+        return {"ok": True, "url": "/api/v1/lf/sfxb/preview/%s/%s" % (req.get("job"), name),
+                "dur": round(len(seg) / float(sr2), 3), "sr": int(sr2), "labels": labels}
+
+    @lf.get("/lf/sfxb/preview/{job}/{name}")
+    def lf_sfxb_preview_audio(job: str, name: str):
+        meta = _sfxb_job(job)
+        base = os.path.basename(name or "")
+        if not meta or not base.startswith("pv_") or not base.endswith(".wav"):
+            raise HTTPException(404, "试听文件不存在")
+        path = os.path.join(os.path.dirname(meta["wav"]), base)
+        if not os.path.exists(path):
+            raise HTTPException(404, "试听文件已过期")
+        return FileResponse(path, media_type="audio/wav")
+
+    @lf.post("/lf/sfxb/dedupe")
+    def lf_sfxb_dedupe(req: dict = Body(default=None)):
+        """找出"听感上是同一段声音"的片段，返回分组（每组第一个是代表）。
+
+        为什么不用波形相关：同一段音效每次出现都带着不同的底噪、相位和电平，
+        逐样本对齐基本不可能。改用对数梅尔谱的**频谱形状**——同一段声音的
+        频带分布几乎一样，不同声音差得远。
+        """
+        req = req or {}
+        meta = _sfxb_job(req.get("job"))
+        if not meta:
+            raise HTTPException(404, "作业已过期，请重新准备素材")
+        items = req.get("items") or []
+        if not isinstance(items, list) or len(items) < 2:
+            return {"ok": True, "groups": [], "dups": 0, "thr": 0.0}
+        thr = float(req.get("thr") or 0.985)
+        data, sr = _read_audio_any(meta["wav"])
+        feats = []
+        for it in items:
+            try:
+                a, b = float(it.get("start") or 0), float(it.get("end") or 0)
+            except (TypeError, ValueError):
+                feats.append((None, 0.0))
+                continue
+            feats.append((_sfxb_fingerprint(data, sr, a, b), max(0.0, b - a)))
+
+        # 并查集：相似度过了阈值、时长又接近的，归到一组
+        parent = list(range(len(feats)))
+
+        def find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        sims = []
+        for i in range(len(feats)):
+            vi, di = feats[i]
+            if vi is None:
+                continue
+            for j in range(i + 1, len(feats)):
+                vj, dj = feats[j]
+                if vj is None:
+                    continue
+                if di > 0 and dj > 0 and not (0.6 <= di / dj <= 1.7):
+                    continue                      # 时长差太多，不是同一种声音
+                c = float(np.dot(vi, vj))
+                if c >= thr:
+                    sims.append((i, j, round(c, 4)))
+                    ri, rj = find(i), find(j)
+                    if ri != rj:
+                        parent[rj] = ri
+
+        buckets = {}
+        for i in range(len(feats)):
+            buckets.setdefault(find(i), []).append(i)
+        groups = [{"keep": v[0], "dups": v[1:],
+                   "sim": max([c for a, b, c in sims if a in v or b in v] or [0])}
+                  for v in buckets.values() if len(v) > 1]
+        groups.sort(key=lambda g: g["keep"])
+        return {"ok": True, "thr": thr, "groups": groups,
+                "dups": sum(len(g["dups"]) for g in groups)}
+
     # ---- 音效素材库 ---------------------------------------------------------
     @lf.get("/lf/sfx")
     def lf_sfx_list():
         idx = _load_sfx()
-        items = sorted(idx["items"], key=lambda x: x.get("created") or 0, reverse=True)
-        return {"ok": True, "items": items, "count": len(items)}
+        items = _pin_sort(idx["items"])
+        return {"ok": True, "items": items, "count": len(items),
+                "folders": _folder_list(idx)}
 
     def _sfx_or_404(mid):
         idx = _load_sfx()
@@ -3719,7 +6015,7 @@ def register_longform(app, api, deps):
                 pass
         return data, sr, is_video
 
-    def _save_sfx_item(data, sr, name, src_name, kind, op="", parent=""):
+    def _save_sfx_item(data, sr, name, src_name, kind, op="", parent="", folder=""):
         if data.shape[1] > 2:
             data = data[:, :2]
         data = _resample_audio(data, sr, SFX_SR)
@@ -3733,10 +6029,19 @@ def register_longform(app, api, deps):
                 "dur": round(len(data) / float(SFX_SR), 2), "sr": SFX_SR,
                 "ch": int(1 if data.ndim == 1 else data.shape[1]),
                 "size": os.path.getsize(path), "created": int(time.time())}
+        fld = _norm_folder(folder)
+        if fld:
+            item["folder"] = fld
         with _LOCK:
-            idx = _load_sfx()
+            idx = _batch_idx("sfx")
+            own = idx is None
+            if own:
+                idx = _load_sfx()
             idx["items"].append(item)
-            _save_sfx(idx)
+            if fld:
+                _store_folders(idx, _folder_paths(idx))
+            if own:
+                _save_sfx(idx)
         return item
 
     @lf.post("/lf/sfx/upload")
@@ -3813,7 +6118,8 @@ def register_longform(app, api, deps):
         base = _safe_title(it.get("name") or "音效", "音效")[:40]
         name = _safe_title(req.get("name") or f"{base} 副本", f"{base} 副本")[:48]
         item = _save_sfx_item(data, sr, name, it.get("source") or "", it.get("kind") or "audio",
-                              op=it.get("op") or "", parent=it["id"])
+                              op=it.get("op") or "", parent=it["id"],
+                              folder=it.get("folder") or "")
         return {"ok": True, "item": item}
 
     @lf.delete("/lf/sfx/{mid}")
@@ -3834,6 +6140,63 @@ def register_longform(app, api, deps):
                     except OSError:
                         pass
         return {"ok": True}
+
+    @lf.post("/lf/sfx/bulk")
+    def lf_sfx_bulk(req: dict = Body(default=None)):
+        """音效批量操作：删除（进回收站）/ 移动文件夹 / 置顶 / 取消置顶。"""
+        req = req or {}
+        action = str(req.get("action") or "").strip()
+        ids = [str(x) for x in (req.get("ids") or []) if x]
+        if not ids:
+            raise HTTPException(400, "没有选中任何音效")
+        ids_set = set(ids[:2000])
+        if action not in ("delete", "move", "pin", "unpin"):
+            raise HTTPException(400, "action 只能是 delete / move / pin / unpin")
+        folder = _norm_folder(req.get("folder")) if action == "move" else ""
+        trash = os.path.join(_sfx_dir(), ".trash")
+        done = 0
+        with _LOCK:
+            idx = _load_sfx()
+            if action == "delete":
+                gone = [x for x in idx["items"] if x.get("id") in ids_set]
+                idx["items"] = [x for x in idx["items"] if x.get("id") not in ids_set]
+                if gone:
+                    os.makedirs(trash, exist_ok=True)
+                for it in gone:
+                    src = os.path.join(_sfx_dir(), os.path.basename(it.get("file") or ""))
+                    if not os.path.exists(src):
+                        continue
+                    try:
+                        os.replace(src, os.path.join(
+                            trash, f"{it['id']}_{os.path.basename(it['file'])}"))
+                    except OSError:
+                        try:
+                            os.remove(src)
+                        except OSError:
+                            pass
+                    done += 1
+            elif action == "move":
+                for it in idx["items"]:
+                    if it.get("id") not in ids_set:
+                        continue
+                    if folder:
+                        it["folder"] = folder
+                    else:
+                        it.pop("folder", None)
+                    done += 1
+                if folder:
+                    _store_folders(idx, _folder_paths(idx))
+            else:
+                pin = time.time() if action == "pin" else 0
+                for it in idx["items"]:
+                    if it.get("id") in ids_set:
+                        if pin:
+                            it["pin"] = pin
+                        else:
+                            it.pop("pin", None)
+                        done += 1
+            _save_sfx(idx)
+        return {"ok": True, "action": action, "count": done}
 
     @lf.post("/lf/sfx/{mid}/process")
     def lf_sfx_process(mid: str, req: dict = Body(default={})):
@@ -4027,6 +6390,76 @@ def register_longform(app, api, deps):
                 "has_initial": bool(proj) and os.path.exists(
                     os.path.join(_script_dir(sid), "initial_script.json"))}
 
+    @lf.get("/lf/scripts/{sid}/raw")
+    def lf_script_raw(sid: str):
+        """下载这个台本「导入时的原文」（真正的原稿，不是拆出来的句子）。
+
+        老台本没存过原稿（v0.29 之前建的）就退回按 origin 拼一份 —— 前端会标注出来。
+        """
+        script = _load_script(sid)
+        p = os.path.join(_script_dir(sid), "origin_raw.txt")
+        title = _safe_title(script.get("title") or "台本")
+        if os.path.isfile(p):
+            return FileResponse(p, media_type="text/plain; charset=utf-8",
+                                filename="导入原稿_" + title + ".txt")
+        rows = [str(r.get("text") or "").strip() for r in (script.get("origin") or [])]
+        rows = [r for r in rows if r]
+        if not rows:
+            raise HTTPException(404, "这个台本没有导入原稿（旧版本建的或手动建的）")
+        body = ("\n".join(rows) + "\n").encode("utf-8")
+        from urllib.parse import quote
+        return Response(body, media_type="text/plain; charset=utf-8",
+                        headers={"Content-Disposition":
+                                 "attachment; filename*=UTF-8''"
+                                 + quote("导入原稿_" + title + ".txt")})
+
+    @lf.get("/lf/scripts/{sid}/cues")
+    def lf_script_cues(sid: str):
+        """台本 → SRT 式的字幕条（给高级音频处理台用）。
+
+        为什么需要这个接口：从 SRT 导入的台本，每句本来就带着**原音时间** t0/t1；
+        处理台再让用户手工导一遍同一个 srt 属于重复劳动，还容易导错文件。
+        这里直接把台本的时间码整理成 cues，处理台点一下就能载入。
+
+        一条字幕被切成长句的几段时，这些段的 t0/t1 是一样的 —— 这里按 t0 合并回一条，
+        文本用换行拼起来，否则「按字幕切分」会把零长度区间也算成一句话。
+        """
+        script = _load_script(sid)
+        cues, cur = [], None
+        for i, ln in enumerate(script.get("lines") or []):
+            if ln.get("kind") == "tag":
+                continue
+            t0 = ln.get("t0")
+            if t0 is None:
+                continue
+            try:
+                t0 = float(t0)
+            except (TypeError, ValueError):
+                continue
+            t1 = ln.get("t1")
+            try:
+                t1 = float(t1) if t1 is not None else None
+            except (TypeError, ValueError):
+                t1 = None
+            if t1 is not None and t1 <= t0 + 0.02:
+                t1 = None
+            if cur is not None and abs(t0 - cur["t0"]) < 0.05:
+                # 同一条字幕被切成几段：合并文本，结束时间取最大
+                cur["text"] = (cur["text"] + "\n" + (ln.get("text") or "")).strip()
+                cur["lines"].append(i + 1)
+                if t1 is not None:
+                    cur["t1"] = max(cur["t1"] or t1, t1)
+                continue
+            cur = {"i": len(cues) + 1, "t0": round(t0, 3),
+                   "t1": round(t1, 3) if t1 is not None else None,
+                   "text": (ln.get("text") or "").strip(), "lines": [i + 1]}
+            cues.append(cur)
+        with_t1 = sum(1 for c in cues if c["t1"] is not None)
+        return {"ok": True, "sid": _safe_sid(sid), "title": script.get("title") or "",
+                "count": len(cues), "with_end": with_t1,
+                "duration": round(max([c["t1"] or c["t0"] for c in cues] + [0.0]), 3),
+                "cues": cues}
+
     @lf.patch("/lf/scripts/{sid}")
     def lf_script_save(sid: str, req: dict = Body(...)):
         sid = _safe_sid(sid)
@@ -4035,8 +6468,16 @@ def register_longform(app, api, deps):
             if "title" in req:
                 script["title"] = _safe_title(req["title"], script["title"])
             if isinstance(req.get("defaults"), dict):
+                dnew = req["defaults"]
                 script["defaults"].update(
-                    {k: v for k, v in req["defaults"].items() if k in _DEFAULT_PARAMS})
+                    {k: v for k, v in dnew.items() if k in _DEFAULT_PARAMS})
+                # auto_voice 不是生成参数（_eff 不会读它），是「下次导入要不要按角色标签设音色」
+                # 的备忘开关。它必须能显式关掉，所以单独处理：传 false 就删。
+                if "auto_voice" in dnew:
+                    if dnew["auto_voice"]:
+                        script["defaults"]["auto_voice"] = True
+                    else:
+                        script["defaults"].pop("auto_voice", None)
             if isinstance(req.get("sampling"), dict):
                 script["sampling"].update(
                     {k: v for k, v in req["sampling"].items() if k in _DEFAULT_SAMPLING})
@@ -4141,15 +6582,25 @@ def register_longform(app, api, deps):
         os.makedirs(d, exist_ok=True)
         return d
 
+    _IMPORT_GC_AT = [0.0]
+
     def _import_gc(keep_hours=24, max_remove=4):
         """清理过期的导入中间源（<token>.json）。
 
         **一次最多删 max_remove 个**：目录里攒到上千个过期文件时，一次性批量删除
-        会被「批量删除守卫」判定为危险操作（在这类沙箱里直接把进程干掉），
+        会被「批量删除守卫」判定为危险操作（在这类沙箱里会把整个进程打掉 ——
+        表现为服务突然 502，日志最后一行是 sitecustomize 里的 SystemExit），
         而且在请求线程里做几百次 unlink 也会拖慢导入。每次顺手清几个就够。
+
+        再加两道保险：① 十分钟才扫一次；② 删单个文件时连 SystemExit 一起吞掉 ——
+        清理是「顺手做的事」，绝不该因为它把正在跑的台本服务带走。
         """
+        now = time.time()
+        if now - _IMPORT_GC_AT[0] < 600:
+            return
+        _IMPORT_GC_AT[0] = now
         d = _import_dir()
-        cut = time.time() - keep_hours * 3600
+        cut = now - keep_hours * 3600
         gone = 0
         for fn in os.listdir(d):
             if gone >= max_remove:
@@ -4161,7 +6612,7 @@ def register_longform(app, api, deps):
                 if os.path.getmtime(p) < cut:
                     os.remove(p)
                     gone += 1
-            except OSError:
+            except (OSError, SystemExit):      # noqa: PERF203
                 pass
 
     @lf.get("/lf/import/classes")
@@ -4216,7 +6667,8 @@ def register_longform(app, api, deps):
         payload["chars"] = len(src.get("text") or "")
         _write_json(os.path.join(_import_dir(), token + ".json"), payload)
         text = (src.get("text") or "").strip()
-        preview = text[:1500] + ("…" if len(text) > 1500 else "")
+        preview = ((payload.get("raw") or text)[:1500]
+                   + ("…" if len(payload.get("raw") or text) > 1500 else ""))
         return {"ok": True, "token": token, "kind": src.get("kind"),
                 "filename": file.filename, "meta": src.get("meta") or {},
                 "chars": payload["chars"], "preview": preview,
@@ -4243,7 +6695,8 @@ def register_longform(app, api, deps):
                         "orig_name": req.get("filename") or "粘贴文本",
                         "chars": len(src.get("text") or "")})
         _write_json(os.path.join(_import_dir(), token + ".json"), payload)
-        text_all = (src.get("text") or "").strip()
+        # 预览用**原文**：srt 的 text 是按 cue 重建的，拿它预览会丢结构 / 丢元信息行
+        text_all = (src.get("raw") or src.get("text") or "").strip()
         return {"ok": True, "token": token, "kind": src.get("kind"),
                 "filename": payload["orig_name"], "meta": src.get("meta") or {},
                 "chars": payload["chars"],
@@ -4326,6 +6779,25 @@ def register_longform(app, api, deps):
         out["ok"] = True
         out["source"] = {"kind": src.get("kind"), "filename": src.get("orig_name"),
                          "chars": src.get("chars") or len(src.get("text") or "")}
+        # 预览就把「这个角色能对到哪个音色」标出来：能看到再决定要不要自动套，
+        # 而不是导入完才发现套错了。只是建议，落库仍然由 commit 的 auto_voice 决定。
+        char_idx = _char_index()
+        tag_idx = _tag_index()
+        tag_refs = {}
+        for g in (out.get("groups") or []):
+            nm = str((g or {}).get("name") or "").strip()
+            if not nm:
+                continue
+            res = _resolve_voice(nm, char_idx, tag_idx)
+            if res["source"] != "none":
+                tag_refs[nm] = {"ref": res["ref"], "ref_name": res["ref_name"],
+                                "tag": res["label"], "fuzzy": res["fuzzy"],
+                                "source": res["source"], "char": res["char_name"],
+                                "traits": res["traits"],
+                                "lines": len((g or {}).get("segments") or [])}
+        out["tag_refs"] = tag_refs
+        out["tag_count"] = len(tag_idx)
+        out["char_count"] = len(char_idx)
         return out
 
     @lf.post("/lf/import/marked")
@@ -4378,6 +6850,28 @@ def register_longform(app, api, deps):
         return {"ok": True, "kind": "origin-text", "file": fn, "path": path, "rows": len(rows),
                 "voiced": voiced, "muted": muted, "chars": len(text),
                 "preview": "\n".join([r[2] for r in rows[:12]])}
+
+    @lf.get("/lf/import/raw/{token}")
+    def lf_import_raw_get(token: str):
+        """下载「这次真正导进来的原文」（上传/粘贴时的那份，含【场景】、角色前缀、时间码）。
+
+        注意和 `/import/marked/{token}` 的区别：那个是**拆句后**的稿子（一段一行），
+        这个才是用户手上那份原始文件内容 —— 导进去发现要改原稿时，拿这个改。
+        """
+        import fastapi.responses as _fr
+        token = re.sub(r"[^0-9a-f]", "", str(token or ""))[:32]
+        if not token:
+            raise HTTPException(400, "缺少文件标识")
+        src = _load_import_src(token)
+        text = str(src.get("raw") or src.get("text") or "")
+        if not text.strip():
+            raise HTTPException(404, "这次导入没有留下原文")
+        name = _safe_title(str(src.get("orig_name") or "导入原稿").rsplit(".", 1)[0])
+        tmp = os.path.join(_import_dir(), token + ".raw.txt")
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        return _fr.FileResponse(tmp, media_type="text/plain; charset=utf-8",
+                                filename="导入原稿_" + name + ".txt")
 
     @lf.get("/lf/import/marked/{token}")
     def lf_import_marked_get(token: str):
@@ -4485,6 +6979,42 @@ def register_longform(app, api, deps):
         defaults = dict(_DEFAULT_PARAMS)
         defaults.update({k: v for k, v in (req.get("defaults") or {}).items()
                          if k in _DEFAULT_PARAMS})
+        # 智能导入时按「人物 → 音色」自动设音色。
+        # 优先级：请求里的显式值（预览里的勾选）> 老台本的 defaults.auto_voice（兼容）
+        #        > 全局设置 voice.autoVoice（默认开）。
+        raw_av = req.get("auto_voice")
+        if raw_av is None and isinstance(req.get("defaults"), dict) and "auto_voice" in req["defaults"]:
+            raw_av = req["defaults"]["auto_voice"]
+        auto_voice = (bool(_load_settings()["voice"].get("autoVoice"))
+                      if raw_av is None else bool(raw_av))
+        if auto_voice:
+            defaults["auto_voice"] = True
+        auto_rep = None
+        if auto_voice:
+            char_idx = _char_index()
+            tag_idx = _tag_index()
+            hits = {}
+            for ln in lines:
+                if (ln.get("ov") or {}).get("ref"):
+                    continue          # 分组参数里已经指定了音色：以它为准
+                res = _resolve_voice(ln.get("group"), char_idx, tag_idx)
+                if not res["ref"]:
+                    continue
+                ln["ov"] = ln.get("ov") or {}
+                ln["ov"]["ref"] = res["ref"]
+                ln["ov"]["ref_src"] = res["source"]
+                if res.get("char_name"):
+                    ln["ov"]["ref_char"] = res["char_name"]
+                key = (ln.get("group") or "", res["ref"])
+                h = hits.setdefault(key, {"name": ln.get("group") or "",
+                                          "tag": res["label"], "fuzzy": res["fuzzy"],
+                                          "ref": res["ref"], "ref_name": res["ref_name"],
+                                          "source": res["source"], "char": res["char_name"],
+                                          "traits": res["traits"], "lines": 0})
+                h["lines"] += 1
+            auto_rep = {"tags": len(tag_idx), "chars": len(char_idx),
+                        "changed": sum(h["lines"] for h in hits.values()),
+                        "matched": sorted(hits.values(), key=lambda x: -x["lines"])}
         # 导入原稿：**所有**文字（含被设成不配音的），按原文顺序。
         # 它既是台本页「原文本预览」的数据源，也会写成 `<token>.origin.txt` ——
         # 那份文件再拖回智能导入，分组/配音标记能原样还原。
@@ -4497,6 +7027,9 @@ def register_longform(app, api, deps):
             "version": 2, "id": sid, "title": title, "created": _now(), "updated": _now(),
             "defaults": defaults, "sampling": dict(_DEFAULT_SAMPLING),
             "tag_presets": [], "lines": lines, "origin": origin,
+            # 原文头几行（【场景】【人物】【字数】…）：台本页「原文本预览」展示用。
+            # 它们不朗读、不进台本，但也不是"丢了"——预览顶部能看到。
+            "origin_head": [str(x)[:200] for x in (req.get("head_lines") or [])][:12],
             "batches": out_batches if req.get("make_batches", True) else [],
             "import": {"cls": template, "template": template,
                        "filename": req.get("filename"),
@@ -4518,9 +7051,32 @@ def register_longform(app, api, deps):
                     f.write(body_txt)
         except Exception as e:  # noqa: BLE001
             _log("longform: write origin script failed: %s", e, level="warning")
+        # 「下载导入原稿」要的是**用户真正拖进来的那份原文**（带【场景】、角色前缀、
+        # 时间码），不是拆分后的句子。原样存一份到台本目录，前端直接下它。
+        try:
+            raw_txt = str(req.get("raw_text") or "")
+            if not raw_txt:
+                tk2 = re.sub(r"[^0-9a-f]", "", str(req.get("token") or ""))[:32]
+                if tk2:
+                    try:
+                        src0 = _load_import_src(tk2)
+                        raw_txt = str(src0.get("raw") or src0.get("text") or "")
+                    except HTTPException:
+                        raw_txt = ""
+            if raw_txt.strip():
+                raw_txt = raw_txt[:MAX_RAW_ORIGIN]
+                p_raw = os.path.join(_script_dir(sid), "origin_raw.txt")
+                with open(p_raw, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(raw_txt if raw_txt.endswith("\n") else raw_txt + "\n")
+                script["import"]["raw_file"] = "origin_raw.txt"
+                script["import"]["raw_chars"] = len(raw_txt)
+                _save_script(script)
+        except Exception as e:  # noqa: BLE001
+            _log("longform: write raw origin failed: %s", e, level="warning")
         _log("longform: smart import %s -> %d lines / %d groups", sid, len(lines), len(out_batches))
         return {"ok": True, "id": sid, "script": _load_script(sid), "stats": _stats(script),
-                "lines": len(lines), "groups": len(out_batches)}
+                "lines": len(lines), "groups": len(out_batches),
+                "auto_voice": auto_rep}
 
     @lf.get("/lf/import/class/{cid}")
     def lf_import_class(cid: str):
@@ -4747,6 +7303,69 @@ def register_longform(app, api, deps):
         result = _export_md(script, "txt" if req.get("format") == "txt" else "md", opts)
         return {"ok": True, **result}
 
+    @lf.post("/lf/scripts/{sid}/export/srt")
+    def lf_export_srt(sid: str, req: dict | None = Body(default=None)):
+        """导出 SRT 字幕。
+
+        时间轴自己算，不复用 _timeline —— 后者只看 `dur`，而没生成的行 `dur` 是 None，
+        会让所有字幕挤在开头 0.2 秒里。这里对没生成的行按「字数 ÷ 实测语速」估，
+        并且把行间停顿算进去，所以**没生成也能得到一版可看的字幕**，
+        只是位置是估的：界面上必须说清楚「全部生成完再导才有用」。
+        """
+        sid = _safe_sid(sid)
+        req = req or {}
+        with_tags = bool(req.get("tags", True))
+        script = _load_script(sid)
+        stats = _stats(script)
+        rate = float(stats.get("rate") or 3.5)          # 字/秒：已生成时是实测，否则 3.5
+        default_pause = script.get("defaults", {}).get("pause", _DEFAULT_PARAMS["pause"])
+
+        cues, cursor, gen, est = [], 0.0, 0, 0
+        for ln in script.get("lines") or []:
+            if ln.get("kind") == "tag":
+                # 句间标签的留白也是时间轴的一部分，跳过但不占字幕
+                cursor += float(ln.get("hold") or 0) / 1000.0
+                continue
+            txt = (ln.get("text") or "").strip()
+            if with_tags:
+                extra = [str(it.get("tag") or "").strip() for it in (ln.get("inline") or [])]
+                extra = [e for e in extra if e]
+                if extra:
+                    txt = (txt + " " + " ".join("〔%s〕" % e for e in extra)).strip()
+            if ln.get("out") and ln.get("dur"):
+                dur = float(ln["dur"])
+                gen += 1
+            else:
+                # 没生成：按字数估。至少 0.4 秒，避免一个字一行时贴着下一句
+                dur = max(0.4, len(txt) / max(1.2, rate))
+                est += 1
+            if txt:
+                cues.append((cursor, cursor + max(0.2, dur), txt))
+            cursor += dur
+            p = ln.get("pause")
+            cursor += float((default_pause if p is None else p) or 0) / 1000.0
+
+        if not cues:
+            raise HTTPException(400, "台本里没有可导出的台词")
+
+        out = []
+        for i, (t0, t1, txt) in enumerate(cues, 1):
+            out.append(str(i))
+            out.append("%s --> %s" % (_srt_time(t0), _srt_time(t1)))
+            out.append(txt)
+            out.append("")
+        name = "%s_字幕_%s.srt" % (_safe_title(script.get("title"), "台本")[:24],
+                                   time.strftime("%Y%m%d_%H%M%S"))
+        path = os.path.join(_script_dir(sid), "export", name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # utf-8-sig：Windows 记事本 / 大部分播放器直接认，不会显示成乱码
+        with open(path, "w", encoding="utf-8-sig", newline="\n") as f:
+            f.write("\n".join(out))
+        _log("longform: export srt %s (%d 条，%d 条已生成，%d 条按字数估)", sid, len(cues), gen, est)
+        return {"ok": True, "file": name, "lines": len(cues),
+                "generated": gen, "estimated": est, "rate": rate,
+                "duration": round(cursor, 2)}
+
     @lf.get("/lf/scripts/{sid}/export/map")
     def lf_export_map(sid: str):
         """导出「映射 CSV」：给后期剪辑对轴用（分组/正文/备注/时长/音频文件名）。"""
@@ -4848,7 +7467,7 @@ def register_longform(app, api, deps):
         sid = _safe_sid(sid)
         d = os.path.join(_script_dir(sid), "export")
         items = []
-        for fn in sorted(os.listdir(d), reverse=True):
+        for fn in sorted(os.listdir(d), key=_nat_key, reverse=True):
             p = os.path.join(d, fn)
             items.append({"name": fn, "size": os.path.getsize(p), "created": os.path.getmtime(p)})
         return {"ok": True, "files": items}
@@ -4883,7 +7502,7 @@ def register_longform(app, api, deps):
         sid = _safe_sid(sid)
         d = _history_dir(sid)
         items = []
-        for fn in sorted(os.listdir(d), reverse=True):
+        for fn in sorted(os.listdir(d), key=_nat_key, reverse=True):
             if not fn.endswith(".json"):
                 continue
             data = _read_json(os.path.join(d, fn), {}) or {}

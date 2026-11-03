@@ -34,7 +34,18 @@ let playingUid = null, playingRefId = null;
 let lastDownAt = 0, lastDownUid = "";
 let PRESETS = [];
 let MODEL = { loaded: false, phase: "unloaded" };
-let REFV = { view: localStorage.getItem("lf.refView") || "list", q: "" };
+let REFV = { view: localStorage.getItem("lf.refView") || "list", q: "", path: "", tag: "" };
+/* 标签库（所有音色上的标签 → 挂了哪些音色）。筛选条和「编辑标签」的候选都用它。 */
+let TAGS = { items: [], count: 0 };
+
+async function loadTags() {
+  // _loaded 一起重置：标签库为空时不要每次渲染都重发一遍请求
+  try {
+    const d = await api("/tags");
+    TAGS = { items: d.items || [], count: d.count || 0, _loaded: true };
+  } catch (e) { TAGS = { items: [], count: 0, _loaded: true }; }
+  return TAGS;
+}
 let PROG_STYLE = localStorage.getItem("lf.progStyle") || "bar";
 /* 所有能出声的元素都登记到这里：一个按钮就能全部停掉，
    切换试听时也不会出现「前一个还在响」的叠音。 */
@@ -1020,7 +1031,15 @@ function boardCard(line, idx) {
   if (line.slow) head.appendChild(el("span", "grpchip slow", "慢"));
   const info = el("span", "hint bmeta");
   const bits = [];
-  if (p.ref) bits.push("音色 " + refName(p.ref));
+  if (p.ref) {
+    const src = (line.ov && line.ov.ref)
+      ? (line.ov.ref_src === "character" ? `人物${line.ov.ref_char ? "：" + line.ov.ref_char : ""}`
+        : line.ov.ref_src === "ref-tag" ? "属性标签" : "这一句")
+      : "";
+    bits.push("音色 " + refName(p.ref) + (src ? `（${src}）` : ""));
+  } else {
+    bits.push("音色 未设置");
+  }
   bits.push("情感 " + (EMO_MODE_NAMES[Number(p.emo_mode || 0)] || "-") + " " + (p.emo_weight ?? ""));
   bits.push("停顿 " + effPause(line) + "ms");
   if (line.dur) bits.push(`音频 ${Number(line.dur).toFixed(1)}s`);
@@ -1711,7 +1730,9 @@ function mkHoldRow(host, val, label, tip) {
 function openTagPicker(afterUid) {
   const wrap = el("div", "tagpanel");
   const chips = el("div", "vecchips");
-  wrap.appendChild(el("div", "fl", "选择标签"));
+  wrap.appendChild(el("div", "fl", "选择音效标签"));
+  wrap.appendChild(el("div", "hint", "这些是音效 / 节奏标签（摩擦音 / 呼吸 / 雨声…），和「人物标签」无关；"
+    + "候选可以在「设置 → 音效标签库」里增删。"));
   wrap.appendChild(chips);
   const inp = document.createElement("input");
   inp.className = "inp"; inp.placeholder = "或输入自定义标签";
@@ -1723,7 +1744,7 @@ function openTagPicker(afterUid) {
     "音效会在「标签时间 + 留白」处响起；在时间轴上可以直接看到并拖动这段素材。");
   const getPicked = tagChips(chips, (t) => { inp.value = ""; inp.placeholder = t; });
 
-  modal("插入句间标签", wrap, async () => {
+  modal("插入句间音效标签", wrap, async () => {
     const name = (inp.value.trim() || getPicked() || "").trim();
     if (!name) { toast("标签名不能为空", true); return false; }
     rememberTag(name);
@@ -1750,7 +1771,9 @@ function openInlinePicker(line, ta, forcePos) {
   else if (ta && document.activeElement === ta) pos = ta.selectionStart;
   const wrap = el("div", "tagpanel");
   const chips = el("div", "vecchips");
-  wrap.appendChild(el("div", "fl", "选择标签"));
+  wrap.appendChild(el("div", "fl", "选择音效标签"));
+  wrap.appendChild(el("div", "hint", "这些是音效 / 节奏标签（摩擦音 / 呼吸 / 雨声…），和「人物标签」无关；"
+    + "候选可以在「设置 → 音效标签库」里增删。"));
   wrap.appendChild(chips);
   const inp = document.createElement("input");
   inp.className = "inp"; inp.placeholder = "或输入自定义标签";
@@ -1765,7 +1788,7 @@ function openInlinePicker(line, ta, forcePos) {
     "句中标签本身不出声，只标位置；挂了音效就会在「句中时间 + 延迟」处响起，并在时间轴上生成对应素材（不会改变这一句的音频）。");
   const getPicked = tagChips(chips, (t) => { inp.value = ""; inp.placeholder = t; });
 
-  modal("插入句中标签", wrap, async () => {
+  modal("插入句中音效标签", wrap, async () => {
     const name = (inp.value.trim() || getPicked() || "").trim();
     if (!name) { toast("标签名不能为空", true); return false; }
     rememberTag(name);
@@ -1799,7 +1822,7 @@ function openInlineEdit(line, it) {
   wrap.appendChild(el("div", "hint",
     `这一句从 ≈${abs.toFixed(2)}s 开始；标签落点 ≈${(abs + (posCtl.get() / Math.max(1, (line.text || "").length)) * estSec(line) + hold.get() / 1000).toFixed(2)}s（按当前字数估）`));
 
-  modal("编辑句中标签", wrap, async () => {
+  modal("编辑句中音效标签", wrap, async () => {
     it.tag = inp.value.trim() || it.tag;
     it.pos = posCtl.get();
     it.hold = hold.get();
@@ -1834,6 +1857,7 @@ function openTagEdit(line) {
   inp.className = "inp"; inp.value = line.tag || "";
   inp.placeholder = "标签名（例如 音效1 / 停顿 / 转场）";
   wrap.appendChild(el("div", "fl", "标签名"));
+  wrap.appendChild(el("div", "hint", "这是音效标签（不是人物标签）：只决定这一处响什么、留多久白。"));
   wrap.appendChild(inp);
 
   const hold = mkHoldRow(wrap, line.hold || 0, "留白",
@@ -1858,7 +1882,7 @@ function openTagEdit(line) {
     "「从音效库挑…」会换成素材库里的另一段（带预览）；上面的下拉只在本库里选。"));
   hold.onchange = drawNow;
 
-  modal("修改句间标签", wrap, async () => {
+  modal("修改句间音效标签", wrap, async () => {
     pushPropUndo("修改句间标签", [line.uid]);
     line.tag = inp.value.trim() || line.tag;
     line.hold = hold.get();
@@ -1890,7 +1914,20 @@ function openLineProps(line) {
     refSel.appendChild(o);
   });
   refSel.value = (line.ov && line.ov.ref) || "";
-  wrap.appendChild(el("div", "fl", "音色（留空 = 跟随默认：" + refName((SCRIPT.defaults || {}).ref) + "）"));
+  /* 当前生效音色 + 来源：以前只写「留空 = 跟随默认」，人物识别已经把音色写进这一句时，
+     看着像"还是默认的"，实际生成用的是另一个 —— 这里直接摊开说。 */
+  const effBar = el("div", "effbar");
+  const own = (line.ov && line.ov.ref) || "";
+  const srcTxt = own
+    ? (line.ov.ref_src === "character"
+      ? `来自人物「${line.ov.ref_char || (line.group || "")}」`
+      : line.ov.ref_src === "ref-tag" ? "来自音色属性标签" : "这一句单独指定")
+    : `跟随台本默认（${refName((SCRIPT.defaults || {}).ref) || "未设置"}）`;
+  effBar.appendChild(el("span", null, "当前生效音色："));
+  effBar.appendChild(el("b", null, refName(p.ref) || "未设置"));
+  effBar.appendChild(el("span", "mk" + (own ? " char" : ""), srcTxt));
+  wrap.appendChild(effBar);
+  wrap.appendChild(el("div", "fl", "音色（留空 = 跟随台本默认：" + (refName((SCRIPT.defaults || {}).ref) || "未设置") + "）"));
   wrap.appendChild(refSel);
 
   /* 情感：模式 / 参考音频 / 向量 / 描述 / 权重 —— 与主界面同一套字段，
@@ -1980,7 +2017,17 @@ function openLineProps(line) {
     }
     pushPropUndo("修改第 " + at + " 行属性", [line.uid]);
     line.ov = line.ov || {};
-    if (refSel.value) line.ov.ref = refSel.value; else delete line.ov.ref;
+    if (refSel.value) {
+      if (line.ov.ref !== refSel.value) {
+        line.ov.ref = refSel.value;
+        delete line.ov.ref_src;      // 手动改过：来源标记作废
+        delete line.ov.ref_char;
+      }
+    } else {
+      delete line.ov.ref;
+      delete line.ov.ref_src;
+      delete line.ov.ref_char;
+    }
     const em = emo.read();
     if (em.emo_mode == null) delete line.ov.emo_mode; else line.ov.emo_mode = em.emo_mode;
     line.ov.emo_weight = em.emo_weight;
@@ -2069,17 +2116,17 @@ function openBulkProps() {
   });
   const rowRef = mkRow("音色", refSel);
 
-  // 情感模式
-  const modeSel = document.createElement("select");
-  modeSel.className = "sel grow";
-  modeSel.innerHTML = '<option value="">跟随全局默认</option>' +
-    EMO_MODE_NAMES.map((n, i) => `<option value="${i}">${i} ${n}</option>`).join("");
-  const rowMode = mkRow("情感模式", modeSel);
-
-  // 情感参考音频（模式 1 用）：和单行属性同一套选择器，也能从外部导入
-  const emoAudioHost = el("div", "grow");
-  const emoAudio = EmoCtl.audio(emoAudioHost, {
-    api: API, refs: refOptions(), value: "", toast,
+  /* 情感整块交给共用组件（EmoCtl.mount）：模式一改，只展开对应的那一块 ——
+     参考音频 / 8 轴向量 / 描述文本。以前这里是四五个独立行全铺开，
+     批量改属性时既占地方又容易看错"到底哪个生效"。 */
+  const emoHost = el("div", "grow");
+  const emoCtl = EmoCtl.mount(emoHost, {
+    api: API, refs: refOptions(), follow: true,
+    defaultMode: (SCRIPT.defaults || {}).emo_mode ?? 0,
+    defaultRef: (SCRIPT.defaults || {}).emo_ref || "",
+    defaultName: (SCRIPT.defaults || {}).emo_ref ? refName((SCRIPT.defaults || {}).emo_ref) : "",
+    weight: (SCRIPT.defaults || {}).emo_weight ?? 0.65,
+    toast,
     onUploaded: async (ref) => {
       await loadMeta();
       const list = refOptions();
@@ -2087,28 +2134,7 @@ function openBulkProps() {
       return list.concat([{ ...ref, group: "我的音色", editable: true, uses: ["emo"] }]);
     },
   });
-  const rowEmoRef = mkRow("情感参考音频", emoAudioHost, null, true);
-
-  // 情感权重
-  const weight = document.createElement("input");
-  weight.type = "range"; weight.min = "0"; weight.max = "1"; weight.step = "0.01";
-  weight.value = (SCRIPT.defaults || {}).emo_weight ?? 0.65;
-  const wOut = el("span", "mono", Number(weight.value).toFixed(2));
-  weight.oninput = () => { wOut.textContent = Number(weight.value).toFixed(2); };
-  const wWrap = el("div", "row2 grow");
-  wWrap.appendChild(weight); wWrap.appendChild(wOut);
-  const rowWeight = mkRow("情感权重", wWrap);
-
-  // 情感向量：8 轴（滑杆 + −/＋）+ 快捷填充，与单行属性、主界面一致
-  const vecHost = el("div", "grow");
-  const vecCtl = EmoCtl.vector(vecHost, { value: [] });
-  const rowVec = mkRow("情感向量", vecHost, null, true);
-
-  // 情感描述
-  const emoTxt = document.createElement("input");
-  emoTxt.className = "inp grow";
-  emoTxt.placeholder = "情感描述文本（模式 3 用），留空 = 清除";
-  const rowEmoTxt = mkRow("情感描述", emoTxt);
+  const rowEmo = mkRow("情感（模式 / 权重 / 参考 / 向量 / 文本）", emoHost, null, true);
 
   // 停顿
   const pauseInp = document.createElement("input");
@@ -2161,7 +2187,7 @@ function openBulkProps() {
 
   const totalLabel = `${targets.length} 句` + (tagTargets.length ? ` + ${tagTargets.length} 标签` : "");
   modal(`批量修改属性（${totalLabel}）`, wrap, async () => {
-    const picked = [rowRef, rowMode, rowWeight, rowVec, rowEmoTxt, rowEmoRef, rowPause, rowTag,
+    const picked = [rowRef, rowEmo, rowPause, rowTag,
       clearRow, tagNameRow, tagHoldRow, tagSfxRow].filter((r) => r && r.chk.checked);
     if (!picked.length) { toast("至少勾选一项要修改的属性", true); return false; }
     pushPropUndo(`批量改属性（${targets.length} 句${tagTargets.length ? ` / ${tagTargets.length} 标签` : ""}）`,
@@ -2173,21 +2199,17 @@ function openBulkProps() {
       if (rowRef.chk.checked) {
         if (refSel.value) l.ov.ref = refSel.value; else delete l.ov.ref;
       }
-      if (rowMode.chk.checked) {
-        if (modeSel.value !== "") l.ov.emo_mode = parseInt(modeSel.value, 10); else delete l.ov.emo_mode;
-      }
-      if (rowWeight.chk.checked) l.ov.emo_weight = Number(weight.value);
-      if (rowVec.chk.checked) {
-        const v = vecCtl.get();
-        if (v.some((x) => x > 0)) l.ov.emo_vec = v.slice(); else delete l.ov.emo_vec;
-      }
-      if (rowEmoRef.chk.checked) {
-        const r = emoAudio.get();
-        if (r) l.ov.emo_ref = r; else delete l.ov.emo_ref;
-      }
-      if (rowEmoTxt.chk.checked) {
-        const v = emoTxt.value.trim();
-        if (v) l.ov.emo_text = v; else delete l.ov.emo_text;
+      if (rowEmo.chk.checked) {
+        // 组件读回来的是一份完整的情感参数：只写「有值」的项，
+        // 空值 = 清除该行覆盖（回到全局默认），和单行属性面板一致。
+        const em = emoCtl.read();
+        if (em.emo_mode == null) delete l.ov.emo_mode;
+        else l.ov.emo_mode = em.emo_mode;
+        if (em.emo_weight != null) l.ov.emo_weight = em.emo_weight;
+        if (em.emo_vec && em.emo_vec.some((x) => x > 0)) l.ov.emo_vec = em.emo_vec.slice();
+        else delete l.ov.emo_vec;
+        if (em.emo_text) l.ov.emo_text = em.emo_text; else delete l.ov.emo_text;
+        if (em.emo_ref) l.ov.emo_ref = em.emo_ref; else delete l.ov.emo_ref;
       }
       if (rowPause.chk.checked) {
         const v = pauseInp.value.trim();
@@ -3243,24 +3265,19 @@ function batchParamControls(existing) {
   wrap.appendChild(el("div", "fl", "音色"));
   wrap.appendChild(refSel);
 
-  const modeSel = document.createElement("select");
-  modeSel.className = "sel";
-  modeSel.innerHTML = EMO_MODE_NAMES.map((n, i) => `<option value="${i}">${i} ${n}</option>`).join("");
-  modeSel.value = String(p.emo_mode ?? 0);
-  wrap.appendChild(el("div", "fl", "情感模式"));
-  wrap.appendChild(modeSel);
-
-  const weight = document.createElement("input");
-  weight.type = "range"; weight.min = "0"; weight.max = "1"; weight.step = "0.01";
-  weight.value = p.emo_weight ?? 0.65;
-  const wlab = el("div", "fl", "情感权重 " + Number(weight.value).toFixed(2));
-  weight.oninput = () => { wlab.textContent = "情感权重 " + Number(weight.value).toFixed(2); };
-  wrap.appendChild(wlab); wrap.appendChild(weight);
-
-  // 情感参考音频（模式 1 用）
-  const emoAudioHost = el("div");
-  const emoAudio = EmoCtl.audio(emoAudioHost, {
-    api: API, refs: refOptions(), value: p.emo_ref || "", toast,
+  /* 情感：模式 / 权重 / 参考音频 / 8 轴向量 / 描述文本，全部收进共用组件。
+     选哪个模式才展开哪一块 —— 之前是「模式 1 生效」「模式 2 生效」两个块同时铺开，
+     还缺了模式 3 的文本输入（选了「情感文本」却没有地方写）。 */
+  const emoHost = el("div");
+  const emoCtl = EmoCtl.mount(emoHost, {
+    api: API, refs: refOptions(), follow: false,
+    mode: p.emo_mode == null ? 0 : p.emo_mode,
+    weight: p.emo_weight ?? 0.65,
+    vec: p.emo_vec || [],
+    text: p.emo_text || "",
+    emoRef: p.emo_ref || "",
+    defaultMode: (SCRIPT.defaults || {}).emo_mode ?? 0,
+    toast,
     onUploaded: async (ref) => {
       await loadMeta();
       const list = refOptions();
@@ -3268,13 +3285,8 @@ function batchParamControls(existing) {
       return list.concat([{ ...ref, group: "我的音色", editable: true, uses: ["emo"] }]);
     },
   });
-  wrap.appendChild(el("div", "fl", "情感参考音频（模式 1 生效）"));
-  wrap.appendChild(emoAudioHost);
-
-  const vecHost = el("div");
-  const vecCtl = EmoCtl.vector(vecHost, { value: p.emo_vec || [] });
-  wrap.appendChild(el("div", "fl", "情感向量（模式 2 生效）"));
-  wrap.appendChild(vecHost);
+  wrap.appendChild(el("div", "fl", "情感（模式决定下面展开哪一项）"));
+  wrap.appendChild(emoHost);
 
   const pauseInp = document.createElement("input");
   pauseInp.className = "inp"; pauseInp.type = "number"; pauseInp.min = "0";
@@ -3286,29 +3298,27 @@ function batchParamControls(existing) {
   return {
     node: wrap,
     read() {
+      const em = emoCtl.read();
       const params = {
         ref: refSel.value || "",
-        emo_mode: parseInt(modeSel.value, 10) || 0,
-        emo_weight: Number(weight.value),
-        emo_ref: emoAudio.get() || "",
+        emo_mode: em.emo_mode == null ? 0 : em.emo_mode,
+        emo_weight: em.emo_weight == null ? 0.65 : em.emo_weight,
+        emo_ref: em.emo_ref || "",
         pause: pauseInp.value.trim() === "" ? null
           : Math.max(0, Math.min(30000, parseInt(pauseInp.value, 10) || 0)),
       };
-      const v = vecCtl.get();
-      if (params.emo_mode === 2 && v.some((x) => x > 0)) params.emo_vec = v.slice();
+      if (em.emo_vec && em.emo_vec.some((x) => x > 0)) params.emo_vec = em.emo_vec.slice();
+      if (em.emo_text) params.emo_text = em.emo_text;
       return params;
     },
     /* 把一套参数（预设）填进这些控件，供用户再看一眼 / 微调 */
     set(params) {
       const q = params || {};
       if (q.ref !== undefined) refSel.value = q.ref || "";
-      if (q.emo_mode != null) modeSel.value = String(q.emo_mode);
-      if (q.emo_weight != null) {
-        weight.value = String(q.emo_weight);
-        wlab.textContent = "情感权重 " + Number(weight.value).toFixed(2);
-      }
-      if (Array.isArray(q.emo_vec)) vecCtl.set(q.emo_vec);
-      if (q.emo_ref !== undefined && emoAudio && emoAudio.set) emoAudio.set(q.emo_ref || "");
+      emoCtl.apply({
+        emo_mode: q.emo_mode, emo_weight: q.emo_weight, emo_vec: q.emo_vec,
+        emo_text: q.emo_text, emo_ref: q.emo_ref,
+      });
       if (q.pause !== undefined) pauseInp.value = q.pause == null ? "" : String(q.pause);
     },
   };
@@ -3597,6 +3607,26 @@ function bindDefaultEmo() {
   }, () => syncDefaultPanel());
 }
 
+/* 默认情感模式 → 只显示对应的那一块（参考音频 / 向量 / 描述文本） */
+function paintDefaultEmoMode() {
+  const m = parseInt($("dEmoMode").value, 10) || 0;
+  const g = (id, on) => { const n = $(id); if (n) n.hidden = !on; };
+  g("dEmoRefGrp", m === 1);
+  g("dEmoVecGrp", m === 2);
+  g("dEmoTextGrp", m === 3);
+}
+
+function bindDefaultText() {
+  if (!SCRIPT) return;
+  const v = ($("dEmoText").value || "").trim();
+  const cur = (SCRIPT.defaults || {}).emo_text || "";
+  if (v === cur) return;
+  guardDefaultChange("默认情感描述", () => {
+    SCRIPT.defaults = SCRIPT.defaults || {};
+    if (v) SCRIPT.defaults.emo_text = v; else delete SCRIPT.defaults.emo_text;
+  }, () => syncDefaultPanel());
+}
+
 function syncDefaultPanel() {
   if (!SCRIPT) return;
   const d = SCRIPT.defaults || {};
@@ -3607,7 +3637,10 @@ function syncDefaultPanel() {
     em.vec.set(d.emo_vec || []);
   }
   $("dRef").value = d.ref || "";
+  if (typeof paintCharSwitch === "function") paintCharSwitch();
   $("dEmoMode").value = String(d.emo_mode ?? 0);
+  $("dEmoText").value = d.emo_text || "";
+  paintDefaultEmoMode();
   $("dWeight").value = d.emo_weight ?? 0.65;
   $("dWeightOut").textContent = Number($("dWeight").value).toFixed(2);
   $("dPause").value = d.pause ?? 200;
@@ -3756,6 +3789,12 @@ function initDefaultPanel() {
   };
   guardField("dRef", "ref", "默认音色", (v) => v || "");
   guardField("dEmoMode", "emo_mode", "默认情感模式", (v) => parseInt(v, 10) || 0);
+  // 改模式就换展开的那一块（guardField 已经挂了 onchange，这里再挂一个监听器，互不覆盖）
+  $("dEmoMode").addEventListener("change", paintDefaultEmoMode);
+  $("dEmoText").onchange = bindDefaultText;
+  $("dEmoText").onkeydown = (e) => {
+    if (e.key === "Enter") { e.preventDefault(); bindDefaultText(); }
+  };
   guardField("dWeight", "emo_weight", "默认情感权重", (v) => +v,
     () => { $("dWeightOut").textContent = Number($("dWeight").value).toFixed(2); });
   guardField("dPause", "pause", "默认停顿",
@@ -3778,6 +3817,19 @@ function initDefaultPanel() {
   ["sTopK", "sBeams", "sRep", "sMaxMel"].forEach((id) => ($(id).onchange = bindS));
   $("btnSaveDefault").onclick = async () => { await saveNow(); toast("台本默认参数已保存"); };
   if ($("btnSaveSettings")) $("btnSaveSettings").onclick = saveSettings;
+
+  /* 人物标签库（设置面板上半部分，跨台本） */
+  if ($("setAutoVoice")) {
+    $("setAutoVoice").onchange = () => saveAutoVoiceSetting($("setAutoVoice").checked);
+  }
+  if ($("btnCharNew")) $("btnCharNew").onclick = () => editChar(null);
+  if ($("btnCharFromScript")) $("btnCharFromScript").onclick = () => newCharFromScript();
+  if ($("btnAutoVoice")) $("btnAutoVoice").onclick = () => autoVoiceRun();
+  if ($("charSearch")) {
+    $("charSearch").oninput = () => { CHARS.q = $("charSearch").value; renderChars(); };
+  }
+  if ($("btnTaglibTrait")) $("btnTaglibTrait").onclick = () => openTaglib("trait");
+  if ($("btnTaglibSfx")) $("btnTaglibSfx").onclick = () => openTaglib("sfx");
 }
 
 /* ------------------------------ 分句工具 ------------------------------ */
@@ -4299,13 +4351,42 @@ async function refreshTopStatus(force) {
       ffe.title = ff ? (caps.ffmpeg_path || "已就绪") : "视频抽音频不可用；去「📥 素材导入台」里上传或指定";
     }
     const okDm = !!dm.available;
+    const ro = (caps && caps.roformer) || {};
+    // 这一行说「默认引擎」Demucs 的状态；Roformer 单独一行（下面），不然两行都在说同一件事
     setDot("tsSepDot", okDm, false);
     const se = $("tsSep");
     if (se) {
       se.textContent = okDm
         ? `Demucs（${dm.device || "cpu"}${dm.offline ? " · 离线权重" : " · 需联网" }）`
         : "只有 DSP 中置提取";
-      se.title = okDm ? "高精度人声分离可用" : ("Demucs 不可用：" + (dm.reason || "vendor2 缺失"));
+      se.title = okDm
+        ? ("高精度人声分离可用" + (ro.ready ? "（也可以用 BS-Roformer：见下一行）" : ""))
+        : ("Demucs 不可用：" + (dm.reason || "vendor2 缺失"));
+    }
+    // BS-Roformer 是可选引擎，这里只报状态：没装就说「可选」，别吓人
+    setDot("tsRoDot", !!ro.ready, false);
+    const roe = $("tsRo");
+    if (roe) {
+      if (ro.ready) {
+        const nm = String(ro.pick || "").replace(/\.[a-z]+$/i, "");
+        roe.textContent = "BS-Roformer（" + (nm.length > 16 ? nm.slice(0, 16) + "…" : nm) + "）";
+        roe.title = "模型：" + (ro.pick || "") + "\n点右边 ? 打开说明";
+      } else if (ro.count) {
+        roe.textContent = "BS-Roformer（缺推理后端）";
+        roe.title = (ro.reason || "装了 pymss 才能用") + "（已发现 " + ro.count + " 个模型）";
+      } else {
+        roe.textContent = "未启用（可选）";
+        roe.title = "Demucs 够用就不用管它；点右边 ? 看怎么装";
+      }
+    }
+    const roh = $("tsRoHelp");
+    if (roh && !roh._b) {
+      roh._b = true;
+      roh.onclick = () => {
+        const d = $("btnImportDesk");
+        if (d) d.click();
+        setTimeout(() => { showRoPanel(true, true); }, 420);
+      };
     }
     if (force) toast("已重新检测模型与依赖");
   } catch (e) {
@@ -4351,6 +4432,8 @@ function initExportPanel() {
   $("btnExportZipAll").onclick = () => doZipExport(null);
   $("btnExportMd").onclick = () => doScriptExport("md");
   $("btnExportTxt").onclick = () => doScriptExport("txt");
+  const bsrt = $("btnExportSrt");
+  if (bsrt) bsrt.onclick = () => doScriptExport("srt");
   $("btnExRefresh").onclick = refreshExports;
 
   // 导出选项 → 实时重算体积预估
@@ -4749,11 +4832,12 @@ async function doZipExport(uids) {
 async function doScriptExport(fmt) {
   if (!SCRIPT) return;
   if (dirty) await saveNow();
+  const isSrt = fmt === "srt";
   $("exMdResult").textContent = "正在生成…";
   try {
-    const r = await api(`/scripts/${SCRIPT.id}/export/script`, {
+    const r = await api(`/scripts/${SCRIPT.id}/export/${isSrt ? "srt" : "script"}`, {
       method: "POST",
-      body: JSON.stringify({
+      body: JSON.stringify(isSrt ? { tags: $("txTags").checked } : {
         format: fmt,
         timestamps: $("txTs").checked,
         meta: $("txMeta").checked,
@@ -4761,11 +4845,23 @@ async function doScriptExport(fmt) {
       }),
     });
     $("exMdResult").innerHTML = "";
-    $("exMdResult").appendChild(el("div", null, `已生成，时长 ${fmtDur(r.duration)}`));
+    if (isSrt) {
+      // 关键提示：没生成音频时时间是按字数估的，导出来只能当"大致对位"用。
+      // 这句话必须紧跟着结果出现，不能只写在按钮下面 —— 用户点完就看结果。
+      const est = Number(r.estimated || 0);
+      const line = el("div", null, `已生成 ${r.lines} 条字幕，时长 ${fmtDur(r.duration)}`);
+      if (est > 0) {
+        line.appendChild(el("span", "hint",
+          `　（其中 ${est} 行还没生成语音，时间按字数估算 —— 全部生成完再导一次才准）`));
+      }
+      $("exMdResult").appendChild(line);
+    } else {
+      $("exMdResult").appendChild(el("div", null, `已生成，时长 ${fmtDur(r.duration)}`));
+    }
     const box = el("div", "exp");
     box.appendChild(el("div", "n", r.file));
     const rr = el("div", "r");
-    const a = el("a", null, "下载 " + (fmt === "md" ? "Markdown" : "纯文本"));
+    const a = el("a", null, "下载 " + (fmt === "md" ? "Markdown" : (isSrt ? "SRT 字幕" : "纯文本")));
     a.href = exportUrl(SCRIPT.id, r.file);
     a.download = r.file;
     rr.appendChild(a);
@@ -4811,7 +4907,12 @@ function initRefsPanel() {
   const go = $("btnGoMedia");
   if (go) go.onclick = () => openDrawer("media", "ref");
   const rf = $("btnRefRefresh");
-  if (rf) rf.onclick = async () => { await loadMeta(); renderRefList(); toast("音色列表已刷新"); };
+  if (rf) rf.onclick = async () => {
+    await loadMeta();
+    await loadTags();          // 标签可能是在别处加的：刷新时一起重读
+    renderRefList();
+    toast("音色列表已刷新");
+  };
   const seg = $("refViewSeg");
   if (seg) {
     seg.querySelectorAll("button").forEach((b) => {
@@ -4824,7 +4925,7 @@ function initRefsPanel() {
     });
   }
   const sq = $("refSearch");
-  if (sq) sq.oninput = () => { REFV.q = sq.value; renderRefList(); };
+  if (sq) sq.oninput = () => { REFV.q = sq.value; REFV.limit = 300; renderRefList(); };
   $("btnSavePreset").onclick = savePreset;
   const ps = $("presetSearch");
   if (ps) ps.oninput = () => { PRESET_Q = ps.value; renderPresets(); };
@@ -4856,9 +4957,40 @@ async function uploadRefFiles(files) {
 }
 
 function refVisible(r) {
+  if (!inFolder(r.folder, REFV.path)) return false;
+  if (REFV.tag && !(r.tags || []).some((t) => t === REFV.tag)) return false;
   const q = (REFV.q || "").trim().toLowerCase();
   if (!q) return true;
-  return ((r.name || "") + " " + (r.group || "") + " " + (r.id || "")).toLowerCase().includes(q);
+  // 搜索也匹配标签：记得「阿澈那个青年音」但忘了音色名时很有用
+  return ((r.name || "") + " " + (r.group || "") + " " + (r.id || "") + " "
+    + (r.tags || []).join(" ")).toLowerCase().includes(q);
+}
+
+/* 标签筛选条：全部 + 每个标签（带挂了多少个音色）。只列「有音色在用」的标签。 */
+function refTagBar() {
+  const box = $("refTagBar");
+  if (!box) return;
+  box.innerHTML = "";
+  const items = (TAGS.items || []);
+  if (!items.length) { box.hidden = true; return; }
+  box.hidden = false;
+  // 先放一个小图标：这行是「按标签筛」，别和上面的文件夹条（也有「全部」）混了
+  box.appendChild(el("span", "tagbar-lead", "🏷"));
+  const chip = (label, on, title, fn) => {
+    const b = el("button", "tagchip" + (on ? " on" : ""), label);
+    if (title) b.title = title;
+    b.onclick = fn;
+    box.appendChild(b);
+  };
+  chip("不限标签", !REFV.tag, "不按标签过滤",
+    () => { REFV.tag = ""; REFV.limit = 300; renderRefList(); });
+  items.slice(0, 40).forEach((t) => {
+    chip(`${t.tag}${t.count > 1 ? ` · ${t.count}` : ""}`, REFV.tag === t.tag,
+      t.count > 1
+        ? `${t.count} 个音色都标了「${t.tag}」，自动套用会用排在前面的那个：${t.refs[0].name}`
+        : `只看标了「${t.tag}」的音色`,
+      () => { REFV.tag = REFV.tag === t.tag ? "" : t.tag; REFV.limit = 300; renderRefList(); });
+  });
 }
 
 function refPlayBtn(r) {
@@ -4889,6 +5021,187 @@ function refActions(r, compact) {
   return acts;
 }
 
+/* ===================== 音色库 / 音效库的多选 =====================
+   文件夹有了之后，一次整理几十条就得先能多选。这里给两个库共用一套：
+   · 每行左边一个勾选框；Ctrl / Shift 点行也能勾（Shift 连选）
+   · 勾了之后列表上方出现批量条：全选 / 反选 / 清空 + 移动 / 标签 / 置顶 / 删除
+   · 右键点在「已勾选的某一条」上时，菜单顶部直接给这几个批量动作
+   和导入台的多选（MAT.sel）是同一套交互，不用另学一遍。
+================================================================= */
+const LIBSEL = { refs: new Set(), sfx: new Set() };
+
+function libSelIds(kind) {
+  return [...(LIBSEL[kind] || [])];
+}
+
+function libSelHas(kind, id) {
+  return !!(LIBSEL[kind] && LIBSEL[kind].has(id));
+}
+
+function libSelToggle(kind, id, on) {
+  const set = LIBSEL[kind];
+  if (!set) return;
+  const want = on === undefined ? !set.has(id) : !!on;
+  if (want) set.add(id); else set.delete(id);
+}
+
+function libSelClear(kind) {
+  (LIBSEL[kind] || new Set()).clear();
+}
+
+/* 列表重绘时把已经不存在的 id 去掉（删完 / 换目录之后） */
+function libSelPrune(kind, items) {
+  const alive = new Set((items || []).map((x) => x.id));
+  [...(LIBSEL[kind] || [])].forEach((id) => { if (!alive.has(id)) LIBSEL[kind].delete(id); });
+}
+
+/* Shift 连选：按「当前列表里的先后」把一段都勾上 */
+function libSelRange(kind, from, to) {
+  const a = Math.min(from, to), b = Math.max(from, to);
+  const set = LIBSEL[kind];
+  const box = $(kind === "refs" ? "refList" : "sfxList");
+  if (!box) return;
+  const rows = [...box.querySelectorAll(".refitem, .matitem, .reftile, .mattile")]
+    .filter((r) => r.querySelector(".libchk"));
+  for (let i = a; i <= b && i < rows.length; i++) {
+    const cb = rows[i].querySelector(".libchk");
+    if (!cb) continue;
+    cb.checked = true;
+    const id = rows[i].dataset.lid;
+    if (id) set.add(id);
+  }
+}
+
+/* 行首的勾选框：不同视图都插同一个东西 */
+function libCheck(kind, id, rerender) {
+  const cb = document.createElement("input");
+  cb.type = "checkbox";
+  cb.className = "libchk";
+  cb.checked = libSelHas(kind, id);
+  cb.onclick = (e) => {
+    e.stopPropagation();
+    libSelToggle(kind, id, cb.checked);
+    rerender();
+  };
+  return cb;
+}
+
+/* 批量工具条 */
+function libSelBar(kind, hostId, items, rerender, opts) {
+  const host = $(hostId);
+  if (!host) return;
+  const n = (LIBSEL[kind] || new Set()).size;
+  host.innerHTML = "";
+  if (!n) { host.hidden = true; return; }
+  host.hidden = false;
+  host.appendChild(el("b", null, `已选 ${n}`));
+  const all = el("button", "btn mini ghost", "全选");
+  all.onclick = () => {
+    (items || []).slice(0, 3000).forEach((x) => LIBSEL[kind].add(x.id));
+    rerender();
+  };
+  const inv = el("button", "btn mini ghost", "反选");
+  inv.onclick = () => {
+    (items || []).slice(0, 3000).forEach((x) => {
+      if (LIBSEL[kind].has(x.id)) LIBSEL[kind].delete(x.id); else LIBSEL[kind].add(x.id);
+    });
+    rerender();
+  };
+  const clr = el("button", "btn mini ghost", "清空");
+  clr.onclick = () => { libSelClear(kind); rerender(); };
+  host.appendChild(all); host.appendChild(inv); host.appendChild(clr);
+  host.appendChild(el("span", "spacer"));
+
+  if (window.LibFolders) {
+    const mv = el("button", "btn mini", "📁 移动");
+    mv.title = "把勾选的这些一起放进某个文件夹（没有就现场新建）";
+    mv.onclick = () => LibFolders.moveItems(kind, libSelIds(kind), {
+      onDone: async () => {
+        libSelClear(kind);
+        if (kind === "refs") { await loadMeta(); renderRefList(); } else { await loadSfx(); }
+      },
+    });
+    host.appendChild(mv);
+  }
+  if (kind === "refs") {
+    const tg = el("button", "btn mini", "🏷 加标签");
+    tg.title = "给勾选的音色都加上同一个属性标签（角色名）";
+    tg.onclick = () => bulkRefTags(libSelIds(kind));
+    host.appendChild(tg);
+  }
+  const pin = el("button", "btn mini", "📌 置顶");
+  pin.title = "把勾选的这些排到最前面";
+  pin.onclick = async () => {
+    try {
+      await api(`/${kind}/bulk`, { method: "POST", body: JSON.stringify({ action: "pin", ids: libSelIds(kind) }) });
+      await (kind === "refs" ? loadMeta() : loadSfx());
+      if (kind === "refs") renderRefList(); toast(`已置顶 ${n} 个`);
+    } catch (e) { toast(e.message, true); }
+  };
+  host.appendChild(pin);
+  const del = el("button", "btn mini danger", "🗑 删除");
+  del.title = kind === "refs"
+    ? "从音色库删除（已生成的音频不受影响）"
+    : "删除音效（进回收站，可恢复）";
+  del.onclick = async () => {
+    const what = kind === "refs" ? "音色" : "音效";
+    if (!confirm(`删除选中的 ${n} 个${what}？
+
+${kind === "sfx" ? "会放进音效库的回收站。" : "只删库里的音色文件，台本里已生成的音频不受影响。"}`)) return;
+    try {
+      const r = await api(`/${kind}/bulk`, { method: "POST", body: JSON.stringify({ action: "delete", ids: libSelIds(kind) }) });
+      libSelClear(kind);
+      await (kind === "refs" ? loadMeta() : loadSfx());
+      if (kind === "refs") renderRefList();
+      toast(`已删除 ${r.count} 个${what}`);
+    } catch (e) { toast("删除失败：" + e.message, true); }
+  };
+  host.appendChild(del);
+  if (opts && opts.extra) opts.extra(host, n);
+}
+
+/* 批量加标签（音色）：一个输入框 + 候选 chips，加完立刻刷新 */
+async function bulkRefTags(ids) {
+  if (!ids.length) return;
+  await loadTaglib();
+  const wrap = el("div", "tagdlg");
+  wrap.appendChild(el("div", "hint",
+    `给选中的 <b>${ids.length}</b> 个音色加上同一个<b>属性标签</b>（会追加，不覆盖原来的）。`));
+  const inp = document.createElement("input");
+  inp.className = "inp";
+  inp.placeholder = "角色名，多个用逗号分隔：阿澈，旁白";
+  inp.autocomplete = "off";
+  wrap.appendChild(inp);
+  const pool = Array.from(new Set((TAGLIB.traits || []).map((x) => x.name))).filter(Boolean);
+  if (pool.length) {
+    wrap.appendChild(el("div", "fl", "常用标签（点一下加进去）"));
+    const box = el("div", "tagpick");
+    pool.slice(0, 30).forEach((t) => {
+      const b = el("button", "tagchip", t);
+      b.onclick = () => {
+        const cur = inp.value.split(/[，,、\s]+/).filter(Boolean);
+        if (!cur.includes(t)) cur.push(t);
+        inp.value = cur.join("，");
+        inp.focus();
+      };
+      box.appendChild(b);
+    });
+    wrap.appendChild(box);
+  }
+  modal("给选中的音色加标签", wrap, async () => {
+    const tags = inp.value.split(/[，,、\s]+/).map((x) => x.trim()).filter(Boolean);
+    if (!tags.length) { toast("先写一个标签", true); return false; }
+    try {
+      await api("/refs/bulk", { method: "POST", body: JSON.stringify({ action: "tags_add", ids, tags }) });
+      libSelClear("refs");
+      await loadMeta();
+      renderRefList();
+      toast(`已给 ${ids.length} 个音色加上「${tags.join("、")}」`);
+      return true;
+    } catch (e) { toast("加标签失败：" + e.message, true); return false; }
+  }, "加上");
+}
+
 function renderRefList() {
   const box = $("refList");
   if (!box) return;
@@ -4896,14 +5209,24 @@ function renderRefList() {
   box.innerHTML = "";
   if ($("refSearch") && $("refSearch").value !== REFV.q) $("refSearch").value = REFV.q;
   const all = refOptions();
-  const refs = all.filter(refVisible);
+  const visible = pinSorted(all.filter(refVisible));
+  const refs = visible.slice(0, REFV.limit || 300);
+  libSelPrune("refs", all.filter((r) => r.editable));
+  libSelBar("refs", "refSelBar", all.filter((r) => r.editable), () => { renderRefList(); });
+  libBar("refFolders", "refs", REFV.path, all.filter((r) => r.editable),
+    (p) => { REFV.path = p; renderRefList(); }, renderRefList);
+  if (!TAGS.count && !TAGS._loaded) {
+    TAGS._loaded = true;
+    loadTags().then(() => refTagBar());
+  }
+  refTagBar();
   const mine = all.filter((r) => r.editable);
   const dflt = (SCRIPT && SCRIPT.defaults && SCRIPT.defaults.ref) || "";
   if ($("refCount")) {
     $("refCount").textContent = refs.length === all.length ? `${all.length} 个` : `${refs.length} / ${all.length} 个`;
   }
   $("refHint").textContent = mine.length
-    ? `我的音色 ${mine.length} 个 · 点名字改名 · ✓ 设为默认 · ▶ 试听 · 右键更多`
+    ? `我的音色 ${mine.length} 个 · 点名字改名 · 🏷 属性标签 · ✓ 设为默认 · ▶ 试听 · 右键更多`
     : "还没有音色。可以上传音频，或去「素材导入台」把视频/歌曲处理成人声再存入音色库。";
   if (!refs.length) {
     box.appendChild(el("div", "hint", all.length ? "没有匹配的音色（换个关键词）" : "音色库是空的"));
@@ -4916,11 +5239,25 @@ function renderRefList() {
     groups[g].forEach((r) => {
       const isDefault = dflt && r.id === dflt;
       if (REFV.view === "list") {
-        const item = el("div", "refitem" + (isDefault ? " cur" : ""));
+        const item = el("div", "refitem" + (isDefault ? " cur" : "")
+          + (libSelHas("refs", r.id) ? " lsel" : ""));
+        if (r.editable) item.appendChild(libCheck("refs", r.id, () => renderRefList()));
+        item.dataset.lid = r.id;
+        item.onclick = (e) => {
+          if (!r.editable) return;
+          if (e.shiftKey && LIBSEL.last && LIBSEL.last.kind === "refs") {
+            libSelRange("refs", LIBSEL.last.i, [...document.querySelectorAll('#refList .refitem')].indexOf(item));
+            renderRefList();
+            return;
+          }
+          if (e.ctrlKey || e.metaKey) { libSelToggle("refs", r.id); renderRefList(); }
+          LIBSEL.last = { kind: "refs", i: [...document.querySelectorAll('#refList .refitem')].indexOf(item) };
+        };
         const name = el("span", "refname", r.name);
         name.title = r.editable ? "点击重命名（右键更多）" : "内置音色";
         if (r.editable) name.onclick = (e) => renameRef(r, ...xyOf(e));
         item.appendChild(name);
+        if ((r.tags || []).length) item.appendChild(refTagChips(r));
         if (isDefault) item.appendChild(el("span", "rt-def", "默认"));
         if ((r.uses || []).includes("emo")) item.appendChild(el("span", "rt-def emo", "情感"));
         item.appendChild(el("span", "hint", r.dur ? `${r.dur}s` : ""));
@@ -4930,8 +5267,15 @@ function renderRefList() {
           use.onclick = () => setDefaultRef(r);
           item.appendChild(use);
         }
+        if (r.editable) item.appendChild(pinBtn("refs", r, () => renderRefList()));
         item.appendChild(refPlayBtn(r));
         if (r.editable) {
+          const tg = el("button", "iconbtn tagbtn", (r.tags || []).length ? "🏷" : "＋🏷");
+          tg.title = (r.tags || []).length
+            ? `标签：${(r.tags || []).join("、")}（点一下改）`
+            : "给这个音色加标签（写角色名，智能导入时就能自动套上）";
+          tg.onclick = (e) => { e.stopPropagation(); editRefTags(r); };
+          item.appendChild(tg);
           const ren = el("button", "iconbtn", "✎");
           ren.title = "重命名";
           ren.onclick = () => renameRef(r);
@@ -4943,7 +5287,9 @@ function renderRefList() {
         item.oncontextmenu = (e) => { e.preventDefault(); openRefCtx(r, e.clientX, e.clientY); };
         box.appendChild(item);
       } else {
-        const tile = el("div", "reftile" + (isDefault ? " default" : ""));
+        const tile = el("div", "reftile" + (isDefault ? " default" : "")
+          + (libSelHas("refs", r.id) ? " lsel" : ""));
+        if (r.editable) tile.appendChild(libCheck("refs", r.id, () => renderRefList()));
         const top = el("div", "rt-top");
         const name = el("span", "rt-name", r.name);
         name.title = r.editable ? "点击重命名（右键更多）" : "内置音色";
@@ -4957,18 +5303,742 @@ function renderRefList() {
         if (r.dur) bits.push(`${r.dur}s`);
         bits.push(r.group || "音色");
         tile.appendChild(el("div", "rt-meta", bits.join(" · ")));
+        if ((r.tags || []).length) tile.appendChild(refTagChips(r, true));
         tile.appendChild(refActions(r, true));
         tile.oncontextmenu = (e) => { e.preventDefault(); openRefCtx(r, e.clientX, e.clientY); };
         box.appendChild(tile);
       }
     });
   });
+  libMore(box, visible.length, refs.length, () => {
+    REFV.limit = (REFV.limit || 300) + 300;
+    renderRefList();
+  });
+}
+
+/* ------------------------------ 标签库（可自定义） ------------------------------
+   两类：trait = 属性标签（音色 / 人物用）；sfx = 音效标签（句中 / 句间用）。
+   预设由后端给（删过的记 hidden），自定义存 longform/taglib.json。
+   以前候选是写死的几个词，用户想加「病娇」「雨声」只能手打，还不会保存。
+------------------------------------------------------------------------- */
+let TAGLIB = { traits: [], sfx: [], loaded: false };
+
+async function loadTaglib(force) {
+  if (TAGLIB.loaded && !force) return TAGLIB;
+  try {
+    const d = await api("/taglib");
+    TAGLIB.traits = d.traits || [];
+    TAGLIB.sfx = d.sfx || [];
+    TAGLIB.loaded = true;
+  } catch (e) {
+    TAGLIB.traits = TAGLIB.traits || [];
+    TAGLIB.sfx = TAGLIB.sfx || [];
+  }
+  return TAGLIB;
+}
+
+async function taglibAdd(kind, name) {
+  const d = await api("/taglib", { method: "POST", body: JSON.stringify({ kind, name }) });
+  TAGLIB.traits = d.traits || [];
+  TAGLIB.sfx = d.sfx || [];
+  return d;
+}
+
+async function taglibDel(kind, name) {
+  const q = `?kind=${encodeURIComponent(kind)}&name=${encodeURIComponent(name)}`;
+  const d = await api("/taglib" + q, { method: "DELETE" });
+  TAGLIB.traits = d.traits || [];
+  TAGLIB.sfx = d.sfx || [];
+  return d;
+}
+
+/* 标签库管理弹窗：点 × 删（预设只是隐藏），输入框加新的 */
+async function openTaglib(kind, after) {
+  kind = kind === "sfx" ? "sfx" : "trait";
+  await loadTaglib(true);
+  const wrap = el("div", "tagdlg");
+  const draw = () => {
+    wrap.innerHTML = "";
+    wrap.appendChild(el("div", "hint", kind === "trait"
+      ? "属性标签：给音色和人物用（傲娇 / 冰山美人 / 旁白）。智能导入时，人名没命中才会拿它匹配分组名。"
+      : "音效标签：插入句中 / 句间标签时的候选（音效1 / 摩擦音 / 雨声…）。只影响候选列表，不影响已有标签。"));
+    const list = kind === "trait" ? TAGLIB.traits : TAGLIB.sfx;
+    const box = el("div", "tagliblist");
+    list.forEach((it) => {
+      const chip = el("span", "tagchip on" + (it.builtin ? " builtin" : ""), it.name);
+      chip.title = it.builtin ? "内置标签（删掉会隐藏，可以再加回来）" : "自定义标签";
+      const x = el("button", "tagdel", "×");
+      x.type = "button";
+      x.title = it.builtin ? "隐藏这个内置标签" : "删除这个自定义标签";
+      x.onclick = async (e) => {
+        e.stopPropagation();
+        try {
+          await taglibDel(kind, it.name);
+          draw();
+          if (kind === "sfx") { await loadMeta(); }
+          toast(`已删除「${it.name}」`);
+        } catch (err) { toast("删除失败：" + err.message, true); }
+      };
+      chip.appendChild(x);
+      box.appendChild(chip);
+    });
+    if (!list.length) box.appendChild(el("span", "hint", "一个都没有：在下面加一个"));
+    wrap.appendChild(box);
+
+    const row = el("div", "row2");
+    const inp = document.createElement("input");
+    inp.className = "inp grow";
+    inp.id = "taglibNew";
+    inp.placeholder = kind === "trait" ? "新属性标签（例如：病娇、慵懒）" : "新音效标签（例如：雨声、关门）";
+    const add = el("button", "btn", "＋ 添加");
+    const doAdd = async () => {
+      const name = (inp.value || "").trim();
+      if (!name) return;
+      try {
+        await taglibAdd(kind, name);
+        inp.value = "";
+        draw();
+        if (kind === "sfx") { await loadMeta(); }
+        toast(`已添加「${name}」`);
+      } catch (e) { toast("添加失败：" + e.message, true); }
+    };
+    add.onclick = doAdd;
+    inp.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); doAdd(); } };
+    row.appendChild(inp);
+    row.appendChild(add);
+    wrap.appendChild(row);
+    wrap.appendChild(el("div", "hint", "删标签不会动已经打在音色 / 人物上的标签，只是候选里不再出现。"));
+  };
+  draw();
+  modal(kind === "trait" ? "属性标签库" : "音效标签库", wrap, async () => {
+    if (typeof after === "function") after();
+  }, "关闭");
+  const cb = $("modalCancel");
+  if (cb) cb.hidden = true;
+}
+
+/* 音色上挂的标签小片。点一个 = 只看这个标签（再点取消）。 */
+function refTagChips(r, tile) {
+  const wrap = el("span", "refTags" + (tile ? " tile" : ""));
+  const all = r.tags || [];
+  const list = all.slice(0, tile ? 4 : 2);
+  list.forEach((t) => {
+    const c = el("span", "rtag", t);
+    c.title = `标签「${t}」：智能导入遇到同名角色时，会自动把这个音色套上。点一下只看这个标签`;
+    c.onclick = (e) => {
+      e.stopPropagation();
+      REFV.tag = REFV.tag === t ? "" : t;
+      REFV.limit = 300;
+      renderRefList();
+    };
+    wrap.appendChild(c);
+  });
+  if (all.length > list.length) {
+    const more = el("span", "rtag more", `+${all.length - list.length}`);
+    more.title = all.join("、");
+    wrap.appendChild(more);
+  }
+  return wrap;
+}
+
+/* 编辑标签：手打 + 点已有标签快速追加。
+   标签的用途只有一个 —— 「角色名 → 音色」的桥梁，所以提示里直接说清楚。 */
+async function editRefTags(r, seed) {
+  await loadTaglib();
+  const wrap = el("div", "tagdlg");
+  wrap.appendChild(el("div", "hint", `给「${r.name}」打的是<b>属性标签</b>（傲娇 / 冰山美人 / 旁白这类）。`
+    + "智能导入时<b>先按人名匹配人物库</b>，人名没命中才用这里的标签去对分组名。"
+    + "想按角色固定用这个音色，去「设置 → 人物标签」建一个人物并绑定它。"));
+
+  const inp = document.createElement("input");
+  inp.className = "inp";
+  inp.id = "tagDlgInput";
+  inp.placeholder = "角色名，多个用逗号分隔：阿澈，小夏，旁白";
+  inp.value = (seed || r.tags || []).join("，");
+  inp.autocomplete = "off";
+  wrap.appendChild(inp);
+
+  /* 候选 = 标签库（属性标签）+ 音色上已经在用的其他标签（可能不在库里） */
+  const pool = Array.from(new Set([
+    ...(TAGLIB.traits || []).map((x) => x.name),
+    ...(TAGS.items || []).map((x) => x.tag),
+  ].filter(Boolean)));
+  const known = pool.filter((t) => !(r.tags || []).includes(t));
+  if (known.length) {
+    wrap.appendChild(el("div", "fl", "常用标签（点一下加进去）"));
+    const box = el("div", "tagpick");
+    known.slice(0, 30).forEach((t) => {
+      const b = el("button", "tagchip", t);
+      b.onclick = () => {
+        const cur = inp.value.split(/[，,、\s]+/).filter(Boolean);
+        if (!cur.includes(t)) cur.push(t);
+        inp.value = cur.join("，");
+        inp.focus();
+      };
+      box.appendChild(b);
+    });
+    wrap.appendChild(box);
+  }
+  const note = el("div", "hint");
+  note.textContent = "标签不会改文件名、也不会进音频；删光了就是「没有标签」。";
+  wrap.appendChild(note);
+  const mg = el("button", "btn mini ghost", "🏷 管理标签库（增删候选）…");
+  mg.onclick = () => {
+    closeModal();
+    openTaglib("trait", () => editRefTags(r));
+  };
+  wrap.appendChild(mg);
+
+  modal(`音色标签 · ${r.name}`, wrap, async () => {
+    const tags = inp.value.split(/[，,、;；\s]+/).map((x) => x.trim()).filter(Boolean);
+    try {
+      const d = await api(`/refs/${encodeURIComponent(r.id)}/tags`, {
+        method: "PUT", body: JSON.stringify({ tags }),
+      });
+      await loadMeta();
+      await loadTags();
+      if (REFV.tag && !(d.tags || []).includes(REFV.tag)) REFV.tag = "";
+      renderRefList(); renderCenter();
+      toast((d.tags || []).length ? `已标记：${d.tags.join("、")}` : "已清空标签");
+    } catch (e) { toast("保存标签失败：" + e.message, true); return false; }
+  }, "保存");
+}
+
+/* ------------------------------ 人物标签库（设置面板） ------------------------------
+   和工程里的「标签」（句中 / 句间时间点）不是一回事，也不和音色的属性标签混：
+   · 人物 = 一个人名标签（唯一，可带别名）+ 多个属性标签 + 绑定音色；
+   · 智能导入时先按人名匹配人物，命中就用它绑定的音色；没命中才看音色上的属性标签。
+   库存在 longform/characters.json，跨台本、跨工程。
+------------------------------------------------------------------------- */
+let CHARS = { items: [], traits: [], candidates: [], autoVoice: true, loaded: false, q: "" };
+
+function paintCharSwitch() {
+  const cb = $("setAutoVoice");
+  if (cb && CHARS.loaded) cb.checked = !!CHARS.autoVoice;
+}
+
+async function loadChars(force) {
+  if (CHARS.loaded && !force) { renderChars(); return CHARS; }
+  try {
+    const sid = SCRIPT ? SCRIPT.id : "";
+    const d = await api(`/characters${sid ? "?sid=" + encodeURIComponent(sid) : ""}`);
+    CHARS.items = d.items || [];
+    CHARS.traits = d.traits || [];
+    CHARS.candidates = d.candidates || [];
+    CHARS.autoVoice = d.auto_voice !== false;
+    CHARS.loaded = true;
+  } catch (e) {
+    CHARS.items = CHARS.items || [];
+    CHARS.traits = CHARS.traits || [];
+    CHARS.candidates = CHARS.candidates || [];
+  }
+  paintCharSwitch();
+  renderChars();
+  return CHARS;
+}
+
+function charVisible(c) {
+  const q = (CHARS.q || "").trim().toLowerCase();
+  if (!q) return true;
+  return [c.name, c.note, ...(c.aliases || []), ...(c.traits || [])]
+    .join(" ").toLowerCase().includes(q);
+}
+
+function charRow(c) {
+  const row = el("div", "charrow");
+  const nm = el("span", "charname", "👤 " + c.name);
+  nm.title = "点一下编辑（别名 / 属性标签 / 绑定音色）";
+  nm.onclick = () => editChar(c);
+  row.appendChild(nm);
+  if ((c.aliases || []).length) {
+    const a = el("span", "charalias", "又称 " + c.aliases.join("、"));
+    a.title = "别名也会参与人名匹配：" + c.aliases.join("、");
+    row.appendChild(a);
+  }
+  const tw = el("span", "chartraits");
+  (c.traits || []).forEach((t) => {
+    const b = el("span", "rtag", t);
+    b.title = "属性标签（描述这个角色的声音）；人名没命中时才会拿它去匹配";
+    tw.appendChild(b);
+  });
+  if (!(c.traits || []).length) tw.appendChild(el("span", "hint", "无属性标签"));
+  row.appendChild(tw);
+  row.appendChild(el("span", "spacer"));
+
+  const sel = document.createElement("select");
+  sel.className = "sel charref";
+  sel.appendChild(new Option("（不绑音色）", ""));
+  refOptions().filter((r) => r.editable).forEach((r) => sel.appendChild(new Option(r.name, r.id)));
+  sel.value = c.ref || "";
+  sel.title = "这个人物用哪个音色；改了只影响之后的导入 / 识别，不动已有句子";
+  sel.onchange = async () => {
+    try {
+      await api(`/characters/${encodeURIComponent(c.id)}`, {
+        method: "PATCH", body: JSON.stringify({ ref: sel.value }),
+      });
+      await loadMeta();
+      toast(sel.value ? `「${c.name}」已绑定音色` : `「${c.name}」不再绑定音色`);
+      await loadChars(true);
+    } catch (e) {
+      toast("保存失败：" + e.message, true);
+      sel.value = c.ref || "";
+    }
+  };
+  row.appendChild(sel);
+
+  if (c.used) {
+    const u = el("span", "charuse" + (c.matched < c.used ? " warn" : ""), `${c.used} 句`);
+    u.title = `当前台本有 ${c.used} 句分到「${c.name}」`
+      + (c.matched < c.used ? `，其中 ${c.used - c.matched} 句还没用上这个音色（点下面的「智能识别人物」）` : "，都已经用上了");
+    row.appendChild(u);
+  }
+  const ed = el("button", "iconbtn", "✎");
+  ed.title = "编辑人物";
+  ed.onclick = () => editChar(c);
+  const del = el("button", "iconbtn", "✕");
+  del.title = "从人物库删除（不动音色、不动台本）";
+  del.onclick = () => deleteChar(c);
+  row.appendChild(ed);
+  row.appendChild(del);
+  return row;
+}
+
+function renderChars() {
+  const box = $("charList");
+  if (!box) return;
+  if ($("charSearch") && $("charSearch").value !== CHARS.q) $("charSearch").value = CHARS.q;
+  box.innerHTML = "";
+  const list = (CHARS.items || []).filter(charVisible);
+  if ($("charHint")) {
+    $("charHint").textContent = (CHARS.items || []).length
+      ? `${CHARS.items.length} 个人物`
+        + ((CHARS.candidates || []).length
+          ? ` · 当前台本还有 ${CHARS.candidates.length} 个分组没收录（用「从当前台本分组新建」）`
+          : "")
+      : "还没有人物。新建一个人名、绑上音色，之后导入其他章节就会自动对上。";
+  }
+  if (!list.length) {
+    if ((CHARS.items || []).length) box.appendChild(el("div", "hint", "没有匹配的人物"));
+    return;
+  }
+  list.forEach((c) => box.appendChild(charRow(c)));
+}
+
+/* 属性标签输入框 + 「常见标签」点选（人物属性 / 音色标签共用这一套候选） */
+function traitEditor(value) {
+  const wrap = el("div", "tagdlg");
+  const inp = document.createElement("input");
+  inp.className = "inp";
+  inp.id = "charTraits";
+  inp.placeholder = "属性标签，多个用逗号分隔：傲娇，青年音，旁白";
+  inp.value = (value || []).join("，");
+  wrap.appendChild(inp);
+  const pool = Array.from(new Set([
+    ...(TAGLIB.traits || []).map((x) => x.name),
+    ...(CHARS.traits || []).map((x) => x.tag),
+  ].filter(Boolean)));
+  const known = pool.filter((t) => !(value || []).includes(t));
+  if (known.length) {
+    wrap.appendChild(el("div", "fl", "常见标签（点一下加进去）"));
+    const box = el("div", "tagpick");
+    known.slice(0, 30).forEach((t) => {
+      const b = el("button", "tagchip", t);
+      b.onclick = () => {
+        const cur = inp.value.split(/[，,、\s]+/).filter(Boolean);
+        if (!cur.includes(t)) cur.push(t);
+        inp.value = cur.join("，");
+        inp.focus();
+      };
+      box.appendChild(b);
+    });
+    wrap.appendChild(box);
+  }
+  return wrap;
+}
+
+async function editChar(c, seed) {
+  await loadTaglib();
+  const isNew = !c;
+  c = c || { name: "", aliases: [], traits: [], ref: "", note: "" };
+  if (seed) c = Object.assign({}, c, seed);
+  const wrap = el("div", "tagdlg");
+  wrap.appendChild(el("div", "hint", "一个人物只有一个人名标签（+ 别名可以多个）；属性标签可以多个。"
+    + "智能导入先按人名匹配，命中就用下面绑定的音色。"));
+
+  wrap.appendChild(el("div", "fl", "人名标签（唯一）"));
+  const nameInp = document.createElement("input");
+  nameInp.className = "inp";
+  nameInp.id = "charName";
+  nameInp.value = c.name || "";
+  nameInp.placeholder = "例如：阿澈";
+  wrap.appendChild(nameInp);
+
+  wrap.appendChild(el("div", "fl", "别名 <span class=\"hint\">同一角色的其他写法</span>"));
+  const aliasInp = document.createElement("input");
+  aliasInp.className = "inp";
+  aliasInp.id = "charAlias";
+  aliasInp.value = (c.aliases || []).join("，");
+  aliasInp.placeholder = "例如：澈哥，小澈";
+  wrap.appendChild(aliasInp);
+
+  wrap.appendChild(el("div", "fl", "属性标签 <span class=\"hint\">可以多个</span>"));
+  wrap.appendChild(traitEditor(c.traits));
+
+  wrap.appendChild(el("div", "fl", "绑定音色"));
+  const refSel = document.createElement("select");
+  refSel.className = "sel";
+  refSel.id = "charRef";
+  refSel.appendChild(new Option("（不绑音色）", ""));
+  refOptions().filter((r) => r.editable).forEach((r) => refSel.appendChild(new Option(r.name, r.id)));
+  refSel.value = c.ref || "";
+  wrap.appendChild(refSel);
+
+  wrap.appendChild(el("div", "fl", "备注"));
+  const noteInp = document.createElement("input");
+  noteInp.className = "inp";
+  noteInp.id = "charNote";
+  noteInp.value = c.note || "";
+  noteInp.placeholder = "例如：第三章开始出场，声音偏低";
+  wrap.appendChild(noteInp);
+
+  modal(isNew ? "新建人物" : `编辑人物 · ${c.name}`, wrap, async () => {
+    const body = {
+      name: (nameInp.value || "").trim(),
+      aliases: aliasInp.value,
+      traits: $("charTraits") ? $("charTraits").value : (c.traits || []),
+      ref: refSel.value,
+      note: (noteInp.value || "").trim(),
+    };
+    if (!body.name) { toast("人物名不能为空", true); return false; }
+    try {
+      if (isNew) await api("/characters", { method: "POST", body: JSON.stringify(body) });
+      else await api(`/characters/${encodeURIComponent(c.id)}`, { method: "PATCH", body: JSON.stringify(body) });
+      await loadChars(true);
+      toast(isNew ? `已新建人物「${body.name}」` : "已保存");
+    } catch (e) {
+      toast(e.message, true);
+      return false;
+    }
+  }, isNew ? "新建" : "保存");
+}
+
+function deleteChar(c) {
+  const wrap = el("div");
+  wrap.appendChild(el("div", null, `从人物库删除「${c.name}」？`));
+  wrap.appendChild(el("div", "hint", "不动音色、不动台本：只是以后导入时不再自动对上这个人物。"));
+  modal("删除人物", wrap, async () => {
+    try {
+      await api(`/characters/${encodeURIComponent(c.id)}`, { method: "DELETE" });
+      await loadChars(true);
+      toast("已删除");
+    } catch (e) { toast(e.message, true); return false; }
+  }, "删除");
+}
+
+/* 从当前台本的分组名批量新建：只列还没收录的，默认全选 */
+async function newCharFromScript() {
+  if (!SCRIPT) return toast("先打开一个台本", true);
+  await loadChars(true);
+  const cands = CHARS.candidates || [];
+  if (!cands.length) {
+    return toast((CHARS.items || []).length
+      ? "当前台本的分组都已在人物库里了"
+      : "这个台本没有分组名：智能导入时选「按角色」分组之后才有", true);
+  }
+  const wrap = el("div", "tagdlg");
+  wrap.appendChild(el("div", "hint", "勾选要建成人物的分组名。建完之后逐个绑音色就行，"
+    + "以后导入同一角色的其他章节会自动对上。"));
+  const box = el("div", "charpick");
+  const checks = [];
+  cands.forEach((cd) => {
+    const row = el("label", "charpickrow");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = true;
+    cb.value = cd.name;
+    checks.push(cb);
+    row.appendChild(cb);
+    row.appendChild(el("span", "charname", cd.name));
+    row.appendChild(el("span", "hint", `${cd.lines} 句`));
+    box.appendChild(row);
+  });
+  wrap.appendChild(box);
+  modal("从当前台本新建人物", wrap, async () => {
+    const names = checks.filter((x) => x.checked).map((x) => x.value);
+    if (!names.length) { toast("一个都没勾", true); return false; }
+    try {
+      const d = await api("/characters/bulk", {
+        method: "POST", body: JSON.stringify({ names }),
+      });
+      await loadChars(true);
+      toast(`新建 ${d.count} 个人物` + (d.skipped && d.skipped.length ? `，跳过 ${d.skipped.length} 个（已存在）` : "")
+        + "。接着给它们绑音色吧");
+    } catch (e) { toast(e.message, true); return false; }
+  }, "新建");
+}
+
+async function saveAutoVoiceSetting(on) {
+  try {
+    await api("/settings", { method: "PATCH", body: JSON.stringify({ voice: { autoVoice: !!on } }) });
+    CHARS.autoVoice = !!on;
+    toast(on ? "之后智能导入会按人物自动设音色" : "已关闭导入时自动设音色");
+  } catch (e) {
+    toast("保存设置失败：" + e.message, true);
+    paintCharSwitch();
+  }
+}
+
+/* ------------------------------ 智能识别人物 ------------------------------
+   把台本里的「分组名（= 角色名）」按音色标签对到音色，只写 ov.ref。
+   不碰情感 / 停顿 / 采样：那是逐句调的东西，自动套一次就会把手工调好的覆盖掉。
+------------------------------------------------------------------------- */
+async function autoVoiceRun(force) {
+  if (!SCRIPT) return toast("先打开一个台本", true);
+  if (!(SCRIPT.lines || []).some((l) => l.kind !== "tag" && l.group)) {
+    return toast("这个台本没有角色分组：智能导入时用「按角色」分组之后才有", true);
+  }
+  const btn = $("btnAutoVoice");
+  const hint = $("autoVoiceHint");
+  const old = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "识别中…"; }
+  try {
+    // 先把当前编辑落盘：auto-voice 读的是磁盘上的台本，本地没保存的改动会被它盖掉
+    if (dirty) await saveNow();
+    const d = await api("/auto-voice", {
+      method: "POST",
+      body: JSON.stringify({ sid: SCRIPT.id, overwrite: !!force }),
+    });
+    await switchScript(SCRIPT.id);        // 重新读一遍：行上的音色才是新的
+    await loadChars(true);                // 使用句数 / 已对上句数 也变了
+    const nm = (d.matched || []).length;
+    const nv = (d.no_voice || []).length;
+    const nu = (d.unmatched || []).length;
+    if (hint) {
+      const bits = [];
+      if (d.changed) bits.push(`已套用 ${d.changed} 句`);
+      if (nm) bits.push(`${nm} 个角色对上音色`);
+      if (nv) bits.push(`${nv} 个人物还没绑音色`);
+      if (nu) bits.push(`${nu} 个没对上`);
+      hint.textContent = bits.length ? bits.join(" · ") : "没有可套的：先在人物库里建人物并绑音色";
+    }
+    autoVoiceReport(d);
+  } catch (e) {
+    toast("识别失败：" + e.message, true);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = old; }
+  }
+}
+
+/* 结果行左边的来源标记：人物 / 标签 */
+function avSourceTag(m) {
+  if (m.source === "character") {
+    const b = el("span", "mk char", "👤 人物");
+    b.title = "按人名标签匹配（含别名）";
+    return b;
+  }
+  const b = el("span", "mk", "🎙 标签");
+  b.title = "人名没命中，按音色上的属性标签匹配";
+  return b;
+}
+
+function autoVoiceReport(d) {
+  const wrap = el("div");
+  const matched = d.matched || [];
+  const unmatched = d.unmatched || [];
+  const noVoice = d.no_voice || [];
+  const refs = refOptions().filter((x) => x.editable);
+
+  const top = el("div", "avsum");
+  top.appendChild(el("b", null, `识别 ${d.lines || 0} 句 · 套用 ${d.changed || 0} 句`));
+  if (d.no_group) top.appendChild(el("span", "hint", `（${d.no_group} 句没有分组，跳过）`));
+  if (d.chars || d.tags) {
+    top.appendChild(el("span", "hint", ` · 人物 ${d.chars || 0} 个 · 属性标签 ${d.tags || 0} 个`));
+  }
+  wrap.appendChild(top);
+
+  if (matched.length) {
+    wrap.appendChild(el("div", "fl", "已对上"));
+    const list = el("div", "avlist");
+    matched.forEach((m) => {
+      const row = el("div", "avrow");
+      row.appendChild(el("span", "avname", m.name));
+      row.appendChild(el("span", "avarw", "→"));
+      row.appendChild(avSourceTag(m));
+      const ref = el("span", "avref", m.ref_name);
+      ref.title = m.fuzzy
+        ? `近似匹配（分组名里包含了「${m.tag || ""}」）`
+        : `命中「${m.tag || ""}」`;
+      row.appendChild(ref);
+      if ((m.traits || []).length) {
+        const t = el("span", "charalias", m.traits.slice(0, 3).join("、"));
+        t.title = "属性标签：" + m.traits.join("、");
+        row.appendChild(t);
+      }
+      if (m.fuzzy) row.appendChild(el("span", "mk fuzzy", "≈ 近似"));
+      row.appendChild(el("span", "spacer"));
+      row.appendChild(el("span", "hint", m.applied ? `${m.applied} 句` : "已指定"));
+      if (m.kept) {
+        const k = el("span", "mk", `保留 ${m.kept}`);
+        k.title = "这些句子本来就单独指定了别的音色，默认不覆盖";
+        row.appendChild(k);
+      }
+      list.appendChild(row);
+    });
+    wrap.appendChild(list);
+  }
+
+  if (noVoice.length) {
+    wrap.appendChild(el("div", "fl", "人物认出来了，但还没绑音色"));
+    const list = el("div", "avlist");
+    noVoice.forEach((u) => {
+      const row = el("div", "avrow");
+      row.appendChild(el("span", "avname", u.char_name || u.name));
+      row.appendChild(el("span", "hint", `${u.lines} 句`));
+      row.appendChild(el("span", "spacer"));
+      const sel = document.createElement("select");
+      sel.className = "sel";
+      sel.style.height = "26px";
+      /* 不写死宽度：音色名普遍是「嘉然-正常音1-气声派生」这种长名，
+         max-width:150px 会把名字截一半（截图里就是这样）。
+         宽度交给 .modal-box.report .avrow select 决定，hover 还能看全名。 */
+      sel.appendChild(new Option("（选一个音色）", ""));
+      refs.slice(0, 60).forEach((r) => sel.appendChild(new Option(r.name, r.id)));
+      sel.title = "选一个音色；名字太长时鼠标停一下看完整名";
+      sel.onchange = () => { sel.title = sel.value
+        ? (refs.find((x) => x.id === sel.value) || {}).name || "" : "选一个音色"; };
+      row.appendChild(sel);
+      const b = el("button", "btn mini", "绑定");
+      b.onclick = async () => {
+        if (!sel.value) return toast("先选一个音色", true);
+        b.disabled = true;
+        b.textContent = "…";
+        try {
+          await api(`/characters/${encodeURIComponent(u.char)}`, {
+            method: "PATCH", body: JSON.stringify({ ref: sel.value }),
+          });
+          await loadMeta();
+          await loadChars(true);
+          closeModal();
+          toast(`已给「${u.char_name || u.name}」绑定音色，重新识别中…`);
+          autoVoiceRun(true);
+        } catch (e) {
+          b.disabled = false;
+          b.textContent = "绑定";
+          toast("绑定失败：" + e.message, true);
+        }
+      };
+      row.appendChild(b);
+      list.appendChild(row);
+    });
+    wrap.appendChild(list);
+  }
+
+  if (unmatched.length) {
+    wrap.appendChild(el("div", "fl", "没对上（建个人物、绑上音色，下次就记住了）"));
+    const list = el("div", "avlist");
+    unmatched.forEach((u) => {
+      const row = el("div", "avrow");
+      row.appendChild(el("span", "avname", u.name));
+      row.appendChild(el("span", "hint", `${u.lines} 句`));
+      row.appendChild(el("span", "spacer"));
+      if (!refs.length) {
+        row.appendChild(el("span", "hint", "音色库是空的"));
+      } else {
+        const sel = document.createElement("select");
+        sel.className = "sel";
+        sel.style.height = "26px";
+        sel.appendChild(new Option("（选一个音色）", ""));
+        refs.slice(0, 60).forEach((r) => sel.appendChild(new Option(r.name, r.id)));
+        sel.title = "选一个音色；名字太长时鼠标停一下看完整名";
+        sel.onchange = () => { sel.title = sel.value
+          ? (refs.find((x) => x.id === sel.value) || {}).name || "" : "选一个音色"; };
+        row.appendChild(sel);
+        const b = el("button", "btn mini", "＋ 建人物");
+        b.title = `把「${u.name}」建成人物并绑定这个音色，以后导入其他章节会自动对上`;
+        b.onclick = async () => {
+          if (!sel.value) return toast("先选一个音色", true);
+          b.disabled = true;
+          b.textContent = "…";
+          try {
+            await api("/characters", {
+              method: "POST",
+              body: JSON.stringify({ name: u.name, ref: sel.value }),
+            });
+            await loadMeta();
+            await loadChars(true);
+            closeModal();
+            toast(`已建人物「${u.name}」，重新识别中…`);
+            autoVoiceRun(true);
+          } catch (e) {
+            b.disabled = false;
+            b.textContent = "＋ 建人物";
+            toast(e.message, true);
+          }
+        };
+        row.appendChild(b);
+      }
+      list.appendChild(row);
+    });
+    wrap.appendChild(list);
+  }
+
+  const tip = el("div", "hint");
+  tip.style.lineHeight = "1.6";
+  tip.textContent = "只改了音色：情感、停顿、采样都保持原样。"
+    + "已经单独指定过音色的句子默认不动 —— 需要一起覆盖就点下面的按钮。";
+  wrap.appendChild(tip);
+  const again = el("button", "btn mini ghost", "⟳ 连已指定的音色也一起覆盖");
+  again.onclick = async () => {
+    closeModal();
+    await autoVoiceRun(true);
+  };
+  wrap.appendChild(again);
+
+  modal("智能识别人物", wrap, async () => {}, "关闭");
+  // 结果报告只需要一个「关闭」：取消按钮在这儿只是噪音
+  const cb = $("modalCancel");
+  if (cb) cb.hidden = true;
+  // 报告内容比一般弹窗宽（角色名 + 音色名 + 下拉 + 按钮），单独加宽
+  const box = document.querySelector("#modal .modal-box");
+  if (box) box.classList.add("report");
 }
 
 /* 音色卡片右键菜单 */
 function openRefCtx(r, x, y) {
+  // 右键点的是「已勾选的其中一条」→ 菜单顶部先给批量动作（和导入台一致）
+  if (r.editable && libSelHas("refs", r.id) && LIBSEL.refs.size > 1) {
+    const ids = libSelIds("refs");
+    const n = ids.length;
+    const batch = [{ head: `已选 ${n} 个音色` }, { label: `📁 移动到文件夹…（${n} 个）`,
+      fn: () => LibFolders.moveItems("refs", ids, {
+        onDone: async () => { libSelClear("refs"); await loadMeta(); renderRefList(); },
+      }) }, { label: `🏷 加属性标签…（${n} 个）`, fn: () => bulkRefTags(ids) },
+    { label: `📌 置顶这 ${n} 个`, fn: async () => {
+      try {
+        await api("/refs/bulk", { method: "POST", body: JSON.stringify({ action: "pin", ids }) });
+        await loadMeta(); renderRefList(); toast(`已置顶 ${n} 个`);
+      } catch (e) { toast(e.message, true); }
+    } },
+    { label: `🗑 删除这 ${n} 个音色`, danger: true, fn: async () => {
+      if (!confirm(`删除选中的 ${n} 个音色？\n\n只删库里的音色文件，台本里已生成的音频不受影响。`)) return;
+      try {
+        const d = await api("/refs/bulk", { method: "POST", body: JSON.stringify({ action: "delete", ids }) });
+        libSelClear("refs"); await loadMeta(); renderRefList();
+        toast(`已删除 ${d.count} 个音色`);
+      } catch (e) { toast("删除失败：" + e.message, true); }
+    } }, "-"];
+    buildCtx(batch.concat(refCtxItems(r, x, y)), true);
+    showCtxAt(x, y);
+    return;
+  }
+  buildCtx(refCtxItems(r, x, y), true);
+  showCtxAt(x, y);
+}
+
+function refCtxItems(r, x, y) {
   const items = [{ head: r.name + (r.dur ? ` · ${r.dur}s` : "") }];
   const playing = playingRefId === r.id;
+  items.push({ label: pinMenuLabel(r), fn: () => togglePin("refs", r, () => renderRefList()) });
   items.push({ label: playing ? "⏸ 停止试听" : "▶ 试听", fn: () => toggleRefPlay(r, null) });
   items.push({
     label: "✓ 设为全局默认音色",
@@ -4980,7 +6050,22 @@ function openRefCtx(r, x, y) {
       fn: () => applyRefToSelection(r),
     });
   }
+  if (r.editable) {
+    items.push({
+      label: (r.tags || []).length ? `🏷 编辑属性标签（${(r.tags || []).join("、")}）` : "🏷 加属性标签…",
+      fn: () => editRefTags(r),
+    });
+    items.push({
+      label: "👤 用这个音色建人物…",
+      fn: () => editChar(null, { name: r.name, ref: r.id }),
+    });
+  }
   items.push({ label: "ℹ 属性（格式 / 采样率 / 时长…）", fn: () => showAudioProps("ref", r.id) });
+  if (r.editable && window.LibFolders) {
+    items.push({ label: "📁 移动到文件夹…", fn: () => LibFolders.moveItems("refs", [r.id], {
+      onDone: async () => { await loadMeta(); renderRefList(); },
+    }) });
+  }
   items.push("-");
   items.push({ label: "⧉ 复制名称", fn: () => copyText(r.name) });
   if (r.editable) {
@@ -5001,8 +6086,7 @@ function openRefCtx(r, x, y) {
     items.push("-");
     items.push({ label: "删除这个音色", danger: true, fn: () => deleteRef(r) });
   }
-  buildCtx(items, true);
-  showCtxAt(x, y);
+  return items;
 }
 
 /* 把某个音色套到选中的行（行级覆盖） */
@@ -5395,7 +6479,7 @@ async function uploadRef(afterFn) {
 
 /* ------------------------------ 素材库 / 预处理 ------------------------------ */
 const MAT = { items: [], sel: new Set(), caps: null, audio: null, playId: null,
-              busy: false, bound: false, q: "", type: "",
+              busy: false, bound: false, q: "", type: "", path: "",
               // 导入台是中转站：上传一律进 materials；target 只决定「存入哪个库」
               target: localStorage.getItem("lf.matTarget") || "ref",
               view: localStorage.getItem("lf.matView") || "list" };
@@ -5403,8 +6487,83 @@ const MAT = { items: [], sel: new Set(), caps: null, audio: null, playId: null,
 /* 音效素材库：与音色素材同一套整理方式（上传 / 试听 / 改名 / 复制粘贴 / 预处理） */
 const SFX = {
   items: [], audio: null, playId: null, clip: null, q: "", bound: false,
+  path: "", folders: [],
   view: localStorage.getItem("lf.sfxView") || "list",
 };
+
+/* ------------------------------ 三个库的文件夹 ------------------------------
+   素材一多，一长条平铺列表就没法用了 —— 音效库 300 条、导入台 100 条的时候，
+   找一个东西要滚十几屏。这里给三个库加一层目录（音色 / 音效 / 导入台），
+   和「高级音频处理台」「时间轴」共用同一份数据与同一个组件（libfolders.js）。
+
+   文件夹只是索引里的一个字段，不搬文件：移动是改字段、删文件夹不删音频。 */
+const LIBF = { refs: [], sfx: [], media: [] };
+const LIBF_READY = {};
+
+const inFolder = (f, cur) => {
+  const p = String(f || "");
+  if (!cur) return true;
+  return p === cur || p.startsWith(cur + "/");
+};
+
+async function ensureLibFolders(kind, again) {
+  if (!window.LibFolders) { LIBF_READY[kind] = true; return LIBF[kind]; }
+  if (LIBF_READY[kind]) return LIBF[kind];
+  try {
+    LIBF[kind] = await LibFolders.load(kind, true);
+  } catch (e) { LIBF[kind] = []; }
+  LIBF_READY[kind] = true;
+  if (typeof again === "function") again();
+  return LIBF[kind];
+}
+
+/* 目录条：path 变了由页面自己保存并重画列表 */
+function libBar(hostId, kind, path, items, pick, redraw) {
+  const host = $(hostId);
+  if (!host || !window.LibFolders) return;
+  if (!LIBF_READY[kind]) ensureLibFolders(kind, redraw);
+  // 目录在别处被删掉了：路径还指着它的话，列表会永远是空的。退到最近一层还存在的。
+  if (LIBF_READY[kind] && path) {
+    let p = path;
+    while (p && !(LIBF[kind] || []).some((f) => f.path === p)) {
+      p = p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "";
+    }
+    if (p !== path) { pick(p); return; }
+  }
+  LibFolders.bar(host, {
+    kind, path, items, folders: LIBF[kind],
+    emptyHint: kind === "refs" ? "音色多了可以按角色 / 场景分文件夹"
+      : kind === "sfx" ? "音效多了可以按场景分：喘息 / 环境 / 动作…"
+        : "素材多了可以按作品 / 场景分文件夹",
+    onPick: (p) => { pick(p || ""); },
+    onChanged: () => {
+      LIBF_READY[kind] = false;
+      ensureLibFolders(kind, redraw);
+      if (redraw) redraw();
+    },
+  });
+}
+
+/* 列表分批：音效库 400 条一次性铺 DOM 会明显卡（每行还有 4 个按钮） */
+function libMore(box, total, shown, onMore) {
+  if (total <= shown) return;
+  const row = el("div", "libmore");
+  const b = el("button", "btn mini", `显示更多（还有 ${total - shown}）`);
+  b.onclick = onMore;
+  row.appendChild(b);
+  box.appendChild(row);
+}
+
+/* 组件里改了目录（新建 / 改名 / 删除 / 移入）后，把三个库的缓存一起刷掉 */
+document.addEventListener("libfolders:change", (e) => {
+  const d = (e && e.detail) || {};
+  if (d.kind && Array.isArray(d.folders)) {
+    LIBF[d.kind] = d.folders;
+    LIBF_READY[d.kind] = true;
+  } else if (d.kind) {
+    LIBF_READY[d.kind] = false;
+  }
+});
 
 /* 导入台永远只读写 /media（中转目录），不再随作用域切换 —— 
    以前切换作用域会让同一个面板显示另一个库的内容，看着像文件混了。 */
@@ -5453,6 +6612,14 @@ async function initMediaPanel(target) {
     MAT.audio.onended = () => { MAT.playId = null; renderMatList(); };
   }
   if (!MAT.bound) { bindMediaEvents(); MAT.bound = true; }
+  syncSepEngine("opVocalEngine", "vocalEngineHint", "vocalDspOpts");
+  syncSepEngine("opSSepEngine", "sepEngineHint", "sepDspOpts");
+  mpBindAudio();
+  mpBindGrips();
+  mpBindControls();
+  mpBindBig();
+  mpBindPanelWatch();
+  mpPaint();
   MAT.sel.clear();
   /* 「能力检测 / ffmpeg 状态」都只是面板上的附加信息：不 await，
      否则素材列表要等能力探测（含 demucs 探测、ffmpeg -version）跑完才出现。 */
@@ -5494,8 +6661,12 @@ async function refreshFfmpeg(silent) {
   // 「其它能力」那行也顺手更新一下，别一边说没有一边说能用
   const capEl = $("matCap");
   if (capEl && MAT.caps) {
+    const ro = MAT.ro;
+    const sepTxt = (ro && ro.ready)
+      ? "Roformer / Demucs / 中置"
+      : (MAT.caps.demucs && MAT.caps.demucs.available ? "Demucs / 中置" : "中置提取");
     MAT.caps.ffmpeg = on;
-    capEl.textContent = `ffmpeg ${on ? "✓ 视频可导入" : "✗ 仅音频"} · 分离：中置提取`
+    capEl.textContent = `ffmpeg ${on ? "✓ 视频可导入" : "✗ 仅音频"} · 分离：${sepTxt}`
       + ` · 重采样 ${MAT.caps.resample} · 单个 ≤ ${MAT.caps.max_mb}MB`;
   }
 }
@@ -5546,10 +6717,15 @@ function bindFfmpegBar() {
 async function loadMatCaps() {
   try { MAT.caps = await api("/media/capabilities"); } catch (e) { MAT.caps = null; }
   const c = MAT.caps;
+  // Roformer 就绪与否要拼进下面那一行能力提示，所以先等它
+  const ro = await roLoad();
   const capEl = $("matCap"), fmtEl = $("matFormats");
   if (capEl) {
+    const sepTxt = (ro && ro.ready)
+      ? "Roformer / Demucs / 中置"
+      : (c && c.demucs && c.demucs.available ? "Demucs / 中置" : "中置提取");
     capEl.textContent = c
-      ? `ffmpeg ${c.ffmpeg ? "✓ 视频可导入" : "✗ 仅音频"} · 分离：中置提取 · 重采样 ${c.resample} · 单个 ≤ ${c.max_mb}MB`
+      ? `ffmpeg ${c.ffmpeg ? "✓ 视频可导入" : "✗ 仅音频"} · 分离：${sepTxt} · 重采样 ${c.resample} · 单个 ≤ ${c.max_mb}MB`
       : "能力检测失败（不影响音频导入）";
   }
   if (fmtEl) {
@@ -5582,15 +6758,207 @@ function applyDemucsCap(dm) {
 function syncSepEngine(selId, hintId, dspId) {
   const sel = $(selId), hint = $(hintId), dsp = $(dspId);
   if (!sel) return;
+  // 模型 / 后端不在了（删了目录、卸了 pymss）就别停在这个值上，静静退回 Demucs
+  const cur = [...sel.options].find((o) => o.value === sel.value);
+  if (cur && cur.disabled) sel.value = "demucs";
+  const rof = sel.value === "roformer";
   const demucs = sel.value === "demucs";
-  if (dsp) dsp.hidden = demucs;
+  const sfxSide = selId === "opSSepEngine";
+  if (dsp) dsp.hidden = rof || demucs;
+  // 精度档（shifts/overlap）只属于 Demucs；残留抑制对两者都有效
+  const qRow = $(sfxSide ? "sepDemucsOpts" : "vocalDemucsOpts");
+  if (qRow) qRow.hidden = !demucs;
+  const modeSel = $(sfxSide ? "opSSepMode" : "opVocalMode");
+  const rRow = $(sfxSide ? "sepResidualRow" : "vocalResidualRow");
+  if (rRow) rRow.hidden = !((demucs || rof) && modeSel && modeSel.value === "instrumental");
   if (hint) {
-    hint.textContent = demucs
-      ? "Demucs（htdemucs）：按「人声 / 鼓 / 贝斯 / 其它」分离，伴奏居中也能分开；"
+    if (rof) {
+      const nm = (MAT.ro && MAT.ro.pick) ? roShortName(MAT.ro.pick, 20) : "BS-Roformer";
+      hint.textContent = `BS-Roformer（${nm}）：比 Demucs 干净约 3dB（残留的电音明显更少）。`
+        + "代价是模型 200MB 起、首次加载要几十秒；没配好会自动退回 Demucs，不会让素材处理失败。";
+    } else if (demucs) {
+      hint.textContent = "Demucs（htdemucs）：按「人声 / 鼓 / 贝斯 / 其它」分离，伴奏居中也能分开；"
         + "首次使用要下载 80MB 模型，之后 30 秒素材约 2 秒（显卡）。比中置提取慢但干净得多。"
-      : "中置提取：人声居中、伴奏铺得宽时效果最好；伴奏也居中会残留。需要立体声素材。";
+        + ((MAT.ro && !MAT.ro.ready) ? "　想更干净：看下面「BS-Roformer 模型」。" : "");
+    } else {
+      hint.textContent = "中置提取：人声居中、伴奏铺得宽时效果最好；伴奏也居中会残留。需要立体声素材。";
+    }
   }
 }
+
+/* 引擎下拉 → 后端字段。三个值都直传，后端按「用户选的先试、挂了降级」处理 */
+function sepEngineOf(id) {
+  const sel = $(id);
+  const v = (sel && sel.value) || "demucs";
+  return (v === "roformer" || v === "demucs") ? v : "dsp";
+}
+
+/* ---------------- BS-Roformer（可选模型）：检测 / 提示 / 引擎挂载 ----------------
+   工作台不下载、不安装模型，只做三件事：扫目录、把结果拼进引擎下拉、给下载地址。
+   没装的人界面上一行提示都看不到（折叠着），装了的人多一个更干净的选项。 */
+const _roEsc = (s) => String(s == null ? "" : s)
+  .replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function roShortName(n, max) {
+  const s = String(n || "").replace(/\.(ckpt|pth|safetensors|th)$/i, "");
+  const m = max || 24;
+  return s.length > m ? s.slice(0, m) + "…" : s;
+}
+
+/* 把「能不能用 Roformer」落到两个引擎下拉上 */
+function applySepCaps(ro) {
+  MAT.ro = ro || null;
+  const ready = !!(ro && ro.ready);
+  const nm = roShortName(ro && ro.pick, 12);
+  [["opVocalEngine", "vocalEngineHint", "vocalDspOpts"],
+   ["opSSepEngine", "sepEngineHint", "sepDspOpts"]].forEach(([selId, hintId, dspId]) => {
+    const sel = $(selId);
+    if (!sel) return;
+    const opt = [...sel.options].find((o) => o.value === "roformer");
+    if (opt) {
+      opt.disabled = !ready;
+      opt.textContent = ready ? `BS-Roformer（${nm}）` : "BS-Roformer（无模型）";
+      sel.title = ready
+        ? `BS-Roformer 已就绪：${ro.pick}（比 Demucs 干净，但更吃显存）`
+        : "BS-Roformer 需要自备模型：展开下方「BS-Roformer 模型」看下载地址与装法";
+    }
+    if (!ready && sel.value === "roformer") sel.value = "demucs";
+    syncSepEngine(selId, hintId, dspId);
+  });
+  roPaint(ro);
+}
+
+/* 「模型拓展」面板开合。展开时把按钮切到 active 态、顺手把内容滚进视野；
+   收起时不滚动（用户就在原地，跳一下反而烦）。 */
+function showRoPanel(open, scroll) {
+  const box = $("roDetails"), btn = $("btnRoPanel");
+  if (!box) return;
+  box.hidden = !open;
+  if (btn) {
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+    btn.classList.toggle("on", !!open);
+  }
+  if (open && scroll) {
+    setTimeout(() => box.scrollIntoView({ block: "nearest", behavior: "smooth" }), 60);
+  }
+}
+
+function roPaint(ro) {
+  const box = $("roDetails");
+  if (!box) return;
+  const ready = !!(ro && ro.ready);
+  const n = ((ro && ro.models) || []).length;
+  const py = (ro && ro.pymss) || {};
+  const bar = $("roBar"), st = $("roState"), dir = $("roDir"), why = $("roWhy"), sum = $("roSumHint");
+  box.dataset.ready = ready ? "1" : "0";
+  if (bar) { bar.classList.toggle("ok", ready); bar.classList.toggle("bad", !ready); }
+  if (dir) dir.textContent = (ro && ro.dir) || "";
+  if (sum) {
+    // 副标题直接写模型名（比「已就绪 · 1 个模型」有用：一眼知道跑的是哪个权重）
+    const nm = String((ro && ro.pick) || "").replace(/\.[a-z]+$/i, "");
+    const short = nm.length > 22 ? nm.slice(0, 22) + "…" : nm;
+    sum.textContent = ready ? `（BS-Roformer · ${short}）`
+      : (n ? `（有 ${n} 个模型，缺推理后端）` : "（可选 · 未启用）");
+    sum.title = ready ? (ro && ro.pick) || "" : "";
+  }
+  if (st) {
+    if (ready) {
+      st.innerHTML = `已就绪：<b>${_roEsc(ro.pick)}</b>`
+        + (py.version ? ` · 后端 pymss ${_roEsc(py.version)}` : "");
+    } else if (n && !py.ok) {
+      st.innerHTML = `检测到 <b>${n}</b> 个模型，但还差推理后端 <b>pymss</b> —— 看下面第 2 步`;
+    } else if (n) {
+      st.innerHTML = `检测到 <b>${n}</b> 个模型`;
+    } else {
+      st.textContent = "还没放模型：Demucs 够用就别装；想要更干净，按下面两步来（现在照常用 Demucs）";
+    }
+  }
+  if (why) why.textContent = (ro && ro.reason) ? "· " + ro.reason : "";
+  // 下载命令里的目录用后端解析出来的真实路径（可能是 LF_ROFORMER_DIR 指过去的）
+  const cmd = $("roCmdDown");
+  if (cmd && ro && ro.dir) {
+    // 目录在项目里就用相对路径（命令短、好复制）；指到外面才写绝对路径
+    const mdir = ro.rel || ro.dir;
+    cmd.textContent = `runtime\\python.exe -m pymss.cli download bs_roformer_voc_hyperacev2 `
+      + `--model-dir "${mdir}" --source modelscope`;
+  }
+  const dlh = $("roDlHint");
+  if (dlh) {
+    dlh.textContent = py.ok
+      ? "已装好后端，可以直接跑"
+      : "先做完第 1 步，这条命令才跑得起来";
+  }
+}
+
+async function roLoad(force) {
+  let ro = null;
+  try {
+    ro = await api("/sepro/status" + (force ? "?force=1" : ""));
+  } catch (e) {
+    ro = { ready: false, models: [], reason: "检测失败：" + e.message, pymss: {} };
+  }
+  applySepCaps(ro);
+  return ro;
+}
+
+function roBind() {
+  const open = $("btnRoOpen"), scan = $("btnRoScan"), test = $("btnRoTest");
+  if (open && !open._b) {
+    open._b = true;
+    open.onclick = async () => {
+      try {
+        const r = await api("/sepro/open", { method: "POST", body: {} });
+        if (r && r.ok === false) toast("打不开目录：" + (r.error || "未知原因"), true);
+      } catch (e) { toast("打不开目录：" + e.message, true); }
+    };
+  }
+  if (scan && !scan._b) {
+    scan._b = true;
+    scan.onclick = async () => {
+      scan.disabled = true;
+      try {
+        const ro = await roLoad(true);
+        toast(ro && ro.ready ? "已检测到 BS-Roformer，引擎里可以选了" : (ro && ro.reason) || "还没检测到模型", !(ro && ro.ready));
+      } finally { scan.disabled = false; }
+    };
+  }
+  if (test && !test._b) {
+    test._b = true;
+    test.onclick = async () => {
+      const st = $("roState");
+      test.disabled = true;
+      if (st) st.textContent = "试跑中：加载模型 + 分离 3 秒合成音，第一次可能要一两分钟…";
+      try {
+        const r = await api("/sepro/test", { method: "POST", body: {} });
+        // 试跑只验「模型加载 + 推理链路」，不评判音质：合成音里没有人声，
+        // 人声轨接近静音是正常的，别拿这个吓用户。
+        toast(`试跑通过：${(r.ms / 1000).toFixed(1)} 秒（模型已加载，链路正常）`);
+      } catch (e) {
+        toast("试跑失败：" + e.message, true);
+      } finally {
+        test.disabled = false;
+        await roLoad(true);   // 状态行由 roPaint 重写；试跑顺带也算一次重新检测
+      }
+    };
+  }
+  // 两个「复制」按钮共用一套：data-copy 指向要复制的 <pre>
+  document.querySelectorAll("#roDetails [data-copy]").forEach((btn) => {
+    if (btn._b) return;
+    btn._b = true;
+    btn.onclick = async () => {
+      const box = $(btn.dataset.copy);
+      const txt = (box && box.textContent) || "";
+      if (!txt) return;
+      try {
+        await navigator.clipboard.writeText(txt);
+        toast("命令已复制，到整合包根目录粘进终端执行");
+      } catch (e) {
+        toast("复制失败，手动选中那几行吧", true);
+      }
+    };
+  });
+}
+
 
 async function loadMaterials() {
   try {
@@ -5606,11 +6974,12 @@ async function loadMaterials() {
 function matVisible() {
   const q = (MAT.q || "").trim().toLowerCase();
   const t = MAT.type || "";
-  return MAT.items.filter((it) => {
+  return pinSorted(MAT.items.filter((it) => {
     if (t && it.kind !== t) return false;
+    if (!inFolder(it.folder, MAT.path)) return false;
     if (!q) return true;
     return ((it.name || "") + " " + (it.source || "") + " " + (it.op || "")).toLowerCase().includes(q);
-  });
+  }));
 }
 
 function matTags(it) {
@@ -5644,12 +7013,50 @@ function matCheck(it, onToggle) {
   return cb;
 }
 
+/* ---------------- 置顶（音色 / 音效 / 导入台通用） ----------------
+   pin 存在各库的 index.json 里（时间戳），排序规则和后端 _pin_sort 一致：
+   pin 倒序 → created 倒序。所以置顶以后，台本页的音色下拉、时间轴页的
+   音色库/音效库面板读同一份索引，顺序自然跟着变，不用到处同步。 */
+function pinSorted(items) {
+  return (items || []).slice().sort((a, b) => {
+    const pa = a.pin || 0, pb = b.pin || 0;
+    if (pa !== pb) return pb - pa;
+    return (b.created || 0) - (a.created || 0);
+  });
+}
+
+async function togglePin(kind, it, after) {
+  const on = !(it.pin > 0);
+  try {
+    const r = await api("/pin", { method: "POST", body: { kind, id: it.id, on } });
+    if (on) it.pin = r.pin || (Date.now() / 1000); else delete it.pin;
+  } catch (e) {
+    toast("置顶失败：" + e.message, true);
+    return;
+  }
+  toast(on ? "已置顶，排在同组最前面（可以置顶多个）" : "已取消置顶");
+  if (after) after();
+}
+
+/* 行内那颗小图钉：置顶过的点亮，没置顶的半透明（不抢视线） */
+function pinBtn(kind, it, after) {
+  const b = el("button", "iconbtn pinbtn" + (it.pin ? " on" : ""), "📌");
+  b.title = it.pin ? "已置顶 · 点一下取消" : "置顶（排在同组最前面）";
+  b.onclick = (e) => { e.stopPropagation(); togglePin(kind, it, after); };
+  return b;
+}
+
+function pinMenuLabel(it) { return it.pin ? "📌 取消置顶" : "📌 置顶（排最前）"; }
+
 function renderMatList() {
   const box = $("matList");
   if (!box) return;
   box.className = "matlist mode-" + (MAT.view || "list");
   box.innerHTML = "";
-  const shown = matVisible();
+  const vis = matVisible();
+  const shown = vis.slice(0, MAT.limit || 300);
+  libBar("matFolders", "media", MAT.path, MAT.items,
+    (p) => { MAT.path = p; renderMatList(); }, renderMatList);
   if (!MAT.items.length) {
     box.appendChild(el("div", "empty",
       "导入台是空的。上传音频或视频（可多选/拖拽），处理完点「处理并存入」变成音色或音效。"));
@@ -5670,6 +7077,7 @@ function renderMatList() {
       row.appendChild(name);
       matTags(it).forEach(([cls, txt]) => row.appendChild(el("span", "mtag " + cls, txt)));
       row.appendChild(el("span", "mmeta", matMeta(it)));
+      row.appendChild(pinBtn("media", it, () => renderMatList()));
       row.appendChild(matPlayBtn(it));
       const quick = el("button", "iconbtn", MAT.target === "sfx" ? "🔔" : "🎙");
       quick.title = `直接存入${matTargetName()}（不做处理）`;
@@ -5721,10 +7129,14 @@ function renderMatList() {
     tile.oncontextmenu = (e) => { e.preventDefault(); openMatCtx(it, e.clientX, e.clientY); };
     box.appendChild(tile);
   });
+  libMore(box, vis.length, shown.length, () => {
+    MAT.limit = (MAT.limit || 300) + 300;
+    renderMatList();
+  });
   if ($("matCount")) {
-    $("matCount").textContent = shown.length === MAT.items.length
+    $("matCount").textContent = vis.length === MAT.items.length
       ? `${MAT.items.length} 个素材`
-      : `${shown.length} / ${MAT.items.length} 个素材`;
+      : `${vis.length} / ${MAT.items.length} 个素材`;
   }
   updateMatSelHint();
 }
@@ -5733,6 +7145,7 @@ function renderMatList() {
 function openMatCtx(it, x, y) {
   const items = [{ head: (it.name || it.file) + ` · ${matDur(it.dur)}` }];
   const playing = MAT.playId === it.id;
+  items.push({ label: pinMenuLabel(it), fn: () => togglePin("media", it, () => renderMatList()) });
   items.push({ label: playing ? "⏸ 停止试听" : "▶ 试听", fn: () => toggleMatPlay(it, null) });
   items.push({ label: "ℹ 属性（声道 / 格式 / 采样率 / 位深…）", fn: () => showAudioProps("media", it.id) });
   items.push({
@@ -5745,6 +7158,13 @@ function openMatCtx(it, x, y) {
   items.push("-");
   items.push({ label: "🎙 直接存入音色库", fn: () => directStore(it, "ref") });
   items.push({ label: "🔔 直接存入音效库", fn: () => directStore(it, "sfx") });
+  if (window.LibFolders) {
+    const ids = MAT.sel.has(it.id) && MAT.sel.size > 1 ? [...MAT.sel] : [it.id];
+    items.push({
+      label: ids.length > 1 ? `📁 把勾选的 ${ids.length} 个移到文件夹…` : "📁 移动到文件夹…",
+      fn: () => LibFolders.moveItems("media", ids, { onDone: async () => { await loadMat(); } }),
+    });
+  }
   items.push("-");
   items.push({ label: "⚡ 只提取人声（去伴奏）", fn: () => runMatPreset(it, "vocals") });
   items.push({ label: "⚡ 净化人声（+降噪/去静音/标准化）", fn: () => runMatPreset(it, "clean") });
@@ -5993,10 +7413,539 @@ function updateMatSelHint() {
   const n = MAT.sel.size;
   const h = $("matSelHint");
   if (h) h.textContent = n ? `已选 ${n} 个` : "先勾选素材";
+  if (n === 1) {
+    const one = MAT.items.find((x) => MAT.sel.has(x.id));
+    if (one && MATP.item !== one) MATP.item = one;
+  }
   const b = $("btnMatRun");
   if (b && !MAT.busy) {
     b.textContent = `处理并存入${matTargetName()}` + (n > 1 ? `（${n} 个）` : "");
   }
+  if (document.getElementById("matPlayer")) mpPaint();
+}
+
+/* ====================== 素材导入台：播放台 + 一键成音色/音效 ======================
+   播放台夹在「素材库」和「处理」之间：上面能听，下面立刻看到方案会怎么动这段音频
+   （裁剪区间、淡入淡出、去静音的示意、只取人声/伴奏……），改参数就地重画。
+============================================================================== */
+const MATP = { item: null, rate: 1, loop: false, drag: "", seekT: 0 };
+
+function mpFmt(t) {
+  if (!isFinite(t) || t < 0) t = 0;
+  const m = Math.floor(t / 60);
+  const s = t - m * 60;
+  return `${m}:${s < 10 ? "0" : ""}${s.toFixed(1)}`;
+}
+
+/* 当前这一侧（音色 / 音效）的裁剪、淡入淡出、静音阈值 */
+function mpPlan() {
+  const sfx = MAT.target === "sfx";
+  const p = {
+    sfx,
+    trimOn: !!($(sfx ? "opSTrim" : "opTrim") || {}).checked,
+    trimA: 0, trimB: null,
+    fadeIn: 0, fadeOut: 0,
+    silOn: !!($(sfx ? "opSSil" : "opTrimSil") || {}).checked,
+    silDb: parseFloat((($(sfx ? "opSSilDb" : "opSilDb") || {}).value) || "-45"),
+  };
+  const a = (($(sfx ? "opSTrimStart" : "opTrimStart") || {}).value || "").trim();
+  const b = (($(sfx ? "opSTrimEnd" : "opTrimEnd") || {}).value || "").trim();
+  if (p.trimOn) {
+    p.trimA = a === "" ? 0 : Math.max(0, parseFloat(a) || 0);
+    p.trimB = b === "" ? null : Math.max(0, parseFloat(b) || 0);
+  }
+  if (p.silOn) p.trimA = 0;                 // 先裁静音时，起点从 0 算
+  p.fadeIn = parseFloat((($(sfx ? "opSFadeIn" : "opFadeIn") || {}).value) || "0") || 0;
+  p.fadeOut = parseFloat((($(sfx ? "opSFadeOut" : "opFadeOut") || {}).value) || "0") || 0;
+  return p;
+}
+
+function mpDur() {
+  const a = MAT.audio;
+  if (a && isFinite(a.duration) && a.duration > 0) return a.duration;
+  if (MATP.item && isFinite(MATP.item.dur) && MATP.item.dur > 0) return MATP.item.dur;
+  return 0;
+}
+
+/* 方案摘要 → 播放台右下角的小胶囊 */
+function mpChipList() {
+  const out = [];
+  const sfx = MAT.target === "sfx";
+  const ops = sfx ? collectMatOps() : collectVoiceOps();
+  if (ops.separate) {
+    const m = ops.separate.mode === "instrumental" ? "只取伴奏" : "只要人声";
+    const eng = (ops.separate.engine || "dsp") === "demucs" ? "Demucs" : "中置提取";
+    const q = { fast: "快速", std: "标准", fine: "精细" }[ops.separate.quality || "std"] || "标准";
+    out.push(["k-sep", `分离 · ${m}（${eng}${eng === "Demucs" ? " · " + q : ""}）`]);
+    if (Number(ops.separate.residual) > 0) {
+      out.push(["k-warn", `残留抑制 ${Math.round(ops.separate.residual * 100)}%`]);
+    }
+  }
+  if (ops.denoise) out.push(["", `降噪 ${Number(ops.denoise).toFixed(2)}`]);
+  if (ops.trim_silence) out.push(["k-warn", `去首尾静音 ${ops.trim_silence.threshold_db}dB`]);
+  if (ops.trim) {
+    const b = ops.trim.end == null ? "末尾" : mpFmt(ops.trim.end);
+    out.push(["k-cut", `裁剪 ${mpFmt(ops.trim.start)} → ${b}`]);
+  }
+  if (ops.fade) {
+    out.push(["", `淡入 ${ops.fade.in}s / 淡出 ${ops.fade.out}s`]);
+  }
+  if (ops.normalize) {
+    out.push(["", `${ops.normalize.mode === "rms" ? "RMS" : "峰值"} ${ops.normalize.target_db}dB`]);
+  }
+  if (ops.speed && Number(ops.speed) !== 1) out.push(["", `变速 ${Number(ops.speed).toFixed(2)}×`]);
+  if (ops.pitch) out.push(["", `变调 ${ops.pitch > 0 ? "+" : ""}${ops.pitch}`]);
+  if (ops.gain_db) out.push(["", `增益 ${ops.gain_db > 0 ? "+" : ""}${ops.gain_db}dB`]);
+  if (ops.filter) {
+    if (ops.filter.hp) out.push(["", `低切 ${ops.filter.hp}Hz`]);
+    if (ops.filter.lp) out.push(["", `高切 ${ops.filter.lp}Hz`]);
+  }
+  if (ops.reverse) out.push(["", "反向播放"]);
+  if (ops.convert) {
+    const bits = [];
+    if (ops.convert.sr) bits.push(`${(ops.convert.sr / 1000).toFixed(2).replace(/0$/, "")}k`);
+    if (ops.convert.channels === 1) bits.push("单声道");
+    if (ops.convert.channels === 2) bits.push("立体声");
+    if (bits.length) out.push(["", bits.join(" ")]);
+  }
+  if (!out.length) out.push(["k-off", "不处理，直接存入"]);
+  return out;
+}
+
+function mpPaint() {
+  if (!document.getElementById("matPlayer")) return;
+  const dur = mpDur();
+  const cur = (MAT.audio && isFinite(MAT.audio.currentTime)) ? MAT.audio.currentTime : 0;
+  MATP.cur = cur;
+
+  // 名称：优先「正在试听的那个」，否则「只勾了一个就用它」
+  if (!MATP.item && MAT.sel.size === 1) {
+    MATP.item = MAT.items.find((x) => MAT.sel.has(x.id)) || null;
+  }
+  const it = MATP.item;
+  const nameEl = $("mpName");
+  if (nameEl) nameEl.textContent = it ? (it.name || it.file) : "还没选素材";
+  if ($("mpFrom")) $("mpFrom").textContent = it ? (it.source || "") : "点素材行的 ▶ 或勾选一个";
+
+  if ($("mpTime")) $("mpTime").textContent = `${mpFmt(cur)} / ${mpFmt(dur)}`;
+
+  const plan = mpPlan();
+  const pct = (t) => (dur > 0 ? Math.max(0, Math.min(1, t / dur)) * 100 : 0);
+
+  // 裁剪区间
+  const crop = $("mpCrop");
+  const endT = plan.trimB == null || plan.trimB <= plan.trimA ? dur : Math.min(plan.trimB, dur);
+  if (crop) {
+    crop.classList.toggle("off", !(plan.trimOn || plan.silOn));
+    crop.style.left = pct(plan.trimA) + "%";
+    crop.style.width = Math.max(0, pct(endT) - pct(plan.trimA)) + "%";
+  }
+  // 去静音：两端斜线（示意「首尾的空白会被裁掉」）
+  [$("mpCutL"), $("mpCutR")].forEach((n, i) => {
+    if (!n) return;
+    n.classList.toggle("on", plan.silOn);
+    const w = plan.silOn ? Math.min(6, Math.max(2, 100 / Math.max(1, dur))) : 0;
+    n.style.width = w + "%";
+    n.style.left = i === 0 ? "0" : "auto";
+    n.style.right = i === 0 ? "auto" : "0";
+  });
+  // 淡入淡出
+  const fi = $("mpFadeIn"), fo = $("mpFadeOut");
+  if (fi) {
+    fi.classList.toggle("on", plan.fadeIn > 0);
+    fi.style.width = Math.min(40, pct(plan.fadeIn)) + "%";
+  }
+  if (fo) {
+    fo.classList.toggle("on", plan.fadeOut > 0);
+    fo.style.width = Math.min(40, dur > 0 ? (plan.fadeOut / dur) * 100 : 0) + "%";
+  }
+  // 播放头 + 进度
+  if ($("mpHeadline")) $("mpHeadline").style.left = pct(cur) + "%";
+  if ($("mpFill")) $("mpFill").style.width = pct(cur) + "%";
+
+  // 裁剪把手（只有开了裁剪才显示，且这一侧真的是「裁剪」）
+  const showGrip = plan.trimOn || plan.silOn;
+  [[$("mpGripL"), pct(plan.trimA)], [$("mpGripR"), pct(endT)]].forEach(([n, x]) => {
+    if (!n) return;
+    n.classList.toggle("on", showGrip);
+    n.style.left = x + "%";
+  });
+
+  // 刻度
+  const ruler = $("mpRuler");
+  if (ruler && dur > 0) {
+    const n = 5;
+    const html = [];
+    for (let i = 0; i <= n; i++) {
+      const t = (dur * i) / n;
+      html.push(`<span style="left:${(i / n) * 100}%">${mpFmt(t)}</span>`);
+    }
+    ruler.innerHTML = html.join("");
+  }
+
+  // 方案胶囊
+  const chips = $("mpChips");
+  if (chips) {
+    chips.innerHTML = mpChipList()
+      .map(([cls, txt]) => `<span class="mp-chip ${cls}">${txt}</span>`).join("");
+  }
+
+  // 播放键文案
+  const pb = $("mpPlay");
+  if (pb) pb.textContent = (MAT.playId && !MAT.audio.paused) ? "⏸ 暂停" : "▶ 播放";
+}
+
+/* 播放器事件挂一次就够；rate / loop 只是试听，不写进文件 */
+function mpBindAudio() {
+  const a = MAT.audio;
+  if (!a || a._mpBound) return;
+  a._mpBound = true;
+  a.addEventListener("timeupdate", () => mpPaint());
+  a.addEventListener("loadedmetadata", () => mpPaint());
+  a.addEventListener("play", () => mpPaint());
+  a.addEventListener("pause", () => mpPaint());
+  a.addEventListener("ended", () => {
+    if (MATP.loop) { a.currentTime = 0; a.play().catch(() => {}); return; }
+    mpPaint();
+  });
+}
+
+function mpSetItem(it) {
+  if (!it) return;
+  MATP.item = it;
+  mpPaint();
+}
+
+function mpSeek(t) {
+  const dur = mpDur();
+  if (!dur) return;
+  MAT.audio.currentTime = Math.max(0, Math.min(dur, t));
+  mpPaint();
+}
+
+function mpTogglePlay() {
+  const a = MAT.audio;
+  const it = MATP.item || (MAT.sel.size === 1
+    ? MAT.items.find((x) => MAT.sel.has(x.id)) : null);
+  if (!it) { toast("先在素材列表里点一个 ▶（或勾选一个素材）", true); return; }
+  MATP.item = it;
+  if (MAT.playId === it.id && !a.paused) { a.pause(); return; }
+  if (MAT.playId !== it.id) {
+    pauseOthers(a);
+    a.src = `${API}${matApi()}/${encodeURIComponent(it.id)}/audio?t=${Date.now()}`;
+    MAT.playId = it.id;
+    renderMatList();
+  }
+  a.play().then(() => { a.playbackRate = MATP.rate; mpPaint(); })
+    .catch(() => toast("这个素材读不出来", true));
+}
+
+/* 拖动两侧圆点改裁剪起止（直接写进「详细方案设置」里的输入框，两边永远一致） */
+function mpBindGrips() {
+  const track = $("mpTrack");
+  if (!track || track._mpBound) return;
+  track._mpBound = true;
+
+  const tAt = (clientX) => {
+    const r = track.getBoundingClientRect();
+    const dur = mpDur();
+    if (!dur || !r.width) return 0;
+    return Math.max(0, Math.min(dur, ((clientX - r.left) / r.width) * dur));
+  };
+  const sfx = () => MAT.target === "sfx";
+
+  const writeCrop = (which, t) => {
+    const on = $(sfx() ? "opSTrim" : "opTrim");
+    if (on && !on.checked) on.checked = true;
+    const a = $(sfx() ? "opSTrimStart" : "opTrimStart");
+    const b = $(sfx() ? "opSTrimEnd" : "opTrimEnd");
+    const dur = mpDur();
+    const cur = mpPlan();
+    if (which === "l") {
+      const v = Math.min(t, (cur.trimB == null ? dur : cur.trimB) - 0.2);
+      if (a) a.value = v.toFixed(1);
+    } else {
+      // 拖到最右 = 到末尾（清空）
+      if (b) b.value = (dur - t <= 0.15) ? "" : t.toFixed(1);
+    }
+    mpPaint();
+  };
+
+  ["mpGripL", "mpGripR"].forEach((id, i) => {
+    const g = $(id);
+    if (!g) return;
+    g.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      MATP.drag = i === 0 ? "l" : "r";
+      g.setPointerCapture(e.pointerId);
+    });
+    g.addEventListener("pointermove", (e) => {
+      if (MATP.drag !== (i === 0 ? "l" : "r")) return;
+      writeCrop(MATP.drag, tAt(e.clientX));
+    });
+    const stop = (e) => {
+      if (MATP.drag) { MATP.drag = ""; try { g.releasePointerCapture(e.pointerId); } catch (err) { /* 忽略 */ } }
+    };
+    g.addEventListener("pointerup", stop);
+    g.addEventListener("pointercancel", stop);
+  });
+
+  track.addEventListener("click", (e) => {
+    if (MATP.drag) return;
+    mpSeek(tAt(e.clientX));
+  });
+}
+
+function mpBindControls() {
+  const pb = $("mpPlay");
+  if (pb && !pb._b) { pb._b = true; pb.onclick = () => mpTogglePlay(); }
+  const bk = $("mpBack");
+  if (bk && !bk._b) { bk._b = true; bk.onclick = () => mpSeek((MAT.audio.currentTime || 0) - 3); }
+  const fw = $("mpFwd");
+  if (fw && !fw._b) { fw._b = true; fw.onclick = () => mpSeek((MAT.audio.currentTime || 0) + 3); }
+  const rt = $("mpRate");
+  if (rt && !rt._b) {
+    rt._b = true;
+    rt.onchange = () => {
+      MATP.rate = parseFloat(rt.value) || 1;
+      MAT.audio.playbackRate = MATP.rate;
+      toast(`试听速度 ${MATP.rate}×（不改文件）`);
+    };
+  }
+  const lp = $("mpLoop");
+  if (lp && !lp._b) { lp._b = true; lp.onchange = () => { MATP.loop = lp.checked; }; }
+}
+
+/* ---------- 两颗「一键」方案：勾上=预览（只看不跑），右侧「生成！」才真处理 ---------- */
+const PLAN_KEY = (k) => "lf.plan." + (k === "ref" ? "ref" : "sfx");
+
+function matSavedPlan(kind) {
+  try {
+    const raw = localStorage.getItem(PLAN_KEY(kind));
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
+
+/* 取某一侧的 ops（临时切 target 只为让 collect 读对应那一套输入框） */
+function matOpsFor(kind) {
+  const prev = MAT.target;
+  MAT.target = kind === "ref" ? "ref" : "sfx";
+  const ops = collectMatOps();
+  MAT.target = prev;
+  return ops;
+}
+
+/* 把一套 ops 写回界面 —— 「一键」套用默认方案时走这里，保证界面显示的和真正跑的一致 */
+function matOpsToDom(kind, ops) {
+  ops = ops || {};
+  const sfx = kind !== "ref";
+  const set = (id, v) => { const n = $(id); if (n) n.checked = !!v; };
+  const val = (id, v) => { const n = $(id); if (n && v !== undefined && v !== null) n.value = String(v); };
+  (sfx
+    ? ["opSTrim", "opSSil", "opSDn", "opSFade", "opSNorm", "opSSpeed",
+       "opSPitch", "opSFilter", "opSReverse", "opSSep", "opSConv"]
+    : ["opVocal", "opDenoise", "opTrimSil", "opNorm", "opTrim", "opFade", "opConv"]
+  ).forEach((i) => set(i, false));
+
+  if (ops.separate) {
+    set(sfx ? "opSSep" : "opVocal", true);
+    val(sfx ? "opSSepMode" : "opVocalMode", ops.separate.mode);
+    val(sfx ? "opSSepEngine" : "opVocalEngine", ops.separate.engine || "demucs");
+    val(sfx ? "opSSepStrength" : "opVocalStrength", ops.separate.strength);
+    val(sfx ? "opSSepQuality" : "opVocalQuality", ops.separate.quality || "std");
+    val(sfx ? "opSSepResidual" : "opVocalResidual", ops.separate.residual || 0);
+    if ($(sfx ? "vSep" : "vVocal")) {
+      $(sfx ? "vSep" : "vVocal").textContent = Number(ops.separate.strength || 0.65).toFixed(2);
+    }
+    if ($(sfx ? "vSepResidual" : "vVocalResidual")) {
+      $(sfx ? "vSepResidual" : "vVocalResidual").textContent =
+        Math.round((ops.separate.residual || 0) * 100) + "%";
+    }
+  }
+  if (ops.denoise) {
+    set(sfx ? "opSDn" : "opDenoise", true);
+    val(sfx ? "opSDnAmt" : "opDenoiseAmt", ops.denoise);
+    if ($(sfx ? "vSdn" : "vDenoise")) {
+      $(sfx ? "vSdn" : "vDenoise").textContent = Number(ops.denoise).toFixed(2);
+    }
+  }
+  if (ops.trim_silence) {
+    set(sfx ? "opSSil" : "opTrimSil", true);
+    val(sfx ? "opSSilDb" : "opSilDb", ops.trim_silence.threshold_db);
+  }
+  if (ops.normalize) {
+    set(sfx ? "opSNorm" : "opNorm", true);
+    val(sfx ? "opSNormMode" : "opNormMode", ops.normalize.mode);
+    val(sfx ? "opSNormDb" : "opNormDb", ops.normalize.target_db);
+  }
+  if (sfx && ops.gain_db !== undefined) val("opSGain", ops.gain_db);
+  if (ops.trim) {
+    set(sfx ? "opSTrim" : "opTrim", true);
+    val(sfx ? "opSTrimStart" : "opTrimStart", ops.trim.start);
+    val(sfx ? "opSTrimEnd" : "opTrimEnd", ops.trim.end == null ? "" : ops.trim.end);
+  }
+  if (ops.fade) {
+    set(sfx ? "opSFade" : "opFade", true);
+    val(sfx ? "opSFadeIn" : "opFadeIn", ops.fade.in);
+    val(sfx ? "opSFadeOut" : "opFadeOut", ops.fade.out);
+  }
+  if (sfx && ops.speed) {
+    set("opSSpeed", true); val("opSSpeedVal", ops.speed);
+    if ($("vSpeed")) $("vSpeed").textContent = Number(ops.speed).toFixed(2) + "×";
+  }
+  if (sfx && ops.pitch) {
+    set("opSPitch", true); val("opSPitchVal", ops.pitch);
+    if ($("vPitch")) $("vPitch").textContent = String(ops.pitch);
+  }
+  if (sfx && ops.filter) {
+    set("opSFilter", true);
+    val("opSHp", ops.filter.hp || 0);
+    val("opSLp", ops.filter.lp || 0);
+  }
+  if (sfx && ops.reverse) set("opSReverse", true);
+  if (ops.convert) {
+    set(sfx ? "opSConv" : "opConv", true);
+    val(sfx ? "opSSr" : "opSr", ops.convert.sr || "");
+    val(sfx ? "opSCh" : "opCh", ops.convert.channels || "");
+  }
+  syncSepEngine(sfx ? "opSSepEngine" : "opVocalEngine",
+                sfx ? "sepEngineHint" : "vocalEngineHint",
+                sfx ? "sepDspOpts" : "vocalDspOpts");
+}
+
+/* 勾选框状态 + 卡片高亮（纯 UI，不触发 change） */
+function markBigCard(kind) {
+  [["ref", "chkRef", "bigCardRef"], ["sfx", "chkSfx", "bigCardSfx"]].forEach(([k, cid, cardId]) => {
+    const on = k === kind;
+    const c = $(cid), card = $(cardId);
+    if (c) c.checked = on;
+    if (card) card.classList.toggle("on", on);
+  });
+}
+
+/* 内置方案（没存过默认时用） */
+function matBasePreset(kind) {
+  const set = (id, v) => { const n = $(id); if (n) n.checked = v; };
+  const val = (id, v) => { const n = $(id); if (n) n.value = v; };
+  if (kind === "ref") {
+    set("opVocal", true); val("opVocalMode", "vocals"); val("opVocalEngine", "demucs");
+    val("opVocalQuality", "std");
+    set("opDenoise", true); val("opDenoiseAmt", "0.5");
+    if ($("vDenoise")) $("vDenoise").textContent = "0.50";
+    set("opTrimSil", true); val("opSilDb", "-45");
+    set("opNorm", true); val("opNormMode", "peak"); val("opNormDb", "-1");
+    set("opTrim", true); val("opTrimStart", "0"); val("opTrimEnd", "15");
+    set("opConv", true); val("opSr", ""); val("opCh", "1");
+  } else {
+    ["opSTrim", "opSSil", "opSDn", "opSFade", "opSNorm", "opSSpeed",
+     "opSPitch", "opSFilter", "opSReverse", "opSConv"].forEach((i) => set(i, false));
+    set("opSSep", true); val("opSSepMode", "instrumental"); val("opSSepEngine", "demucs");
+    val("opSSepQuality", "std"); val("opSSepResidual", "0");
+    if ($("vSepResidual")) $("vSepResidual").textContent = "0%";
+  }
+}
+
+/* 套用方案（勾选框 / 打勾 = 预览）：有默认方案就用默认，没有就用内置 */
+function matApplyPreset(kind, keepChecked) {
+  MAT.target = kind === "ref" ? "ref" : "sfx";
+  applyMatTarget();
+  const saved = matSavedPlan(kind);
+  if (saved) matOpsToDom(kind, saved);
+  else {
+    matBasePreset(kind);
+    syncSepEngine(kind === "ref" ? "opVocalEngine" : "opSSepEngine",
+                  kind === "ref" ? "vocalEngineHint" : "sepEngineHint",
+                  kind === "ref" ? "vocalDspOpts" : "sepDspOpts");
+  }
+  if (!keepChecked) markBigCard(kind);
+  renderMatList();
+  mpPaint();
+}
+
+function mpFlashBig() {
+  ["bigCardRef", "bigCardSfx"].forEach((id) => {
+    const n = $(id);
+    if (!n) return;
+    n.classList.add("needsel");
+    setTimeout(() => n.classList.remove("needsel"), 1100);
+  });
+}
+
+/* 右侧「生成！」：真处理。没勾过就先按这套方案把界面装好，再按界面上的参数跑 */
+async function matGenerate(kind) {
+  if (MAT.busy) return;
+  if (!MAT.sel.size) { toast("先勾选素材（列表上方有「全选 / 取消」）", true); mpFlashBig(); return; }
+  const chk = $(kind === "ref" ? "chkRef" : "chkSfx");
+  if (!chk || !chk.checked) matApplyPreset(kind);
+  const n = MAT.sel.size;
+  toast(kind === "ref"
+    ? `按「做成音色」处理 ${n} 个素材…`
+    : `按「做成音效」处理 ${n} 个素材…`);
+  await runMatOps({ target: kind === "ref" ? "ref" : "sfx" });
+  mpPaint();
+}
+
+/* ---------- 把当前方案设为默认 ---------- */
+function updatePlanHint() {
+  const el = $("planSaved"), btn = $("btnSavePlan");
+  if (!el) return;
+  const refPlan = matSavedPlan("ref"), sfxPlan = matSavedPlan("sfx");
+  const bits = [];
+  if (refPlan) bits.push("音色");
+  if (sfxPlan) bits.push("音效");
+  el.textContent = bits.length
+    ? `默认方案：${bits.join(" / ")} 已保存 —— 勾上面的方框就会套用它`
+    : "默认方案：还没有（用内置的）";
+  if (btn) btn.textContent = bits.length ? "★ 清除默认方案" : "☆ 把当前方案设为默认";
+}
+
+function matSavePlan() {
+  const kind = MAT.target === "sfx" ? "sfx" : "ref";
+  const has = !!matSavedPlan(kind);
+  try {
+    if (has) localStorage.removeItem(PLAN_KEY(kind));
+    else localStorage.setItem(PLAN_KEY(kind), JSON.stringify(matOpsFor(kind)));
+  } catch (e) { /* 隐私模式写不了就算了 */ }
+  updatePlanHint();
+  toast(has
+    ? `已清除${kind === "ref" ? "音色" : "音效"}的默认方案（回到内置）`
+    : `已把当前${kind === "ref" ? "音色" : "音效"}方案设为默认：以后勾上面那颗方框就是这套`);
+}
+
+function mpBindBig() {
+  [["ref", "chkRef"], ["sfx", "chkSfx"]].forEach(([kind, id]) => {
+    const chk = $(id);
+    if (chk && !chk._b) {
+      chk._b = true;
+      chk.onchange = () => {
+        const other = $(kind === "ref" ? "chkSfx" : "chkRef");
+        if (chk.checked) {
+          if (other) other.checked = false;
+          matApplyPreset(kind);          // 只装方案、不处理
+        } else {
+          markBigCard("");
+        }
+      };
+    }
+  });
+  [["ref", "btnGoRef"], ["sfx", "btnGoSfx"]].forEach(([kind, id]) => {
+    const b = $(id);
+    if (b && !b._b) { b._b = true; b.onclick = () => matGenerate(kind); }
+  });
+  const sp = $("btnSavePlan");
+  if (sp && !sp._b) { sp._b = true; sp.onclick = () => matSavePlan(); }
+  updatePlanHint();
+}
+
+/* 面板里任何参数一变就重画播放台（输入框、勾选框、下拉都覆盖） */
+function mpBindPanelWatch() {
+  const pane = document.querySelector('#drawer .ppane[data-pane="media"]');
+  if (!pane || pane._mpWatch) return;
+  pane._mpWatch = true;
+  const repaint = () => { if (document.getElementById("matPlayer")) mpPaint(); };
+  pane.addEventListener("input", repaint);
+  pane.addEventListener("change", repaint);
 }
 
 function toggleMatPlay(it, btn) {
@@ -6004,10 +7953,13 @@ function toggleMatPlay(it, btn) {
     MAT.audio.pause(); MAT.playId = null; renderMatList(); return;
   }
   pauseOthers(MAT.audio);
+  mpSetItem(it);                       // 播放台跟着换成这个素材
+  MAT.audio.playbackRate = MATP.rate;
   MAT.audio.src = `${API}${matApi()}/${encodeURIComponent(it.id)}/audio?t=${Date.now()}`;
   MAT.audio.play().then(() => {
     MAT.playId = it.id;
     renderMatList();
+    mpPaint();
   }).catch(() => toast("这个素材读不出来", true));
 }
 
@@ -6071,7 +8023,9 @@ function collectSfxOps() {
     ops.separate = {
       mode: $("opSSepMode").value,
       strength: parseFloat($("opSSepStrength").value),
-      engine: ($("opSSepEngine") && $("opSSepEngine").value) === "demucs" ? "demucs" : "dsp",
+      engine: sepEngineOf("opSSepEngine"),
+      quality: (($("opSSepQuality") || {}).value) || "std",
+      residual: parseFloat((($("opSSepResidual") || {}).value) || 0),
     };
   }
   if ($("opSConv").checked) {
@@ -6087,7 +8041,9 @@ function collectVoiceOps() {
     ops.separate = {
       mode: $("opVocalMode").value,
       strength: parseFloat($("opVocalStrength").value),
-      engine: ($("opVocalEngine") && $("opVocalEngine").value) === "demucs" ? "demucs" : "dsp",
+      engine: sepEngineOf("opVocalEngine"),
+      quality: (($("opVocalQuality") || {}).value) || "std",
+      residual: parseFloat((($("opVocalResidual") || {}).value) || 0),
     };
   }
   if ($("opDenoise").checked) ops.denoise = parseFloat($("opDenoiseAmt").value);
@@ -6206,8 +8162,35 @@ function deleteMat(it) {
 function matToSfx(it) { return directStore(it, "sfx"); }
 function matAsRef(it) { return directStore(it, "ref"); }
 
+/* 高级音频处理台的两个入口（顶栏 / 导入台底部）：**启动时就要绑**。
+   以前绑在 bindMediaEvents() 里，而那只在「打开素材导入台」时才跑 ——
+   于是刚进页面点顶栏那颗没反应，必须先进一次导入台。 */
+function initSfxBenchEntry() {
+  const openSfxBench = () => {
+    const first = [...MAT.sel][0];
+    window.open("/sfxbench" + (first ? "?mid=" + encodeURIComponent(first) : ""), "_blank");
+  };
+  ["btnSfxBench", "btnSfxBenchTop"].forEach((id) => {
+    const b = $(id);
+    if (b && !b._b) { b._b = true; b.onclick = openSfxBench; }
+  });
+}
+
 function bindMediaEvents() {
   bindFfmpegBar();
+  roBind();
+  initSfxBenchEntry();          // 幂等：启动时已经绑过，这里再调不会重复
+  // 「模型拓展」：点一下才展开下面的可选模型，再点收起
+  const rp = $("btnRoPanel");
+  if (rp && !rp._b) {
+    rp._b = true;
+    rp.onclick = () => showRoPanel($("roDetails").hidden);
+  }
+  const rpc = $("btnRoPanelClose");
+  if (rpc && !rpc._b) {
+    rpc._b = true;
+    rpc.onclick = () => showRoPanel(false);
+  }
   const inp = $("fileMat");
   if (inp) {
     inp.onchange = async () => {
@@ -6229,7 +8212,7 @@ function bindMediaEvents() {
     });
   }
   const sq = $("matSearch");
-  if (sq) sq.oninput = () => { MAT.q = sq.value; renderMatList(); };
+  if (sq) sq.oninput = () => { MAT.q = sq.value; MAT.limit = 300; renderMatList(); };
   const fl = $("matFilter");
   if (fl) fl.onchange = () => { MAT.type = fl.value; renderMatList(); };
 
@@ -6244,6 +8227,29 @@ function bindMediaEvents() {
 
   const vs = $("opVocalStrength");
   if (vs) vs.oninput = () => { $("vVocal").textContent = parseFloat(vs.value).toFixed(2); };
+  // 残留抑制滑块的百分比数字跟着滑
+  [["opSSepResidual", "vSepResidual"], ["opVocalResidual", "vVocalResidual"]].forEach(([id, lab]) => {
+    const n = $(id);
+    if (n && !n._rb) {
+      n._rb = true;
+      n.oninput = () => {
+        if ($(lab)) $(lab).textContent = Math.round(parseFloat(n.value || "0") * 100) + "%";
+      };
+    }
+  });
+
+  // 「只要人声 / 只要伴奏」一换，残留抑制那一行要跟着出现/消失
+  [["opVocalMode", "opVocalEngine", "vocalEngineHint", "vocalDspOpts"],
+   ["opSSepMode", "opSSepEngine", "sepEngineHint", "sepDspOpts"]].forEach(([mid, eid, hint, dsp]) => {
+    const m = $(mid);
+    if (m && !m._modeB) {
+      m._modeB = true;
+      m.onchange = () => {
+        syncSepEngine(eid, hint, dsp);
+        if (document.getElementById("matPlayer")) mpPaint();
+      };
+    }
+  });
   ["opVocalEngine", "opSSepEngine"].forEach((id) => {
     const sel = $(id);
     if (!sel) return;
@@ -6339,6 +8345,13 @@ function bindMediaEvents() {
   const dir = $("btnMatDirect");
   if (dir) dir.onclick = () => runMatOps({ ops: {} });
 
+  const mvBtn = $("btnMatMove");
+  if (mvBtn) mvBtn.onclick = () => {
+    if (!window.LibFolders) return toast("文件夹组件没加载", true);
+    const ids = MAT.sel.size ? [...MAT.sel] : [];
+    if (!ids.length) return toast("先勾选要移动的素材", true);
+    LibFolders.moveItems("media", ids, { onDone: async () => { await loadMaterials(); } });
+  };
   const rf = $("btnMatRefresh");
   if (rf) rf.onclick = () => loadMaterials();
   const all = $("btnMatAll");
@@ -6388,7 +8401,7 @@ function bindSfxEvents() {
     };
   });
   const sq = $("sfxSearch");
-  if (sq) sq.oninput = () => { SFX.q = sq.value; renderSfxList(); };
+  if (sq) sq.oninput = () => { SFX.q = sq.value; SFX.limit = 300; renderSfxList(); };
   const paste = $("btnSfxPaste");
   if (paste) paste.onclick = () => pasteSfx();
   const pre = $("btnSfxPreprocess");
@@ -6443,8 +8456,11 @@ async function loadSfx() {
 
 function sfxVisible() {
   const q = (SFX.q || "").trim().toLowerCase();
-  return (SFX.items || []).filter((it) => !q
-    || ((it.name || "") + " " + (it.source || "") + " " + (it.op || "")).toLowerCase().includes(q));
+  return pinSorted((SFX.items || []).filter((it) => {
+    if (!inFolder(it.folder, SFX.path)) return false;
+    return !q || ((it.name || "") + " " + (it.source || "") + " " + (it.op || ""))
+      .toLowerCase().includes(q);
+  }));
 }
 
 function sfxPlayBtn(it) {
@@ -6460,7 +8476,12 @@ function renderSfxList() {
   if (!box) return;
   box.className = "matlist liblist mode-" + (SFX.view || "list");
   box.innerHTML = "";
-  const shown = sfxVisible();
+  const vis = sfxVisible();
+  const shown = vis.slice(0, SFX.limit || 300);
+  libSelPrune("sfx", SFX.items || []);
+  libSelBar("sfx", "sfxSelBar", SFX.items || [], () => { renderSfxList(); });
+  libBar("sfxFolders", "sfx", SFX.path, SFX.items,
+    (p) => { SFX.path = p; renderSfxList(); }, renderSfxList);
   const seg = $("sfxViewSeg");
   if (seg) seg.querySelectorAll("button").forEach((b) => b.classList.toggle("cur", b.dataset.sv === SFX.view));
   if ($("sfxCount")) {
@@ -6485,7 +8506,19 @@ function renderSfxList() {
       /* 两行式：第一行名字 + 来源标签，第二行处理链 + 参数。
          一行塞「名字 + 2 个标签 + 时长 + 按钮」会把名字挤成「34070595460-1-192·去…」，
          而且处理链一长就和参数粘在一起，读不出来。 */
-      const row = el("div", "matitem");
+      const row = el("div", "matitem" + (libSelHas("sfx", it.id) ? " lsel" : ""));
+      row.appendChild(libCheck("sfx", it.id, () => renderSfxList()));
+      row.dataset.lid = it.id;
+      row.onclick = (e) => {
+        const rows = [...document.querySelectorAll("#sfxList .matitem")];
+        if (e.shiftKey && LIBSEL.last && LIBSEL.last.kind === "sfx") {
+          libSelRange("sfx", LIBSEL.last.i, rows.indexOf(row));
+          renderSfxList();
+          return;
+        }
+        if (e.ctrlKey || e.metaKey) { libSelToggle("sfx", it.id); renderSfxList(); }
+        LIBSEL.last = { kind: "sfx", i: rows.indexOf(row) };
+      };
       const main = el("div", "mmain");
       const l1 = el("div", "ml1");
       const name = el("span", "mname", it.name || it.file);
@@ -6504,6 +8537,7 @@ function renderSfxList() {
       l2.appendChild(el("span", "mm", matMeta(it)));
       main.appendChild(l2);
       row.appendChild(main);
+      row.appendChild(pinBtn("sfx", it, () => renderSfxList()));
       row.appendChild(sfxPlayBtn(it));
       const cp = el("button", "iconbtn", "⧉");
       cp.title = "复制（之后可「粘贴副本」）";
@@ -6517,7 +8551,11 @@ function renderSfxList() {
       box.appendChild(row);
       return;
     }
-    const tile = el("div", "mattile");
+    const tile = el("div", "mattile" + (libSelHas("sfx", it.id) ? " lsel" : ""));
+    tile.appendChild(libCheck("sfx", it.id, () => renderSfxList()));
+    tile.onclick = (e) => {
+      if (e.ctrlKey || e.metaKey) { libSelToggle("sfx", it.id); renderSfxList(); }
+    };
     const top = el("div", "mt-top");
     const name = el("span", "mt-name", it.name || it.file);
     name.title = `${it.name}\n来源：${it.source || "—"}\n右键更多`;
@@ -6548,6 +8586,10 @@ function renderSfxList() {
     tile.oncontextmenu = (e) => { e.preventDefault(); openSfxCtx(it, e.clientX, e.clientY); };
     box.appendChild(tile);
   });
+  libMore(box, vis.length, shown.length, () => {
+    SFX.limit = (SFX.limit || 300) + 300;
+    renderSfxList();
+  });
   updateSfxPaste();
 }
 
@@ -6566,7 +8608,38 @@ function toggleSfxPlay(it) {
 
 /* 右键菜单：试听 / 挂到标签 / 复制 / 粘贴 / 重命名 / 删除 */
 function openSfxCtx(it, x, y) {
+  if (libSelHas("sfx", it.id) && LIBSEL.sfx.size > 1) {
+    const ids = libSelIds("sfx");
+    const n = ids.length;
+    const batch = [{ head: `已选 ${n} 个音效` },
+      { label: `📁 移动到文件夹…（${n} 个）`, fn: () => LibFolders.moveItems("sfx", ids, {
+        onDone: async () => { libSelClear("sfx"); await loadSfx(); },
+      }) },
+      { label: `📌 置顶这 ${n} 个`, fn: async () => {
+        try {
+          await api("/sfx/bulk", { method: "POST", body: JSON.stringify({ action: "pin", ids }) });
+          await loadSfx(); toast(`已置顶 ${n} 个`);
+        } catch (e) { toast(e.message, true); }
+      } },
+      { label: `🗑 删除这 ${n} 个音效`, danger: true, fn: async () => {
+        if (!confirm(`删除选中的 ${n} 个音效？\n\n会放进音效库的回收站，可恢复。`)) return;
+        try {
+          const d = await api("/sfx/bulk", { method: "POST", body: JSON.stringify({ action: "delete", ids }) });
+          libSelClear("sfx"); await loadSfx();
+          toast(`已删除 ${d.count} 个音效`);
+        } catch (e) { toast("删除失败：" + e.message, true); }
+      } }, "-"];
+    buildCtx(batch.concat(sfxCtxItems(it, x, y)), true);
+    showCtxAt(x, y);
+    return;
+  }
+  buildCtx(sfxCtxItems(it, x, y), true);
+  showCtxAt(x, y);
+}
+
+function sfxCtxItems(it, x, y) {
   const items = [{ head: (it.name || it.file) + ` · ${matDur(it.dur)}` }];
+  items.push({ label: pinMenuLabel(it), fn: () => togglePin("sfx", it, () => renderSfxList()) });
   items.push({ label: SFX.playId === it.id ? "⏸ 停止试听" : "▶ 试听", fn: () => { toggleSfxPlay(it); } });
   const tagCount = selectedTagLines().length;
   items.push({
@@ -6574,6 +8647,11 @@ function openSfxCtx(it, x, y) {
     fn: () => attachSfxToTags(it),
   });
   items.push({ label: "ℹ 属性（声道 / 格式 / 采样率 / 位深…）", fn: () => showAudioProps("sfx", it.id) });
+  if (window.LibFolders) {
+    items.push({ label: "📁 移动到文件夹…", fn: () => LibFolders.moveItems("sfx", [it.id], {
+      onDone: async () => { await loadSfx(); },
+    }) });
+  }
   items.push("-");
   items.push({ label: "⧉ 复制", fn: () => copySfx(it) });
   items.push({ label: "📋 粘贴副本", disabled: !SFX.clip, fn: () => pasteSfx(x, y) });
@@ -6581,8 +8659,7 @@ function openSfxCtx(it, x, y) {
   items.push({ label: "✎ 拷进导入台改一改", fn: () => preprocessSfx(it) });
   items.push("-");
   items.push({ label: "删除音效", danger: true, fn: () => deleteSfx(it) });
-  buildCtx(items, true);
-  showCtxAt(x, y);
+  return items;
 }
 
 function copySfx(it) {
@@ -6808,6 +8885,8 @@ function updatePlayBtns() {
 
 /* ------------------------------ 弹窗 / 抽屉 ------------------------------ */
 function modal(title, bodyNode, onOk, okText) {
+  const mbox = document.querySelector("#modal .modal-box");
+  if (mbox) mbox.classList.remove("report");   // 只有识别报告用加宽版
   $("modalTitle").textContent = title;
   const cancelBtn = $("modalCancel");
   if (cancelBtn) cancelBtn.hidden = false;
@@ -6840,7 +8919,7 @@ function fmtSize(n) {
 const STORE_COLOR = {
   trash: "#d2372e", exports: "#c07d10", history: "#6b4fa8", peaks: "#1f5fe0",
   import: "#1e9e5a", outputs: "#8a8a8a", logs: "#8a8a8a", orphan: "#b26a00",
-  dupes: "#b26a00",
+  dupes: "#b26a00", sfxb: "#534ab7", roformer: "#179299",
 };
 /* 让本机服务在资源管理器里打开某个目录（浏览器没权限开本地路径）。
    传相对路径就是相对整合包根目录。 */
@@ -6874,6 +8953,37 @@ function openStorage() {
     bRoot.onclick = () => openLocalPath("");
     head.appendChild(bRoot);
     body.appendChild(head);
+
+    /* 一屏 11 类，逐个点太麻烦：给两个批量动作。
+       「只勾推荐」只选 default 且 safe 的（回收站 / 缓存 / 中间文件），
+       会动到工程的（孤立音频、重复素材）永远留给用户自己决定。 */
+    const tools = document.createElement("div");
+    tools.className = "storetools";
+    const bRec = document.createElement("button");
+    bRec.type = "button";
+    bRec.className = "btn mini";
+    bRec.textContent = "✓ 只勾推荐项";
+    bRec.title = "只勾「默认推荐」且不影响工程的分类（回收站 / 缓存 / 中间文件）";
+    bRec.onclick = () => {
+      body.querySelectorAll('input[type=checkbox][data-key]').forEach((cb) => {
+        const it = (data.items || []).find((x) => x.key === cb.dataset.key) || {};
+        cb.checked = !!it.default && it.size > 0 && it.safe !== false;
+      });
+    };
+    const bNone = document.createElement("button");
+    bNone.type = "button";
+    bNone.className = "btn mini ghost";
+    bNone.textContent = "全不选";
+    bNone.onclick = () => {
+      body.querySelectorAll('input[type=checkbox][data-key]').forEach((cb) => { cb.checked = false; });
+    };
+    const newTip = document.createElement("span");
+    newTip.className = "hint";
+    newTip.textContent = "新增：音效台的分离作业、BS-Roformer 中间文件（这两类是这轮新产物）";
+    tools.appendChild(bRec);
+    tools.appendChild(bNone);
+    tools.appendChild(newTip);
+    body.appendChild(tools);
 
     const max = Math.max(1, ...data.items.map((x) => x.size));
     const list = document.createElement("div");
@@ -7088,6 +9198,7 @@ function openDrawer(pane, opt) {
     syncDefaultPanel();
     syncEnvLine();
     loadSettings(true).then(syncSettingsPanel);
+    loadChars(true);          // 使用句数 / 未收录分组 都跟当前台本有关
   }
 }
 function closeDrawer() {
@@ -7169,6 +9280,22 @@ function initLfTheme() {
   });
 }
 
+/* 设置里每一块（人物标签 / 时间轴 / 混音 / 参数预设）都能单独折叠，
+   折叠状态记在 localStorage —— 下次打开还是你上次合起来的样子。 */
+function initSetFolds() {
+  document.querySelectorAll(".setsec").forEach((d) => {
+    const k = "lf.setfold." + (d.dataset.fold || "");
+    try {
+      const v = localStorage.getItem(k);
+      if (v === "1") d.open = true;
+      else if (v === "0") d.open = false;
+    } catch (e) { /* 隐私模式 */ }
+    d.addEventListener("toggle", () => {
+      try { localStorage.setItem(k, d.open ? "1" : "0"); } catch (e) { /* ignore */ }
+    });
+  });
+}
+
 function initHeader() {
   // 顶栏两行，高度随内容变：把真实高度写给 sticky 工具栏，避免遮住第一行
   const head = document.querySelector(".lf-head");
@@ -7202,6 +9329,8 @@ function initHeader() {
     if (e.target.id === "drawer") closeDrawer();
   });
   initLfTheme();
+  initSetFolds();
+  initSfxBenchEntry();       // 顶栏那颗「高级音频处理台」不用等导入台打开就能点
   const moreBtn = $("btnScriptsMore");
   if (moreBtn) moreBtn.onclick = (e) => { e.stopPropagation(); openSideMenu(moreBtn); };
   /* 台本多选条：全选 / 复制 / 删除 / 取消 */
@@ -7515,6 +9644,12 @@ const IMP = {
   groups: [],
   issues: [],
   stats: null,
+  tagRefs: {},        // 分组名 → 命中的音色（后端按「人物 / 属性标签」算好的建议）
+  characters: [],     // 剧本头部【人物】解析出来的角色卡
+  scriptMeta: null,   // 【场景】【字数】这类元信息
+  sourceHead: [],     // 原文头几行（写进台本，「原文本预览」原样展示）
+  tagCount: 0,        // 标签库里有多少个标签
+  autoVoice: null,    // 导入时是否按标签自动设音色（null = 跟随台本默认）
   busy: false,
   caret: null,
 };
@@ -7595,6 +9730,7 @@ function impGo(step) {
 
 async function openSmartImport() {
   try { await impLoadMeta(); } catch (e) { toast("模板加载失败：" + e.message, true); return; }
+  try { await loadChars(); } catch (e) { /* 人物库读不出来不影响导入 */ }
   impMask();
   impGo(1);
 }
@@ -7942,11 +10078,21 @@ function impStep2(body, foot) {
     };
     paintAdv();
     advRow.appendChild(advBtn);
+    /* 旁边这颗是「一步到位」：认说话人 → 按人分组 → 套人物音色，不再只改一个开关。
+       和左边那颗分开的理由：左边是「规则开关」，这颗是「帮我一次做完」的动作。 */
+    const spkBtn = document.createElement("button");
+    spkBtn.type = "button";
+    spkBtn.className = "btn spkbtn big";
+    spkBtn.innerHTML = '<b>🎭 识别说话人 · 分组 · 分音色</b>'
+      + '<span class="advsub">一次做完：认出谁在说 → 按人分组 → 套人物音色</span>';
+    spkBtn.title = "一键：① 按人名/旁白线索认出每句是谁说的 ② 按角色分组 "
+      + "③ 导入时按人物库自动套音色。做完会直接跳到第 3 步，能在预览里逐句核对、改组名。";
+    spkBtn.onclick = () => impRunSpeaker();
+    advRow.appendChild(spkBtn);
     advRow.appendChild(impEl("span", "hint",
       impCls().id === "novel"
-        ? "可选。开了以后第 3 步顶部会写认出哪些角色，预览里能看到每句的依据"
-        : "可选。稿子里没有「名字：台词」、但旁白里写了「李四说」时才有用；"
-          + "已经有角色前缀的剧本，按角色名分组就够了"));
+        ? "左边是开关（只改规则），右边是一次做完。开了以后第 3 步顶部会写认出哪些角色"
+        : "左边是开关（只改规则），右边是一次做完；已经有「名字：」前缀的剧本，左边不用开"));
     body.appendChild(advRow);
   }
 
@@ -8143,6 +10289,11 @@ async function impPlan(silent) {
     }));
     IMP.issues = d.issues || [];
     IMP.stats = d.stats || null;
+    IMP.tagRefs = d.tag_refs || {};
+    IMP.tagCount = d.tag_count || 0;
+    IMP.characters = d.characters || [];
+    IMP.scriptMeta = d.script_meta || null;
+    IMP.sourceHead = d.source_head || [];
     if (d.cls) IMP.clsId = d.cls;
     if (d.detect) IMP.det = Object.assign({}, IMP.det || {}, d.detect, { _token: IMP.src.token });
     impSnapshotOrigin();          // 标记稿 = 这一刻的原文（之后改动不影响它）
@@ -8272,6 +10423,19 @@ function impGroupParams(g, row) {
     refOptions().filter((r) => r.editable).map((r) => `<option value="${r.id}">🎙 ${r.name}</option>`).join("");
   refSel.value = (g.params || {}).ref || "";
   refSel.onchange = () => { g.params = g.params || {}; g.params.ref = refSel.value; };
+  /* 这一组导入时会被「人物 / 属性标签」自动套成什么：预览里就写出来，
+     否则这里显示"跟随默认"、导入后行上却是人物音色，看着像出错了。 */
+  const hit = (IMP.tagRefs || {})[g.name || "正文"];
+  if (hit && hit.ref) {
+    const tip = impEl("span", "imphintline",
+      `${hit.source === "character" ? "👤 人物" : "🎙 标签"}「${hit.char || hit.tag || g.name}」`
+      + `会套成 ${hit.ref_name}`);
+    tip.title = "这里选的值优先；没选才用人物 / 属性标签匹配到的音色";
+    box.appendChild(tip);
+  } else if (hit && !hit.ref) {
+    box.appendChild(impEl("span", "imphintline warn",
+      `👤 人物「${hit.char || g.name}」还没绑音色，导入后要手动选`));
+  }
 
   const emoSel = document.createElement("select");
   emoSel.className = "sel mini";
@@ -9015,15 +11179,32 @@ async function impSnapshotOrigin() {
 }
 
 /* 「看标记稿」：直接打开那份纯文本 */
-/* 下载导入原稿：优先用「识别那一刻」的快照（IMP_ORIGIN），没有就按当前分组拍一份。
-   内容是纯文本（一段一行、无前缀无注释），直接拖回智能导入就能重来。 */
-function impOpenMarked() {
+/* 下载导入原稿：要的是**用户真正拖进来 / 粘进来的那份原文**（【场景】、角色前缀、
+   时间码都在），不是拆句后的结果。所以先问后端要 raw；拿不到才退回快照。 */
+async function impOpenMarked() {
+  const title = IMP.title || (IMP.src && IMP.src.filename) || "导入原稿";
+  const tk = IMP.src && IMP.src.token;
+  if (tk) {
+    try {
+      const r = await fetch(`${API}/import/raw/${encodeURIComponent(tk)}`, { cache: "no-store" });
+      if (r.ok) {
+        lfDownloadBlob(`导入原稿_${title}.txt`, await r.blob());
+        toast("已下载导入原稿（原文原样，未拆句）");
+        return;
+      }
+    } catch (e) { /* 落回下面 */ }
+  }
+  if (IMP.rawText && IMP.rawText.trim()) {
+    lfDownloadText(`导入原稿_${title}.txt`,
+      IMP.rawText.endsWith("\n") ? IMP.rawText : IMP.rawText + "\n");
+    toast("已下载导入原稿（粘贴的原文）");
+    return;
+  }
   const rows = (IMP_ORIGIN && IMP_ORIGIN.length) ? IMP_ORIGIN : impOriginSnapshot(IMP.groups);
   if (!rows.length) { toast("还没有可导出的内容", true); return; }
   const text = rows.map((r) => String(r.text || "").trim()).filter(Boolean).join("\n") + "\n";
-  const title = IMP.title || (IMP.src && IMP.src.filename) || "导入原稿";
   lfDownloadText(`导入原稿_${title}.txt`, text);
-  toast(`已下载导入原稿（${rows.length} 段，纯文本）`);
+  toast(`已下载（没有原文可拿，按拆句结果导出 ${rows.length} 段）`);
 }
 
 function impPvEnsureSelection(flow) {
@@ -9087,8 +11268,8 @@ function impPreviewOpen() {
   };
   paintSent();
   const bSave = impEl("button", "btn mini ghost", "⤓ 导入原稿");
-  bSave.title = "下载导入原稿：这个文件导入那一刻的原文纯文本（一段一行、不带任何标记）。"
-    + "可以直接拖回智能导入；想保持分段就选「一行一段」。之后在这里改动不会回写它";
+  bSave.title = "下载这次导入用的原文（你拖进来/粘进来的那份，带【场景】、角色前缀、时间码，一个字不改）；"
+    + "想改原稿就下它。要一份「拆句后、可直接再导入」的稿子，看台本页「原文本」里的「⤓ 导入原稿」";
   bSave.onclick = () => impOpenMarked();
   const markStat = impEl("span", "pvmarkstat",
     IMP_MARK_STATE || "导入原稿＝这次导入的原文底稿（改动不影响它）");
@@ -9256,6 +11437,43 @@ async function impRunAdvanced() {
   }
 }
 
+/* 一键「识别说话人 → 按人分组 → 分音色」：
+   ①speaker_mode=adv（按人名/旁白线索认人，认不出再交替 A/B）
+   ②group_by 选「按角色 / 按说话人」（看这一类支持哪种）
+   ③这次导入按人物库自动设音色（impAutoVoiceOn 只看 IMP.autoVoice）
+   然后正常 plan 一次，直接落到第 3 步给人核对。 */
+async function impRunSpeaker() {
+  if (IMP.busy) return;
+  IMP.opts = IMP.opts || {};
+  IMP.opts.speaker_mode = "adv";
+  const opts = ((impCls() || {}).group_opts || []).map((x) => x[0]);
+  if (opts.includes("role")) IMP.opts.group_by = "role";
+  else if (opts.includes("speaker")) IMP.opts.group_by = "speaker";
+  IMP.autoVoice = true;                  // 这一份导入要分音色（不再跟全局设置走）
+  await impPlan(true);
+  const st = IMP.stats || {};
+  const sp = st.speaker || {};
+  const names = (sp.names || []).slice(0, 6);
+  const nRef = Object.keys(IMP.tagRefs || {}).length;
+  const bits = [];
+  if (sp.mode === "adv" && (sp.named || 0) > 0) {
+    bits.push(`认出 ${names.length} 个角色（${names.join("、")}），${sp.named} 句按名字归属`);
+  } else {
+    bits.push("没找到名字线索，已按台词顺序交替 角色A / 角色B");
+  }
+  if (sp.guessed) bits.push(`${sp.guessed} 句没线索按交替处理`);
+  bits.push(nRef ? `${nRef} 个分组能对到音色（导入时自动套上）`
+                 : "分组还绑不到音色：去「设置 → 人物标签」建人物 / 绑音色");
+  toast(bits.join("；"), !nRef);
+}
+
+/* 导入时是否「按角色标签自动设音色」：手动勾过以勾选为准，否则跟随台本默认 */
+function impAutoVoiceOn() {
+  if (IMP.autoVoice !== null && IMP.autoVoice !== undefined) return !!IMP.autoVoice;
+  // 全局设置（设置 → 人物标签）：不再跟台本走 —— 换章节时不该重新勾一次
+  return CHARS.autoVoice !== false;
+}
+
 function impStep3(body, foot) {
   const st = IMP.stats || {};
   const top = impEl("div", "impstats");
@@ -9323,6 +11541,85 @@ function impStep3(body, foot) {
     body.appendChild(box);
   }
 
+  /* 角色 → 音色：分组名同时是某个音色的标签时，导入就能把音色一并设好。
+     这里只做提示和开关，真正写入在 commit（后端按同一套 _match_ref 再算一遍）。 */
+  /* 剧本头部【人物】解析出的角色卡：一键建进人物库（属性标签一起带过去） */
+  const chars = IMP.characters || [];
+  if (chars.length) {
+    const box = impEl("div", "impissues info");
+    const head = impEl("div");
+    head.appendChild(impEl("b", null, `👤 剧本里写了 ${chars.length} 个角色`));
+    head.appendChild(document.createTextNode("："));
+    box.appendChild(head);
+    const chip = impEl("div", "impchars");
+    chars.slice(0, 12).forEach((c) => {
+      const t = impEl("span", "charchip",
+        c.name + ((c.traits || []).length ? `（${c.traits.join("、")}）` : ""));
+      chip.appendChild(t);
+    });
+    box.appendChild(chip);
+    const addBtn = impEl("button", "btn mini ghost", "＋ 建进人物库");
+    addBtn.title = "把这些人名和属性标签建成人物，之后去「设置 → 人物标签」绑音色";
+    addBtn.onclick = async () => {
+      addBtn.disabled = true;
+      addBtn.textContent = "建人物…";
+      let made = 0, skip = 0;
+      for (const c of chars) {
+        try {
+          await api("/characters", {
+            method: "POST",
+            body: JSON.stringify({ name: c.name, traits: c.traits || [] }),
+          });
+          made++;
+        } catch (e) { skip++; }
+      }
+      await loadChars(true);
+      addBtn.textContent = `已建 ${made}` + (skip ? ` · 跳过 ${skip}` : "");
+      toast(`建好 ${made} 个人物${skip ? `，${skip} 个已存在` : ""}。去设置 → 人物标签绑音色`);
+    };
+    box.appendChild(addBtn);
+    const sm = IMP.scriptMeta || {};
+    const bits = [];
+    if (sm.scene) bits.push(`场景：${sm.scene}`);
+    if (sm.extra && sm.extra["字数"]) bits.push(`字数：${sm.extra["字数"]}`);
+    if (bits.length) box.appendChild(impEl("div", "imphintline", bits.join(" · ")));
+    body.appendChild(box);
+  }
+
+  const tr = IMP.tagRefs || {};
+  const trNames = Object.keys(tr);
+  if (trNames.length || IMP.tagCount) {
+    const box = impEl("div", "impissues " + (trNames.length ? "info" : "warn"));
+    const line = impEl("div");
+    line.appendChild(impEl("b", null, trNames.length
+      ? `🧠 认出 ${trNames.length} 个角色能对到音色`
+      : "🧠 标签库里没有命中这次的角色"));
+    const labelOf = (x) => (x.ref_name || "（未绑音色）");
+    line.appendChild(document.createTextNode(trNames.length
+      ? `：${trNames.slice(0, 5).map((n) => `${n} → ${labelOf(tr[n])}`).join("、")}`
+        + (trNames.length > 5 ? "…" : "")
+      : "（人物库和音色标签都没命中）。在「设置 → 人物标签」里建人物并绑音色，"
+        + "回来点「⟲ 重新识别」。"));
+    box.appendChild(line);
+    if (trNames.length) {
+      const chk = document.createElement("label");
+      chk.className = "mini-chk";
+      chk.style.marginTop = "4px";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.id = "impAutoVoice";
+      cb.checked = impAutoVoiceOn();
+      cb.onchange = () => { IMP.autoVoice = cb.checked; };
+      chk.appendChild(cb);
+      chk.appendChild(document.createTextNode(" 导入时按人物自动设音色（只改音色，情感/停顿不动）"));
+      box.appendChild(chk);
+      box.appendChild(impEl("div", "imphintline",
+        "带「≈」的是名字里包含标签的近似匹配（比如分组叫「第一章 · 阿澈」）。"
+        + "导入后想再改：设置 → 台本默认参数 →「🧠 智能识别人物」，或单句右键改音色。"));
+    }
+    body.appendChild(box);
+  }
+
   const tools = impEl("div", "imptools");
   const redo = impEl("button", "btn mini ghost", "⟲ 按当前规则重新识别");
   redo.onclick = () => impPlan();
@@ -9373,6 +11670,20 @@ function impStep3(body, foot) {
       gVoiced === 0
         ? `整组不配音 · ${gMuted} 段（不会导入）`
         : `${gVoiced} 段 · ${g.chars || 0} 字` + (gMuted ? `（另有 ${gMuted} 段不配音）` : "")));
+    const hit = (IMP.tagRefs || {})[g.name || "正文"];
+    if (hit) {
+      const isChar = hit.source === "character" || hit.source === "character-no-voice";
+      const label = hit.ref_name
+        ? `${isChar ? "👤" : "🎙"} ${hit.ref_name}`
+        : `👤 ${hit.char || hit.tag}（未绑音色）`;
+      const tag = impEl("span", "gtagref" + (hit.fuzzy ? " fuzzy" : "")
+        + (hit.ref_name ? "" : " novoice"), `${hit.fuzzy ? "≈ " : ""}${label}`);
+      tag.title = isChar
+        ? `人物「${hit.char || hit.tag}」${(hit.traits || []).length ? `（${hit.traits.join("、")}）` : ""}`
+          + (hit.ref_name ? ` → ${hit.ref_name}` : "：还没绑定音色，去「设置 → 人物标签」绑一个")
+        : `按音色上的属性标签「${hit.tag || g.name}」匹配`;
+      head.appendChild(tag);
+    }
     if (gVoiced === 0) card.classList.add("dead");
     head.appendChild(impEl("span", "spacer"));
     const upG = impEl("button", "iconbtn", "↑");
@@ -9581,15 +11892,24 @@ async function impCommit() {
         detect: IMP.det ? { cls: IMP.det.cls, score: IMP.det.score,
                             evidence: IMP.det.evidence } : null,
         filename: (IMP.src && IMP.src.filename) || "",
+        /* 原文原样给后端存一份：台本页「⤓ 导入原稿」下的就是这份（不是拆句结果） */
+        token: (IMP.src && IMP.src.token) || "",
+        raw_text: IMP.rawText || "",
         groups,
         origin: IMP_ORIGIN || impOriginSnapshot(IMP.groups),
         make_batches: true,
+        head_lines: IMP.sourceHead || [],
+        /* 按角色标签自动设音色：只改音色，不动情感/停顿；
+           没勾就不带这个字段，后端默认不套 */
+        auto_voice: !!impAutoVoiceOn(),
       }),
     });
     impClose();
     await loadScripts();
     await switchScript(d.id);
-    toast(`已导入：${d.lines} 段 / ${d.groups} 个分组，可以直接开始生成`);
+    const av = d.auto_voice;
+    const avTxt = av && av.changed ? `，已按角色标签自动设了 ${av.changed} 句音色` : "";
+    toast(`已导入：${d.lines} 段 / ${d.groups} 个分组${avTxt}，可以直接开始生成`);
   } catch (e) { toast("导入失败：" + e.message, true); }
   finally { IMP.busy = false; }
 }
@@ -9636,7 +11956,28 @@ function lfPreviewRows(mode) {
     const cur = ((SCRIPT && SCRIPT.lines) || [])
       .map((l) => (l.text || "").trim()).filter(Boolean);
     let j = 0;
-    return o.map((r) => {
+    // 原文头部（【场景】【人物】…）不朗读，但预览要能一字不差看到。
+    // 旧版导入把「前 12 行」当头部存了，正文会被重复显示一整遍 ——
+    // 这里按两条规则滤掉，老台本也能立刻正常：
+    //   ① 「角色：台词」这种带前缀的行 = 正文，不是头部；
+    //   ② 和正文任意一句互相包含（≥6 字）的行 = 重复。
+    const originTexts = o.map((r) => String(r.text || "").trim()).filter((x) => x.length >= 4);
+    const SPEAKERISH = /^[\u4e00-\u9fa5A-Za-z·'\s]{1,12}[：:]/;
+    const dup = (t) => {
+      const s0 = String(t || "").trim();
+      if (!s0) return true;
+      if (SPEAKERISH.test(s0)) return true;
+      return originTexts.some((x) => x === s0
+        || (x.length >= 6 && s0.includes(x))
+        || (s0.length >= 6 && x.includes(s0)));
+    };
+    const head = ((SCRIPT && SCRIPT.origin_head) || [])
+      .filter((t) => !dup(t))
+      .map((t) => ({
+        text: t, group: "原文信息", note: null, muted: true, uid: null,
+        kind: "speech", tag: null,
+      }));
+    return head.concat(o.map((r) => {
       const t = (r.text || "").trim();
       const inScript = j < cur.length && cur[j] === t;
       if (inScript) j += 1;
@@ -9645,7 +11986,7 @@ function lfPreviewRows(mode) {
         muted: !inScript || !!r.muted, uid: null,
         kind: r.tag ? "tag" : "speech", tag: r.tag,
       };
-    });
+    }));
   }
   return ((SCRIPT && SCRIPT.lines) || [])
     .filter((l) => (l.text || "").trim())
@@ -9667,16 +12008,44 @@ function lfDownloadText(name, text) {
   setTimeout(() => URL.revokeObjectURL(a.href), 4000);
 }
 
-/* 下载「导入原稿」：原文纯文本，一段一行，不带任何标记 —— 可以直接拖回智能导入 */
-function lfDownloadOrigin() {
+/* 下载「导入原稿」：优先下**用户真正导进来的那份原文**（带【场景】、角色前缀、时间码），
+   老台本没存过原稿才退回按 origin 拼一份（拆句后的版本）。 */
+async function lfDownloadOrigin() {
   const rows = (SCRIPT && SCRIPT.origin) || [];
-  if (!rows.length) {
-    toast("这个台本没有导入原稿（旧版本建的或手动建的）", true);
+  const title = (SCRIPT && SCRIPT.title) || "台本";
+  const fallback = () => {
+    if (!rows.length) {
+      toast("这个台本没有导入原稿（旧版本建的或手动建的）", true);
+      return false;
+    }
+    const text = rows.map((r) => (r.text || "").trim()).filter(Boolean).join("\n") + "\n";
+    lfDownloadText(`导入原稿_${title}.txt`, text);
+    toast(`已下载导入原稿（老台本只有拆句版：${rows.length} 段）`);
+    return true;
+  };
+  if (!SCRIPT || !SCRIPT.id) { fallback(); return; }
+  try {
+    const r = await fetch(`${API}/scripts/${encodeURIComponent(SCRIPT.id)}/raw`,
+      { cache: "no-store" });
+    if (!r.ok) throw new Error(String(r.status));
+    const blob = await r.blob();
+    lfDownloadBlob(`导入原稿_${title}.txt`, blob);
+    toast("已下载导入原稿（原文原样，未拆句）");
     return;
+  } catch (e) {
+    fallback();
   }
-  const text = rows.map((r) => (r.text || "").trim()).filter(Boolean).join("\n") + "\n";
-  lfDownloadText(`导入原稿_${(SCRIPT && SCRIPT.title) || "台本"}.txt`, text);
-  toast(`已下载导入原稿（${rows.length} 段，纯文本）`);
+}
+
+/* 下载一个 blob（后端返回文件时用，省一次读文本） */
+function lfDownloadBlob(name, blob) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = String(name || "文本.txt").replace(/[\\/:*?"<>|]/g, "_").slice(0, 60);
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
 }
 
 function lfPreviewOpen(mode) {
@@ -9921,6 +12290,33 @@ async function boot() {
     if (dirty) { e.preventDefault(); e.returnValue = ""; }
   });
 
+  const tsLoad = $("tsTtsLoad");
+  if (tsLoad && !tsLoad._b) {
+    tsLoad._b = true;
+    tsLoad.onclick = async () => {
+      const old = tsLoad.textContent;
+      tsLoad.disabled = true;
+      tsLoad.textContent = "加载中";
+      // 这个接口在 /api/v1 上（不属于 /lf 这一组），所以不走 api() 那套前缀
+      try {
+        const r = await fetch("/api/v1/model/load", { method: "POST" });
+        const d = await r.json().catch(() => ({}));
+        if (d && d.ok) {
+          MODEL = d;
+          paintModelState();
+          toast(`模型已加载${d.diffusion_steps ? `（steps ${d.diffusion_steps}）` : ""}`);
+        } else {
+          toast("加载失败：" + ((d && (d.error || d.detail)) || `HTTP ${r.status}`), true);
+        }
+      } catch (e) {
+        toast("加载失败：" + e.message, true);
+      } finally {
+        tsLoad.textContent = old;
+        tsLoad.disabled = false;
+      }
+    };
+  }
+
   const tsBtn = $("tsRefresh");
   if (tsBtn) {
     tsBtn.onclick = async () => {
@@ -9983,6 +12379,11 @@ window.__lfDebug = {
   get imp() { return IMP; },
   get pvSel() { return IMP_PV_SEL; },
   get pvSent() { return IMP_PV_SENT; },
+  get matp() { return MATP; },
+  get matAudio() { return MAT && MAT.audio; },
+  get matSel() { return MAT ? [...MAT.sel] : []; },
+  get matBusy() { return !!(MAT && MAT.busy); },
+  matPreset(k) { matApplyPreset(k); },
   get pvUndo() { return IMP_PV_UNDO.length; },
   get pvRedo() { return IMP_PV_REDO.length; },
   get sfxCount() { return SFX.items.length; },

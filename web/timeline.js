@@ -6825,20 +6825,70 @@
   let sfxPrev = null, sfxPrevId = null;    // 试听器（三个库共用）
   const mtKey = (kind, id) => kind + ":" + id;
 
+  /* 三个库的文件夹：和工作台、音效台共用同一份（longform 下各库 index.json 里的 folder 字段）。
+     素材上百条之后，光靠搜索框找不动 —— 目录是最省事的一层组织。 */
+  let MTFOLD = { sfx: [], ref: [], mat: [] };
+  let MTPATH = { sfx: "", ref: "", mat: "" };
+  const inFolder = (f, cur) => {
+    const p = String(f || "");
+    if (!cur) return true;
+    return p === cur || p.startsWith(cur + "/");
+  };
+
+  function drawFolderBar() {
+    const host = $("mediaFolders");
+    if (!host || !window.LibFolders) return;
+    const kind = MTAB === "mat" ? "media" : MTAB;
+    const items = MTAB === "sfx" ? SFXLIB : MTAB === "ref" ? REFS : MEDIA;
+    LibFolders.bar(host, {
+      kind, path: MTPATH[MTAB] || "", items, folders: MTFOLD[MTAB] || [],
+      emptyHint: "按场景分文件夹（三页共用同一套目录）",
+      onPick: (p) => { MTPATH[MTAB] = p || ""; drawMediaList(); },
+      onChanged: () => { loadFolderCache(MTAB, true); },
+    });
+  }
+
+  async function loadFolderCache(tab, redraw) {
+    if (!window.LibFolders) return;
+    const kind = tab === "mat" ? "media" : tab;
+    try { MTFOLD[tab] = await LibFolders.load(kind, true); } catch (e) { MTFOLD[tab] = []; }
+    sanitizePath(tab);
+    if (redraw) drawMediaList();
+  }
+
+  /* 目录被删掉（可能是在另一个页面删的）之后，当前筛选路径会悬空：
+     面包屑还显示一个不存在的目录，列表永远是空的。这里往上退到还存在的一层。 */
+  function sanitizePath(tab) {
+    let p = MTPATH[tab] || "";
+    if (!p) return;
+    const arr = MTFOLD[tab] || [];
+    while (p && !arr.some((f) => f.path === p)) {
+      p = p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "";
+    }
+    MTPATH[tab] = p;
+  }
+
   async function loadMedia() {
     try {
       const r = await fetch(`${LFAPI}/media`);
-      MEDIA = (await r.json()).items || [];
+      const d = await r.json();
+      MEDIA = d.items || [];
+      if (Array.isArray(d.folders)) MTFOLD.mat = d.folders;
+      sanitizePath("mat");
     } catch (e) { MEDIA = []; }
     await loadSfxLib(false);
     await loadRefsLib(false);
+    if (!MTFOLD.mat.length) loadFolderCache("mat", false);
     drawMediaList();
   }
 
   async function loadSfxLib(redraw = true) {
     try {
       const r = await fetch(`${LFAPI}/sfx`);
-      SFXLIB = (await r.json()).items || [];
+      const d = await r.json();
+      SFXLIB = d.items || [];
+      if (Array.isArray(d.folders)) MTFOLD.sfx = d.folders;
+      sanitizePath("sfx");
     } catch (e) { SFXLIB = []; }
     if (redraw) drawMediaList();
   }
@@ -6846,7 +6896,10 @@
   async function loadRefsLib(redraw = true) {
     try {
       const r = await fetch(`${LFAPI}/meta`);
-      REFS = (await r.json()).refs || [];
+      const d = await r.json();
+      REFS = d.refs || [];
+      if (Array.isArray(d.ref_folders)) MTFOLD.ref = d.ref_folders;
+      sanitizePath("ref");
     } catch (e) { REFS = []; }
     if (redraw) drawMediaList();
   }
@@ -6925,6 +6978,7 @@
     if ($("mediaHint")) $("mediaHint").textContent = MTAB_HINT[MTAB] || "";
     // 上传/入库统一走「素材导入台」，时间轴里不再往工程目录临时塞文件
     if ($("btnMediaUpload")) $("btnMediaUpload").style.display = "none";
+    drawFolderBar();
     if (MTAB === "sfx") { drawSfxList(box); return; }
     if (MTAB === "ref") { drawRefList(box); return; }
     drawMatList(box);
@@ -6935,7 +6989,8 @@
     const cnt = $("mediaCount");
     if (cnt) cnt.textContent = MEDIA.length;
     const q = mediaQuery.trim().toLowerCase();
-    const list = q ? MEDIA.filter((m) => (m.name || "").toLowerCase().includes(q)) : MEDIA;
+    const list = MEDIA.filter((m) => inFolder(m.folder, MTPATH.mat)
+      && (!q || (m.name || "").toLowerCase().includes(q)));
     if (!MEDIA.length) {
       box.appendChild(el("div", "hint mempty",
         "导入台是空的。点上面「📥 素材导入台」上传音频/视频，处理完可以存成音效或音色；"
@@ -6964,7 +7019,8 @@
     const cnt = $("mediaCount");
     if (cnt) cnt.textContent = REFS.length;
     const q = mediaQuery.trim().toLowerCase();
-    const list = q ? REFS.filter((m) => (m.name || "").toLowerCase().includes(q)) : REFS;
+    const list = REFS.filter((m) => inFolder(m.folder, MTPATH.ref)
+      && (!q || (m.name || "").toLowerCase().includes(q)));
     if (!REFS.length) {
       box.appendChild(el("div", "hint mempty",
         "音色库是空的。回工作台「🎙 音色素材库」上传一段参考音频，这里就会看到。"));
@@ -6992,7 +7048,8 @@
     const cnt = $("mediaCount");
     if (cnt) cnt.textContent = SFXLIB.length;
     const q = mediaQuery.trim().toLowerCase();
-    const list = q ? SFXLIB.filter((m) => (m.name || "").toLowerCase().includes(q)) : SFXLIB;
+    const list = SFXLIB.filter((m) => inFolder(m.folder, MTPATH.sfx)
+      && (!q || (m.name || "").toLowerCase().includes(q)));
     if (!SFXLIB.length) {
       box.appendChild(el("div", "hint mempty",
         "音效库是空的。点上面「📥 导入台」上传/处理一段音频，存进音效库就会出现在这里。"));
@@ -7113,6 +7170,7 @@
       { label: sfxPrevId === mtKey("mat", m.id) ? "⏸ 停止试听" : "▶ 试听", fn: () => previewLib("mat", m) },
       { label: "ℹ 属性（声道 / 格式 / 采样率 / 位深…）", fn: () => showProps("mat", m.id) },
       "-",
+      { label: "📁 移动到文件夹…", fn: () => moveToFolder("mat", m.id) },
       { label: "＋ 插入到播放头", fn: () => insertMatLib(m.id, S.pos, (sfxTracks()[0] || tracks()[0]).id) },
       { label: "＋ 插入到某条素材轨开头", fn: () => insertMatLib(m.id, 0, (sfxTracks()[0] || tracks()[0]).id) },
       "-",
@@ -7132,12 +7190,27 @@
       { label: sfxPrevId === mtKey("ref", m.id) ? "⏸ 停止试听" : "▶ 试听", fn: () => previewLib("ref", m) },
       { label: "ℹ 属性（声道 / 格式 / 采样率 / 位深…）", fn: () => showProps("ref", m.id) },
       "-",
+      { label: "📁 移动到文件夹…", fn: () => moveToFolder("ref", m.id) },
       { label: "＋ 插入到播放头（当参考声）", fn: () => insertRefLib(m.id, m.name, S.pos, (sfxTracks()[0] || tracks()[0]).id) },
       { label: "＋ 插入到某条素材轨开头", fn: () => insertRefLib(m.id, m.name, 0, (sfxTracks()[0] || tracks()[0]).id) },
       "-",
       { label: "⧉ 复制名称", fn: () => copyText(m.name || m.id) },
       { label: "🎙 去工作台音色库（设为默认 / 用于生成）", fn: () => { window.open("/longform", "_blank"); } },
     ]);
+  }
+
+  /* 把一条素材移到某个文件夹（三个库通用）；完成后刷新对应缓存 */
+  function moveToFolder(tab, id) {
+    if (!window.LibFolders) return toast("文件夹组件没加载", true);
+    const kind = tab === "mat" ? "media" : tab;
+    LibFolders.moveItems(kind, [id], {
+      onDone: async () => {
+        await loadFolderCache(tab, false);
+        if (tab === "mat") await loadMedia();
+        else if (tab === "sfx") await loadSfxLib(true);
+        else await loadRefsLib(true);
+      },
+    });
   }
 
   // 音效库条目
@@ -7147,6 +7220,7 @@
       { label: sfxPrevId === mtKey("sfx", m.id) ? "⏸ 停止试听" : "▶ 试听", fn: () => previewSfxLib(m) },
       { label: "ℹ 属性（声道 / 格式 / 采样率 / 位深…）", fn: () => showProps("sfx", m.id) },
       "-",
+      { label: "📁 移动到文件夹…", fn: () => moveToFolder("sfx", m.id) },
       { label: "＋ 插入到播放头", fn: () => insertSfxLib(m.id, S.pos, (sfxTracks()[0] || tracks()[0]).id) },
       { label: "＋ 插入到某条素材轨开头", fn: () => insertSfxLib(m.id, 0, (sfxTracks()[0] || tracks()[0]).id) },
       "-",

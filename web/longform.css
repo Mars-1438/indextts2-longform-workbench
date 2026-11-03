@@ -32,6 +32,12 @@
   --tag-ink-strong: #4a3380;
   --accent-soft: #f3f7ff;
   --accent-line: #c9d9f7;
+  /* 浅绿（进阶入口 / 「说话人分组」这类「推荐但并不吓人」的动作） */
+  --green-soft: #eefaf2;
+  --green-soft2: #e2f6e9;
+  --green-line: #bfe6cd;
+  --green-ink: #1c7a45;
+  --green-deep: #2b9e60;
   --stale-ink: #7a5a2a;
   --bar-bg: #efece7;
   --overlay: rgba(27, 26, 24, .3);
@@ -234,6 +240,10 @@ body.resizing .rz::after { opacity: 1; background: var(--primary); }
   cursor: pointer; padding: 1px 4px; color: var(--muted); font-size: 11px; line-height: 1.5;
 }
 .iconbtn:hover { background: var(--surface-2); border-color: var(--border); color: var(--ink); }
+/* 置顶图钉：没置顶时压得很淡（列表里十几行都亮着会很吵），置顶后点亮 */
+.iconbtn.pinbtn { opacity: .32; filter: grayscale(1); font-size: 10.5px; }
+.iconbtn.pinbtn.on { opacity: 1; filter: none; }
+.iconbtn.pinbtn:hover { opacity: 1; filter: none; }
 .row .tagbody { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 4px 0 3px; grid-column: 4 / 5; min-width: 0; }
 .row .tagbody .tagname { flex: none; }
 .row .tagbody .hint { white-space: nowrap; }
@@ -521,6 +531,11 @@ html[data-theme="dark"] {
   --tag-ink-strong: #c3abe8;
   --accent-soft: rgba(106, 157, 255, .14);
   --accent-line: rgba(106, 157, 255, .38);
+  --green-soft: rgba(75, 189, 130, .13);
+  --green-soft2: rgba(75, 189, 130, .20);
+  --green-line: rgba(75, 189, 130, .40);
+  --green-ink: #7fd6a6;
+  --green-deep: #4bbd82;
   --stale-ink: #ecc98b;
   --bar-bg: #2a2825;
   --overlay: rgba(0, 0, 0, .55);
@@ -1048,7 +1063,7 @@ html.embed .libfoot { margin-bottom: 4px; }
   border: 1px solid var(--accent-line, #c9d9f7); color: var(--accent, #1f5fe0);
   background: var(--accent-soft, #f3f7ff);
 }
-.advbtn:hover { background: #e9f0ff; }
+.advbtn:hover { background: var(--accent-soft); filter: brightness(.97); }
 .advbtn.on {
   background: var(--accent, #1f5fe0); border-color: var(--accent, #1f5fe0);
   color: #fff; box-shadow: 0 2px 10px rgba(31, 95, 224, .28);
@@ -1672,6 +1687,31 @@ pre.impsample {
 .setfold[open] > summary::before { content: "▾"; }
 .setfold[open] > summary { margin-bottom: 6px; }
 
+/* 设置页：每个方面一块、各自可折叠（.setsec）—— 一屏只看自己关心的那一块。
+   原来四块标题平铺，人物库一长就把下面的时间轴/混音全推到看不见的地方。 */
+.setsec {
+  margin: 12px 0 0; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 10px;
+  padding: 8px 10px 10px;
+}
+.setsec > summary {
+  font-size: 13px; font-weight: 700; color: var(--ink);
+  padding: 1px 0 3px; border-radius: 6px;
+}
+.setsec > summary:hover { color: var(--primary); }
+.setsec > summary .hint { font-weight: 400; font-size: 11px; margin-left: 2px; }
+.setsec[open] > summary {
+  padding-bottom: 7px; margin-bottom: 8px;
+  border-bottom: 1px dashed var(--border);
+}
+html[data-theme="dark"] .setsec { background: var(--surface-2); }
+.setfold-sub { background: transparent; border-style: dashed; }
+/* 折叠之后「保存设置」还在最下面，看得见、点得到 */
+.setfoot {
+  margin-top: 14px; padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
 /* 参数预设：弹窗里的快捷条 + 设置里的列表 */
 .presetrow { gap: 6px; margin: 0 0 8px; align-items: center; }
 .preset-sum {
@@ -1701,3 +1741,490 @@ pre.impsample {
 .envline b { color: var(--ink); font-weight: 600; }
 .envline .eno { color: var(--faint); }
 .envline .eoff { color: var(--warn, #c68a1a); }
+
+/* ==================== 素材导入台：两大主操作 + 播放台 ==================== */
+/* 两个「一键」按钮：占一整行，左边图标、右边标题+方案摘要，比一排小圆角按钮好点得多 */
+.matbig { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 8px 0 0; }
+@media (max-width: 700px) { .matbig { grid-template-columns: 1fr; } }
+.bigcard {
+  position: relative; display: flex; align-items: center; gap: 10px;
+  padding: 11px 12px 11px 10px;
+  background: var(--surface); border: 1px solid var(--border-2); border-radius: 12px;
+  transition: border-color .12s, box-shadow .12s, background .12s;
+}
+.bigcard .bigchk {
+  width: 16px; height: 16px; flex: none; margin: 0 2px 0 2px; cursor: pointer;
+  accent-color: var(--accent);
+}
+.bigcard .bi { font-size: 21px; line-height: 1; flex: none; }
+.bigcard .btxt { flex: 1; min-width: 0; }
+.bigcard b { display: block; font-size: 13.5px; font-weight: 700; letter-spacing: .01em; }
+.bigcard .bs { display: block; font-size: 10.5px; color: var(--muted); margin-top: 2px; line-height: 1.45; }
+/* 右侧那颗小按钮：真正干活的入口，做小但显眼 */
+.bigcard .biggo {
+  flex: none; font: inherit; font-size: 12.5px; font-weight: 700; cursor: pointer;
+  padding: 7px 13px; border-radius: 9px; color: #fff; letter-spacing: .02em;
+  border: 1px solid transparent; box-shadow: 0 1px 3px rgba(27, 26, 24, .12);
+  transition: filter .12s, transform .06s;
+}
+.bigcard .biggo:hover { filter: brightness(1.06); }
+.bigcard .biggo:active { transform: translateY(1px); }
+.bigcard.ref { border-color: var(--accent-line, #c9d9f7); background: linear-gradient(180deg, #f7faff, #fff); }
+.bigcard.ref b { color: var(--accent); }
+.bigcard.ref .biggo { background: var(--accent); }
+.bigcard.sfx { border-color: var(--warn-line); background: linear-gradient(180deg, var(--warn-soft), #fff); }
+.bigcard.sfx b { color: var(--warn-ink); }
+.bigcard.sfx .biggo { background: #c07d10; }
+/* 勾上 = 正在预览这套方案：整张卡片点亮 */
+.bigcard.on { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent); }
+.bigcard.sfx.on { box-shadow: 0 0 0 2px color-mix(in srgb, #c07d10 32%, transparent); }
+.bigcard.needsel { animation: mpflash .5s ease-in-out 2; }
+@keyframes mpflash {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(210, 55, 46, 0); }
+  50% { box-shadow: 0 0 0 3px rgba(210, 55, 46, .35); }
+}
+.planrow { margin: 2px 0 6px; }
+.planrow .hint { font-size: 10.5px; }
+.matbighint { margin: 7px 0 2px; line-height: 1.55; }
+
+/* 「详细方案设置」折叠：默认收起，参数都在里面 */
+.matdetails { margin: 10px 0 0; border: 1px solid var(--border); border-radius: 11px; background: var(--surface-2); }
+.matdetails > summary {
+  cursor: pointer; padding: 9px 12px; font-size: 12.5px; font-weight: 600; color: var(--ink);
+  list-style: none; display: flex; align-items: center; gap: 7px;
+}
+.matdetails > summary::-webkit-details-marker { display: none; }
+.matdetails > summary::before {
+  content: "▸"; color: var(--faint); font-size: 11px; transition: transform .12s;
+}
+.matdetails[open] > summary::before { transform: rotate(90deg); }
+.matdetails > summary .hint { font-weight: 400; }
+.matdetails-body { padding: 4px 10px 10px; }
+
+/* ---------- BS-Roformer 模型说明（可选增强） ---------- */
+.ronote {
+  margin: 2px 0 9px; padding: 8px 11px; border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--warn) 34%, var(--border));
+  background: color-mix(in srgb, var(--warn) 8%, var(--surface));
+  font-size: 11.5px; line-height: 1.72; color: var(--ink);
+}
+.rotbl {
+  width: 100%; margin: 7px 0 5px; border-collapse: collapse;
+  font-size: 11px; line-height: 1.6;
+}
+.rotbl th, .rotbl td {
+  padding: 5px 8px; border-bottom: 1px solid var(--border); text-align: left;
+  vertical-align: top;
+}
+.rotbl th { color: var(--faint); font-weight: 600; font-size: 10.5px; }
+.rotbl td:first-child {
+  font-family: var(--mono); font-size: 10.5px; color: var(--ink);
+  word-break: break-all; width: 42%;
+}
+.rotbl td:nth-child(2) { white-space: nowrap; color: var(--muted); width: 62px; }
+.rotbl tr.rec td { background: color-mix(in srgb, var(--ok) 7%, transparent); }
+.rohelp { margin: 9px 0 2px; padding: 9px 11px; border-radius: 10px;
+  border: 1px dashed var(--border-2); background: var(--surface); }
+.rohelp-t { font-size: 12px; font-weight: 600; color: var(--ink); margin-bottom: 7px; }
+.rostep { margin: 0 0 10px; padding-left: 2px; }
+.rostep > b { display: block; font-size: 11.5px; color: var(--ink); margin-bottom: 3px; }
+.rostep .hint { display: block; line-height: 1.65; }
+.rostep .hint a { color: var(--accent); text-decoration: none; border-bottom: 1px dotted currentColor; }
+.rostep .hint a:hover { opacity: .8; }
+.rocmd {
+  margin: 6px 0; padding: 8px 10px; border-radius: 8px; overflow-x: auto;
+  background: var(--inset); border: 1px solid var(--border);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 11px; line-height: 1.7; color: var(--ink); white-space: pre;
+}
+#roDetails[data-ready="1"] > summary .hint { color: var(--ok, #2ea36b); }
+#roDetails[data-ready="0"] > summary .hint { color: var(--muted); }
+
+
+/* ---------- 播放台 ---------- */
+.matplayer {
+  margin: 14px 0 0; padding: 10px 12px 9px;
+  border: 1px solid var(--border-2); border-radius: 12px; background: var(--surface);
+}
+.mp-head { display: flex; align-items: baseline; gap: 8px; font-size: 12px; }
+.mp-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
+.mp-head .hint { font-size: 10.5px; }
+.mp-time { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.mp-track {
+  position: relative; height: 50px; margin: 8px 0 0; border-radius: 8px;
+  background: var(--inset); border: 1px solid var(--border); overflow: hidden;
+  cursor: crosshair; user-select: none;
+}
+.mp-grain {
+  position: absolute; inset: 0; opacity: .5; pointer-events: none;
+  background-image: repeating-linear-gradient(90deg, var(--border) 0 1px, transparent 1px 8px);
+}
+.mp-fill {
+  position: absolute; left: 0; top: 0; bottom: 0; width: 0;
+  background: var(--accent-soft, #eef4ff); pointer-events: none;
+}
+.mp-crop {
+  position: absolute; top: 0; bottom: 0; left: 0; right: 0; pointer-events: none;
+  border-left: 2px solid var(--ok); border-right: 2px solid var(--ok);
+  background: rgba(30, 158, 90, .16);
+  box-shadow: inset 0 0 0 1px rgba(30, 158, 90, .18);
+}
+.mp-crop.off { display: none; }
+/* 去首尾静音：两端画斜线阴影，表示「这段会被裁掉」 */
+.mp-cut {
+  position: absolute; top: 0; bottom: 0; width: 0; pointer-events: none; display: none;
+  background: repeating-linear-gradient(45deg, rgba(192, 125, 16, .30) 0 4px, rgba(192, 125, 16, .08) 4px 8px);
+}
+.mp-cut.on { display: block; }
+.mp-fade {
+  position: absolute; bottom: 0; height: 100%; width: 0; pointer-events: none; display: none;
+}
+.mp-fade.on { display: block; }
+.mp-fade-in { left: 0; background: linear-gradient(90deg, rgba(31, 95, 224, .28), transparent); }
+.mp-fade-out { right: 0; background: linear-gradient(270deg, rgba(31, 95, 224, .28), transparent); }
+.mp-headline {
+  position: absolute; top: -2px; bottom: -2px; width: 2px; left: 0;
+  background: var(--primary); box-shadow: 0 0 0 1px rgba(210, 55, 46, .15);
+  pointer-events: none;
+}
+.mp-grip {
+  position: absolute; top: 50%; width: 13px; height: 30px; margin-top: -13px; margin-left: -6px;
+  border: 1px solid var(--ok); background: #fff; border-radius: 4px; cursor: ew-resize;
+  padding: 0; display: none;
+}
+.mp-grip.on { display: block; }
+.mp-grip::after {
+  content: ""; position: absolute; left: 4px; top: 6px; width: 2px; height: 12px;
+  background: var(--ok); border-radius: 1px;
+}
+.mp-ruler { position: relative; height: 13px; margin-top: 1px; }
+.mp-ruler span {
+  position: absolute; top: 0; font-size: 9.5px; color: var(--faint);
+  transform: translateX(-50%); font-variant-numeric: tabular-nums;
+}
+.mp-ruler span::before {
+  content: ""; position: absolute; top: -3px; left: 50%; width: 1px; height: 3px; background: var(--border-2);
+}
+.mp-ctl { display: flex; align-items: center; gap: 6px; margin-top: 7px; flex-wrap: wrap; }
+.mp-ctl .btn.mini { padding: 3px 9px; }
+.mp-loop { font-size: 11px; }
+.mp-chips { display: flex; gap: 5px; flex-wrap: wrap; justify-content: flex-end; }
+.mp-chip {
+  font-size: 10.5px; line-height: 1.6; padding: 0 7px; border-radius: 999px;
+  border: 1px solid var(--border-2); background: var(--surface-2); color: var(--muted);
+  white-space: nowrap;
+}
+.mp-chip.k-sep { border-color: var(--tag-line); background: var(--tag-soft); color: var(--tag-ink-strong); }
+.mp-chip.k-cut { border-color: var(--ok-line); background: var(--ok-soft); color: #176b40; }
+.mp-chip.k-warn { border-color: var(--warn-line); background: var(--warn-soft); color: var(--warn-ink); }
+.mp-chip.k-off { border-style: dashed; color: var(--faint); }
+
+/* ================= 导入台：两个进阶入口（音效处理台 / 模型拓展） ================= */
+.bigentry-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 12px 0 0; }
+@media (max-width: 620px) { .bigentry-row { grid-template-columns: 1fr; } }
+
+.bigentry {
+  display: flex; align-items: center; gap: 9px; text-align: left;
+  padding: 10px 11px; border-radius: 11px; cursor: pointer;
+  font: inherit; color: var(--ink);
+  background: linear-gradient(180deg, #f7f9ff, #fff);
+  border: 1px solid var(--accent-line, #c9d9f7);
+  box-shadow: 0 1px 2px rgba(27,26,24,.05);
+  transition: border-color .12s, box-shadow .12s, transform .06s;
+}
+.bigentry:hover { border-color: var(--accent); box-shadow: 0 2px 8px rgba(45,90,180,.14); }
+.bigentry:active { transform: translateY(1px); }
+.bigentry .bi { font-size: 20px; line-height: 1; flex: none; }
+.bigentry .btxt { flex: 1; min-width: 0; }
+.bigentry b { display: block; font-size: 12.5px; font-weight: 700; color: var(--accent); }
+.bigentry i {
+  display: block; font-style: normal; font-size: 10.5px; color: var(--muted);
+  margin-top: 2px; line-height: 1.4;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.bigentry .caret { flex: none; color: var(--faint); font-size: 10px; transition: transform .15s; }
+.bigentry[aria-expanded="true"] .caret { transform: rotate(180deg); }
+
+/* 右边那颗是「次入口」：不抢左边的注意力，但也要看得见 */
+/* 右边这颗是「次入口」。展开态要用 accent（蓝）——这个主题的 --primary 是红色，
+   拿它做展开态会看着像报错。 */
+.bigentry.ghost { background: var(--surface-2); border-color: var(--border-2); }
+.bigentry.ghost b { color: var(--ink); }
+.bigentry.ghost:hover { border-color: var(--accent); }
+.bigentry.ghost[aria-expanded="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.bigentry.ghost[aria-expanded="true"] b { color: var(--accent); }
+
+/* 模型拓展面板（原 details，现在由按钮控制展开） */
+.ropanel {
+  margin: 8px 0 0; border: 1px solid var(--border); border-radius: 11px;
+  background: var(--surface-2); overflow: hidden;
+}
+.ropanel-h {
+  display: flex; align-items: center; gap: 7px; padding: 8px 10px 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.ropanel-h b { font-size: 12.5px; }
+.ropanel-h .hint { font-size: 10.5px; }
+.ropanel-h .iconbtn { width: 22px; height: 22px; }
+
+/* 顶部状态条里的「加载」按钮：比 ⟳/ ? 宽一点，字要能站住 */
+.tsbtn.tsload {
+  width: auto; min-width: 34px; padding: 0 6px; height: 18px;
+  font-size: 10px; letter-spacing: .02em;
+}
+.tsbtn.tsload:disabled { opacity: .55; cursor: default; }
+.tsbtn.tsload:disabled:hover { border-color: var(--border-2); color: var(--muted); }
+
+/* ---------- 三个素材库的文件夹 ---------- */
+.libfolders:empty { display: none; }
+.libfolders { margin: 2px 0 4px; }
+.libmore { padding: 8px 4px; display: flex; justify-content: center; }
+.storetools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 2px 0 8px; }
+
+/* ---------- 音色标签 / 人物识别 ---------- */
+.tagbar { display: flex; gap: 4px; flex-wrap: wrap; margin: 2px 0 5px; }
+.tagbar[hidden] { display: none !important; }
+.tagchip {
+  font-size: 10px; line-height: 1; padding: 4px 7px; border-radius: 6px;
+  border: 1px solid var(--border-2); background: var(--surface); color: var(--muted);
+  cursor: pointer; max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tagchip:hover { border-color: var(--tag-line); color: var(--tag-ink-strong); }
+.tagchip.on {
+  background: var(--tag-soft2); border-color: var(--tag-line);
+  color: var(--tag-ink-strong); font-weight: 600;
+}
+
+/* 音色上的标签小片 */
+.refTags { display: inline-flex; gap: 3px; flex-wrap: wrap; align-items: center; min-width: 0; }
+.refTags.tile { margin-top: 3px; }
+.rtag {
+  font-size: 9.5px; line-height: 1; padding: 2px 5px; border-radius: 4px;
+  background: var(--tag-soft); border: 1px solid var(--tag-line); color: var(--tag-ink-strong);
+  cursor: pointer; max-width: 66px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rtag:hover { background: var(--tag-soft2); }
+.rtag.more {
+  cursor: default; color: var(--faint);
+  border-color: var(--border); background: var(--surface-2);
+}
+.tagbtn { font-size: 10px; opacity: .5; }
+.refitem:hover .tagbtn, .tagbtn:focus { opacity: 1; }
+
+/* 编辑标签弹窗 */
+.tagdlg { display: flex; flex-direction: column; gap: 7px; }
+.tagdlg .inp { height: 30px; }
+.tagpick { display: flex; gap: 4px; flex-wrap: wrap; max-height: 90px; overflow-y: auto; }
+
+/* 智能识别人物：结果列表 */
+.avsum { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; margin-bottom: 7px; font-size: 12px; }
+.avlist {
+  display: flex; flex-direction: column; gap: 3px;
+  max-height: 210px; overflow-y: auto; margin-bottom: 8px;
+}
+.avrow { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 6px; font-size: 11.5px; }
+.avrow:nth-child(odd) { background: var(--surface-2); }
+.avname {
+  flex: none; max-width: 150px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-weight: 600;
+}
+.avarw { flex: none; color: var(--faint); }
+.avref {
+  flex: none; max-width: 150px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--accent);
+}
+.mk.fuzzy {
+  font-size: 9.5px; padding: 1px 5px; border-radius: 5px;
+  border: 1px solid var(--warn-line); background: var(--warn-soft); color: var(--warn-ink);
+}
+
+/* 智能导入预览里的「这个角色 → 这个音色」小标 */
+.gtagref {
+  font-size: 9.5px; padding: 2px 6px; border-radius: 5px; margin-left: 6px;
+  background: var(--tag-soft); border: 1px solid var(--tag-line);
+  color: var(--tag-ink-strong); white-space: nowrap;
+  max-width: 130px; overflow: hidden; text-overflow: ellipsis;
+}
+.gtagref.fuzzy { background: var(--warn-soft); border-color: var(--warn-line); color: var(--warn-ink); }
+.tagbar-lead { font-size: 10px; line-height: 1; opacity: .55; align-self: center; padding-right: 1px; }
+
+/* ---------- 人物标签库（设置面板 · 跨台本） ---------- */
+.charlist {
+  display: flex; flex-direction: column; gap: 3px;
+  max-height: 260px; overflow-y: auto; margin-top: 4px;
+  border: 1px solid var(--border); border-radius: 8px; padding: 3px;
+  background: var(--inset);
+}
+.charlist:empty { display: none; }
+.charrow {
+  display: flex; align-items: center; gap: 6px; padding: 4px 6px;
+  border-radius: 6px; font-size: 11.5px;
+}
+.charrow:hover { background: var(--surface); }
+.charname {
+  flex: none; max-width: 118px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-weight: 600; cursor: pointer;
+}
+.charname:hover { color: var(--accent); text-decoration: underline; }
+.charalias {
+  flex: none; max-width: 108px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-size: 10px; color: var(--faint);
+}
+.chartraits {
+  display: inline-flex; gap: 3px; flex-wrap: nowrap;
+  overflow: hidden; min-width: 0;
+}
+.charref {
+  flex: none; height: 24px; max-width: 138px;
+  font-size: 10.5px; padding: 0 4px;
+}
+.charuse { flex: none; font-size: 10px; color: var(--faint); font-family: var(--mono); }
+.charuse.warn { color: var(--warn-ink); }
+.charpick { display: flex; flex-direction: column; gap: 2px; max-height: 320px; overflow-y: auto; }
+.charpickrow {
+  display: flex; align-items: center; gap: 7px; padding: 4px 6px;
+  border-radius: 6px; font-size: 11.5px;
+}
+.charpickrow:hover { background: var(--surface-2); }
+
+/* 识别结果里的来源标记：人物 / 标签 */
+.mk {
+  font-size: 9.5px; padding: 1px 5px; border-radius: 5px;
+  border: 1px solid var(--border-2); color: var(--muted); white-space: nowrap;
+}
+.mk.char {
+  color: var(--tag-ink-strong); border-color: var(--tag-line); background: var(--tag-soft);
+}
+.gtagref.novoice { background: var(--warn-soft); border-color: var(--warn-line); color: var(--warn-ink); }
+
+/* 导入预览里的角色卡（来自剧本头部【人物】） */
+.impchars { display: flex; flex-wrap: wrap; gap: 5px; margin: 5px 0 3px; }
+.charchip {
+  font-size: 10.5px; line-height: 1.5; padding: 2px 7px; border-radius: 5px;
+  background: var(--tag-soft); border: 1px solid var(--tag-line); color: var(--tag-ink-strong);
+}
+
+/* 属性面板顶部的「当前生效音色 + 来源」 */
+.effbar {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 6px 8px; margin-bottom: 7px; border-radius: 7px;
+  background: var(--accent-soft); border: 1px solid var(--accent-line);
+  font-size: 11.5px; line-height: 1.5;
+}
+.imphintline.warn { color: var(--warn-ink); }
+
+/* ---------- 标签库管理（属性标签 / 音效标签） ---------- */
+.tagliblist {
+  display: flex; flex-wrap: wrap; gap: 5px;
+  max-height: 260px; overflow-y: auto;
+  padding: 6px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--inset);
+}
+.tagliblist .tagchip {
+  display: inline-flex; align-items: center; gap: 4px;
+  max-width: 160px; padding-right: 3px;
+}
+.tagliblist .tagchip.builtin { border-style: dashed; opacity: .92; }
+.tagdel {
+  border: 0; background: transparent; color: var(--faint);
+  font-size: 11px; line-height: 1; cursor: pointer; padding: 0 2px;
+}
+.tagdel:hover { color: var(--danger); }
+
+/* ---------- 智能识别人物：结果弹窗（以前下拉被挤成一条，看全不了） ---------- */
+#modal .modal-box.report { width: 760px; max-width: 96vw; }
+#modal .modal-box.report #modalBody { max-height: 62vh; overflow-y: auto; }
+.modal-box.report .avrow {
+  flex-wrap: wrap; row-gap: 5px; padding: 6px 7px;
+}
+/* 下拉里是音色名（「嘉然-正常音1-气声派生」这种长名）：给足宽度，
+   放不下就整块换行 —— 绝不再把名字截一半 */
+.modal-box.report .avrow select {
+  flex: 1 1 240px; min-width: 210px; max-width: 380px; height: 26px;
+  text-overflow: ellipsis;
+}
+.modal-box.report .avrow .avname { max-width: 40%; }
+.modal-box.report .avref { max-width: 38%; }
+.modal-box.report .avlist { max-height: 300px; }
+
+/* ---------- 高级音频处理台入口：主入口用浅绿（原来大红色太抢眼），模型拓展缩成次入口 ---------- */
+.bigentry-row { grid-template-columns: 2.3fr 1fr; align-items: start; }
+.bigentry {
+  padding: 14px 16px; border-radius: 13px;
+  background: linear-gradient(180deg, var(--green-soft), var(--green-soft2));
+  border: 1px solid var(--green-line); color: var(--green-ink);
+  box-shadow: 0 2px 8px rgba(43, 158, 96, .10);
+}
+.bigentry:hover {
+  border-color: var(--green-deep);
+  box-shadow: 0 4px 14px rgba(43, 158, 96, .18);
+}
+.bigentry b { color: var(--green-ink); font-size: 14px; letter-spacing: .2px; }
+.bigentry i { color: var(--muted); font-size: 11px; }
+.bigentry .bi { font-size: 26px; }
+.bigentry.ghost {
+  padding: 8px 10px; border-radius: 9px;
+  background: var(--surface-2); border-color: var(--border-2); color: var(--ink);
+  box-shadow: none;
+}
+.bigentry.ghost:hover { border-color: var(--border-2); box-shadow: 0 1px 4px rgba(27,26,24,.06); }
+.bigentry.ghost b { color: var(--ink); font-size: 11.5px; }
+.bigentry.ghost i { color: var(--faint); font-size: 9.5px; }
+.bigentry.ghost .bi { font-size: 15px; }
+.bigentry.ghost .caret { font-size: 9px; }
+
+/* 顶栏那颗「高级音频处理台」：浅绿，和普通素材库按钮分开 */
+.btn.green {
+  background: var(--green-soft); border-color: var(--green-line); color: var(--green-ink);
+  font-weight: 600;
+}
+.btn.green:hover { border-color: var(--green-deep); background: var(--green-soft2); }
+html[data-theme="dark"] .btn.green:hover { background: var(--green-soft2); }
+
+/* 「识别说话人 · 分组 · 分音色」：和「高级识别」并排的第二颗（浅绿 = 一次做完） */
+.spkbtn {
+  display: inline-flex; align-items: center; gap: 8px;
+  border: 1px solid var(--green-line); color: var(--green-ink);
+  background: var(--green-soft);
+}
+.spkbtn:hover { background: var(--green-soft2); border-color: var(--green-deep); }
+.spkbtn.big {
+  font-size: 13px; padding: 8px 16px; font-weight: 600;
+  flex-direction: column; align-items: flex-start; gap: 1px;
+}
+.spkbtn .advsub { font-size: 10.5px; font-weight: 400; opacity: .85; }
+
+/* ================= 音色库 / 音效库：多选 =================
+   和导入台的多选长得一致：行首勾选框 + 选中底色 + 上方批量条。
+   两个库共用一套（后端 /refs/bulk、/sfx/bulk）。 */
+.libselbar {
+  display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
+  padding: 6px 8px; margin: 0 0 6px;
+  border: 1px solid var(--accent-line); border-radius: 8px;
+  background: var(--accent-soft);
+}
+.libselbar b { font-size: 11.5px; color: var(--accent); white-space: nowrap; }
+.libselbar .btn { padding: 2px 7px; font-size: 10.5px; }
+/* 注意：.btn.danger 的默认是「红底白字」，这里要的是「白底红字」的小按钮，
+   不覆盖 background 会变成红底红字（字看不见）。 */
+.libselbar .btn.danger {
+  color: var(--danger); border-color: var(--danger-line); background: var(--surface);
+}
+.libselbar .btn.danger:hover { background: var(--danger-soft); }
+.libselbar .spacer { flex: 1; }
+
+/* 行首勾选框：不抢点击（行本身还有改名 / 试听），只有框自己可点 */
+.libchk {
+  flex: none; width: 13px; height: 13px; margin: 0 1px 0 0;
+  accent-color: var(--accent); cursor: pointer;
+}
+/* 选中的行 / 卡片：淡蓝底 + 左边条，和「默认音色」的红色左边条区分 */
+.refitem.lsel, .matitem.lsel, .reftile.lsel, .mattile.lsel {
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+html[data-theme="dark"] .refitem.lsel,
+html[data-theme="dark"] .matitem.lsel,
+html[data-theme="dark"] .reftile.lsel,
+html[data-theme="dark"] .mattile.lsel { background: rgba(106, 157, 255, .16); }

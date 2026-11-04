@@ -13,69 +13,15 @@
 
 <sub>当前版本 v0.33 · 2026-11-04 · Windows 便携整合包 · MIT（仅本项目代码）· 简体中文界面</sub>
 
-## v0.33 这一版在解决什么
+## v0.33 这一版的改动
 
-**方向：把「AI 配音」做成「可以直接交付的音声作品」。**
+本次版本围绕长篇 AI 配音交付流程新增多项实用能力，进一步完善从台本编排到音频成品输出的全链路能力：
 
-前面几版已经把手上的活串成了一条线（整理台本 → 批量生成 → 多轨时间轴 → 空间音频 → 混音导出）。
-这一版补的不是新花样，而是这条线最容易翻车的两段：**配音改完之后编排还在不在**，
-以及**一次处理几百上千条时会不会悄悄出错**。
-
-### 一、换了音色，音效还该站在原来那句旁边
-
-最真实的场景不是「从零做一条音声」，而是**原片已经剪好、音效也对好了位置，现在只想换个人声重录**。
-难点在于换音色必然改变时长 —— 实测一条 71 秒的片段重录后变成 81 秒，
-单句最长变成 2.94 倍、最短只剩 0.45 倍。如果音效按秒数硬搬，第 44 秒的关门声就会跑到别的句子上。
-
-现在的做法是**按字幕序号对位，不按秒数**：
-
-1. 先判断这个音效落在**第几条字幕**里（用你载入的那份 srt 判）；
-2. 再找工程里**同一条字幕**对应的那句；
-3. 按句内相对位置放回去（句内 70% 的位置，放回去还是 70%）。
-
-句子长了短了都不影响，因为参照物是「哪一句」而不是「第几秒」。实测 26 段测试音效
-（每句 30% / 70% 各一个）**26/26 全部落在对应句内，句内相对位置一分不差**。
-
-### 二、批量操作不能靠运气
-
-一次存几百段、导上千行，序号和速度都会暴露问题：第 100 个文件叫 `_100`，按名字排序
-反而插到 `_10` 后面，外部软件按文件名合并就断在第 100 个；每存一段都重写整份索引，
-100 段要两分钟。现在编号位数跟着这一批的总数走（120 段 → `_001…_120`），
-索引整批只读写一次（1005 段 4.9 秒）。
-
-### 三、出错要能当场看见
-
-对位最怕的不是报错，而是「看起来成功了，其实整体偏了两句」。所以现在会：
-
-- **自己判断**你手上的素材是哪一版（原片还是重录后的），判断结果写在预览顶部，不用你选；
-- 字幕和素材**不是同一版**时直接提示（「这份字幕到 1:19，当前素材 1:12，两者不是同一版」）；
-- 每段预览都写清「第几句 / 句内 +几秒 / 目标时间」，写入和预览走同一段代码，不会嘴上说一套。
-
-### 四、人声分离：不是一个 BS 模型，而是一套可插拔的后端
-
-这一版接的是 [**pymss**](https://github.com/ZFTurbo/Music-Source-Separation-Training)
-（Music-Source-Separation-Training，MIT）推理后端 + 一个模型目录 `vendor2/roformer/`。
-放进什么模型就跑什么，代码不绑定某一个权重：
-
-| 能跑的架构 | 说明 |
-|---|---|
-| **BS-Roformer**（`bs_roformer`） | 主力。Band-Split + RoPE 注意力，人声分离目前的第一梯队 |
-| **Mel-Band Roformer** | 梅尔刻度分带，人声隔离更细，模型更大更慢 |
-| **BS-PolarFormer / BS-Conformer** | 同家族变体，权重出了就能直接用 |
-| MDX23C / SCNet / HTDemucs / VR | 老模型也能挂进来，用来对照或救急 |
-
-随包只带 **Demucs**（80MB，开箱可用）；BS 系权重自备（275MB 起），放进目录后
-在导入台「BS-Roformer 模型」里点一下重新检测即可。处理链是
-**BS-Roformer → Demucs → 中置提取**，选的那个挂了会自动往下退，不会卡住整个流程。
-
-相关链接：
-
-- 论文：[Music Source Separation with Band-Split RoPE Transformer](https://arxiv.org/abs/2309.02612)（ByteDance，2023）
-- 架构实现：[lucidrains/BS-RoFormer](https://github.com/lucidrains/BS-RoFormer)（MIT，只有网络定义，不含权重）
-- 训练框架 + 权重发布：[ZFTurbo/Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training)
-- 权重清单：[docs/pretrained_models.md](https://github.com/ZFTurbo/Music-Source-Separation-Training/blob/main/docs/pretrained_models.md)
-- 国内镜像 / 常用权重：[ModelScope · baicai1145/pymss](https://www.modelscope.cn/models/baicai1145/pymss) · [HuggingFace · baicai1145/pymss](https://huggingface.co/baicai1145/pymss)
-- 社区权重合集（safetensors，需自行转 ckpt）：[AEmotionStudio/roformer-models](https://huggingface.co/AEmotionStudio/roformer-models)
+1. 扩充人声分离模型支持，新增 BS-Roformer 等多款主流声源分离模型，采用可插拔后端设计，可自由切换模型，链路支持自动降级，适配不同音质分离需求。
+2. 新增高级音频处理工作台：支持长音频分段批量导出；提供音频去人声、按音量自动切片能力；支持 SRT 字幕工程，自动将音效绑定对应台词实现智能对齐，更换人声后音效依旧保持在句子内相对位置不变。
+3. 素材库、音色库、音效库新增文件夹管理功能，方便分类收纳、批量管理资源。
+4. 新增台本人名自动识别与音色标签管理能力，可在设置面板预设音色标签，导入台本时自动识别角色名称、匹配分配对应音色。
+5. 同步修复已知问题，提升批量导出、时间轴计算等场景下的稳定性。
 
 > 逐条改动明细见 [CHANGELOG.md](CHANGELOG.md)（v0.23 ～ v0.32 合并为本版发布）。
 

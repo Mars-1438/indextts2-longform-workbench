@@ -13,7 +13,7 @@
 })();
 </script>
 <link rel="icon" href="/assets/favicon.svg">
-<link rel="stylesheet" href="/longform-assets/longform.css?v=20261104n">
+<link rel="stylesheet" href="/longform-assets/longform.css?v=20261105a">
 </head>
 <body>
 
@@ -810,9 +810,11 @@
               <select id="opVocalMode" class="sel grow">
                 <option value="vocals">只要人声</option>
                 <option value="instrumental">只要伴奏</option>
+                <option value="effects" disabled>只要音效（DnR）</option>
               </select>
               <select id="opVocalEngine" class="sel" title="分离算法（默认 Demucs：分离更干净，但慢一些）">
                 <option value="roformer" disabled>BS-Roformer（无模型）</option>
+                <option value="dnr" disabled>DnR（无模型）</option>
                 <option value="demucs" selected>Demucs 高精度</option>
                 <option value="dsp">中置提取（快）</option>
               </select>
@@ -1127,6 +1129,22 @@
           </div>
           <div class="matdetails-body">
             <div class="ronote">
+              <b>这里的每一项都是可选项，</b>放了模型才会出现在引擎下拉里，不放不影响任何现有功能。
+              每一项对应一类活儿：<b>BS-Roformer</b> 管「人声 / 伴奏」二分离，
+              <b>DnR</b> 管「对白 / 音乐 / 音效」三分。都走同一个推理后端 pymss，
+              装一次就够（见下面第一项的第 1 步）。
+              <br>以后要接别的模型，也是在这里加一个折叠项 —— 面板结构不用再改。
+            </div>
+
+            <details class="mfold" id="mfRo" open>
+            <summary>
+              <span class="mf-i">🎙</span>
+              <b>BS-Roformer</b>
+              <span class="hint mf-sub">人声 / 伴奏 二分离</span>
+              <span class="mf-st" id="roStTag">检测中…</span>
+            </summary>
+            <div class="mf-body">
+            <div class="ronote">
               <b>什么时候才需要它：</b>Demucs 已经够用就别管这一块。只有当你觉得
               「Demucs 分出来的伴奏里还留着一层人声、有电音感」时，才值得上 BS-Roformer。
               模型 275MB（Demucs 才 80MB），首次加载要十几秒；<b>不是默认必装项</b>。
@@ -1229,6 +1247,99 @@ runtime\python.exe -m pip install pymss</pre>
                 建议拿自己的素材两种各跑一遍再决定；不够用就继续用 Demucs，不影响任何功能。
               </div>
             </div>
+            </div>
+            </details>
+
+            <details class="mfold" id="mfDnr">
+            <summary>
+              <span class="mf-i">🎬</span>
+              <b>DnR</b>
+              <span class="hint mf-sub">对白 / 音乐 / 音效 三分</span>
+              <span class="mf-st" id="dnrStTag">检测中…</span>
+            </summary>
+            <div class="mf-body">
+            <div class="ronote">
+              <b>它跟 BS-Roformer 不是一类东西。</b>BS 是「人声 / 伴奏」二分，
+              DnR（Divide-and-Remaster）是从电影混音里学的「<b>对白 / 音乐 / 音效</b>」三分 ——
+              <b>目前只有它把「音效」单独列一轨</b>。<br>
+              本机实测（素材：118 秒舔耳 / 133 秒喘息，各切 8 秒短段逐段跑）：
+              <br>· <b>舔耳 → Effects</b>：12 段里 <b>10 段</b>由 Effects 轨主导，平均 −1.0 dB、标准差 1.5 dB；
+              <br>· <b>喘息 → Speech</b>：12 段里 11 段归人声，Effects 稳在 −15～−25 dB。
+              <br>也就是说：<b>它能把「舔耳、摩擦、环境声」这类纯音效抠出来，但抠不出喘息</b>
+              （喘息有声带振动，在模型看来就是人声）。
+            </div>
+
+            <div class="ffbar" id="dnrBar">
+              <div class="ffline">
+                <span class="ffdot" id="dnrDot"></span>
+                <span class="hint grow" id="dnrState">正在检测模型目录…</span>
+              </div>
+              <div class="ffbtns">
+                <button class="btn mini ghost" id="btnDnrOpen" type="button"
+                        title="在资源管理器里打开模型目录（不存在会自动建）">📂 打开模型目录</button>
+                <button class="btn mini ghost" id="btnDnrScan" type="button"
+                        title="重新扫一遍目录（放完模型不用重启）">⟳ 重新检测</button>
+                <button class="btn mini ghost" id="btnDnrTest" type="button"
+                        title="用 3 秒合成音实跑一遍，确认「模型 + 后端」能跑通（不评判音质）">▶ 试跑一次</button>
+              </div>
+            </div>
+            <div class="hint mono" id="dnrDir" style="margin-top:6px;word-break:break-all"></div>
+            <div class="hint" id="dnrWhy" style="margin-top:4px"></div>
+
+            <div class="rohelp">
+              <div class="rohelp-t">它适合干什么、不适合干什么</div>
+              <table class="rotbl">
+                <thead><tr><th>场景</th><th>能不能用 DnR</th></tr></thead>
+                <tbody>
+                  <tr class="rec"><td>从混音里单独抠「纯音效」（舔耳 / 摩擦 / 环境声）</td><td><b>能</b>，Effects 轨</td></tr>
+                  <tr><td>去掉台词、保留喘息</td><td>不能 —— 两者都在 Speech 轨</td></tr>
+                  <tr><td>判断某句里有没有夹着喘息</td><td>不能 —— Speech 里分不出来</td></tr>
+                  <tr><td>日常配音流程默认开着</td><td>不建议 —— 比 BS 慢约 6 倍，且对喘息无收益</td></tr>
+                </tbody>
+              </table>
+              <div class="hint">
+                所以它在导入台里的定位是「<b>只要音效</b>」这一档：勾了「提取人声」再把方式选成
+                「只要音效（DnR）」，出来的就是 Effects 轨。其他档位仍然推荐 Demucs / BS-Roformer。
+              </div>
+
+              <div class="rostep">
+                <b>1　推理后端</b>
+                <div class="hint">和上面 BS-Roformer 共用同一个 <b>pymss</b>。上面装过就不用再装。</div>
+                <pre class="rocmd" id="dnrCmd">runtime\python.exe -m ensurepip --default-pip
+runtime\python.exe -m pip install pymss</pre>
+                <div class="ffbtns">
+                  <button class="btn mini ghost" type="button" data-copy="dnrCmd">复制命令</button>
+                </div>
+              </div>
+
+              <div class="rostep">
+                <b>2　下模型（一条命令）</b>
+                <div class="hint">
+                  模型 149MB。它属于「对白 / 音乐 / 音效」这一类，会下到模型目录的
+                  <code>music_stems\dnr_stems\</code> 下面：
+                </div>
+                <pre class="rocmd" id="dnrCmdDown">runtime\python.exe -m pymss.cli download model_bandit_plus_dnr_sdr_11.47.ckpt --model-dir vendor2\dnr --source modelscope</pre>
+                <div class="ffbtns">
+                  <button class="btn mini ghost" type="button" data-copy="dnrCmdDown">复制下载命令</button>
+                  <span class="hint" id="dnrDlHint"></span>
+                </div>
+                <div class="hint">
+                  手动下也行：去
+                  <a href="https://www.modelscope.cn/models/baicai1145/pymss" target="_blank" rel="noopener">ModelScope</a>
+                  或
+                  <a href="https://huggingface.co/baicai1145/pymss" target="_blank" rel="noopener">HuggingFace</a>
+                  找 <code>music_stems/dnr_stems/</code>，把同名 .ckpt 和 .yaml 一起丢进模型目录。
+                  文件名别改、yaml 必须和 ckpt 同名。
+                </div>
+              </div>
+
+              <div class="hint">
+                放好之后点「⟳ 重新检测」，「提取人声」卡的引擎下拉会多出 <b>DnR</b>，
+                分离方式会多出 <b>只要音效</b>。没放模型时这两项都是灰的，不影响现有流程。
+              </div>
+            </div>
+            </div>
+            </details>
           </div>
         </div>
 
@@ -1267,6 +1378,6 @@ runtime\python.exe -m pip install pymss</pre>
 <script src="/longform-assets/libfolders.js?v=20261104c"></script>
 <script src="/longform-assets/emoctl.js?v=20261102b"></script>
 <script src="/longform-assets/genparams.js?v=20261102b"></script>
-<script src="/longform-assets/longform.js?v=20261104n"></script>
+<script src="/longform-assets/longform.js?v=20261105a"></script>
 </body>
 </html>

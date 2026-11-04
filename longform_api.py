@@ -1395,13 +1395,22 @@ def _apply_ops(data, sr, ops):
             labels.append("裁剪")
 
     sp = ops.get("separate") or None
-    if sp and sp.get("mode") in ("vocals", "instrumental"):
-        # 引擎按优先级排队：用户选的那个先试，挂了就降级（BS-Roformer → Demucs → 中置提取），
+    if sp and sp.get("mode") in ("vocals", "instrumental", "effects"):
+        # 引擎按优先级排队：用户选的那个先试，挂了就降级（BS-Roformer / DnR → Demucs → 中置提取），
         # 绝不让一条素材因为「模型没配好」整条处理失败。
+        #
+        # 「只要音效」是例外：只有 DnR 有 Effects 轨，降级到 Demucs/中置提取没有意义
+        # （它们只有「人声/伴奏」），所以这一档不排队，直接报错让人去装模型。
         engine = (sp.get("engine") or "demucs").lower()
-        chain = {"roformer": ["roformer", "demucs", "dsp"],
-                 "demucs": ["demucs", "dsp"],
-                 "dsp": ["dsp"]}.get(engine) or ["demucs", "dsp"]
+        if sp.get("mode") == "effects":
+            if engine not in ("dnr", ""):
+                engine = "dnr"
+            chain = ["dnr"]
+        else:
+            chain = {"dnr": ["dnr", "demucs", "dsp"],
+                     "roformer": ["roformer", "demucs", "dsp"],
+                     "demucs": ["demucs", "dsp"],
+                     "dsp": ["dsp"]}.get(engine) or ["demucs", "dsp"]
         q = str(sp.get("quality") or "std").lower()
         rs = float(sp.get("residual") or 0.0)
         t0 = time.time()
@@ -1411,6 +1420,11 @@ def _apply_ops(data, sr, ops):
                 if eng == "roformer":
                     data2 = _roformer_separate(data, sr, sp["mode"], sp.get("rmodel"), rs)
                     mark = "BS-Roformer"
+                elif eng == "dnr":
+                    dnr_mode = {"vocals": "speech", "instrumental": "instrumental",
+                                "effects": "effects"}.get(sp["mode"], "effects")
+                    data2 = _dnr_separate(data, sr, dnr_mode, sp.get("dmodel"))
+                    mark = "DnR"
                 elif eng == "demucs":
                     data2 = _demucs_separate(data, sr, sp["mode"], q, rs)
                     mark = "Demucs"
@@ -1423,7 +1437,8 @@ def _apply_ops(data, sr, ops):
                 continue
             data = data2
             done = True
-            labels.append("人声" if sp["mode"] == "vocals" else "伴奏")
+            labels.append({"vocals": "人声", "instrumental": "伴奏",
+                           "effects": "音效"}.get(sp["mode"], "分离"))
             labels.append(mark if eng == chain[0] else f"{mark}（替代）")
             if eng == "demucs" and q != "std":
                 labels.append("精细分离" if q == "fine" else "快速分离")
@@ -1433,6 +1448,9 @@ def _apply_ops(data, sr, ops):
                  sp["mode"], eng, time.time() - t0, len(data) / float(sr))
             break
         if not done:
+            if sp.get("mode") == "effects":
+                raise HTTPException(400, "「只要音效」只有 DnR 能做：请先在「模型拓展 → DnR」"
+                                         "里放好模型（没有 Effects 轨的引擎降级过去也没意义）")
             raise HTTPException(400, "人声分离失败：BS-Roformer / Demucs / 中置提取都不可用")
 
     dn = ops.get("denoise")
@@ -2141,6 +2159,244 @@ def _roformer_status(force=False):
                       "reason": py.get("reason") or ""},
             "ready": ready, "reason": why,
             "pick": (models[0]["name"] if models else "")}
+
+
+# ---------------- DnR（Divide-and-Remaster）：对白 / 音乐 / 音效 三分 ----------------
+# 和 BS-Roformer 不是一类东西：BS 是「人声 / 伴奏」二分离，DnR 是电影混音三分，
+# **只有它把「音效」单独列一轨**。实测舔耳这类纯音效稳定进 Effects（12 段里 10 段），
+# 喘息这类有声带振动的人声稳定进 Speech —— 所以它解决的是「抠纯音效」，不是「把喘息和台词分开」。
+_DNR = {"models": [], "dir": "", "scanned": 0.0, "sep": None, "key": "",
+        "lock": threading.RLock()}
+
+
+def _dnr_dir():
+    """模型放哪：默认 <整合包>/vendor2/dnr/，可用 LF_DNR_DIR 覆盖。
+
+    单独一个目录而不是塞进 roformer：两边用途完全不同（人声二分离 vs 三分），
+    混放会让「默认选中哪个模型」靠猜（上一轮已经在 roformer 上踩过这个坑）。
+    """
+    d = (os.environ.get("LF_DNR_DIR") or "").strip()
+    if d:
+        return os.path.abspath(os.path.expanduser(d))
+    root = _D.get("project_dir") or os.getcwd()
+    return os.path.join(root, "vendor2", "dnr")
+
+
+def _dnr_scan(force=False):
+    """扫模型目录：两层，找 ckpt + 同名 yaml。"""
+    now = time.time()
+    if not force and _DNR["models"] and (now - _DNR["scanned"] < 8):
+        return _DNR["models"]
+    root = _dnr_dir()
+    _DNR["dir"] = root
+    out = []
+    if os.path.isdir(root):
+        for dirpath, dirnames, filenames in os.walk(root):
+            depth = dirpath[len(root):].count(os.sep)
+            if depth >= 2:
+                dirnames[:] = []
+                continue
+            low = {f.lower(): f for f in filenames}
+            for f in filenames:
+                if not f.lower().endswith(_ROF_W_EXT):
+                    continue
+                stem = os.path.splitext(f)[0]
+                cfg = ""
+                for c in _ROF_C_EXT:
+                    if (stem + c) in low:
+                        cfg = os.path.join(dirpath, low[stem + c])
+                        break
+                p = os.path.join(dirpath, f)
+                try:
+                    size = os.path.getsize(p)
+                except OSError:
+                    continue
+                if size < 5 * 1024 * 1024:      # 半截文件不算
+                    continue
+                out.append({"name": f, "stem": stem, "path": p, "config": cfg,
+                            "size": int(size),
+                            "type": (f.split("_")[1] if f.startswith("model_") and "_" in f
+                                     else ""),
+                            "ready": bool(cfg)})
+    out.sort(key=lambda x: -x["size"])
+    _DNR["models"], _DNR["scanned"] = out, now
+    return out
+
+
+def _dnr_status(force=False):
+    models = _dnr_scan(force=force)
+    py = _pymss_state()
+    root = _DNR["dir"]
+    ready = bool(models) and bool(py.get("ok")) and any(m["ready"] for m in models)
+    if not models:
+        why = ("模型目录里还没有模型文件" if os.path.isdir(root) else "还没有建模型目录")
+    elif not any(m["ready"] for m in models):
+        why = "有模型文件，但缺少同名 .yaml（缺配置认不出架构）"
+    elif not py.get("ok"):
+        why = "检测到模型，但缺少推理后端 pymss"
+    else:
+        why = ""
+    try:
+        rel = os.path.relpath(root, _D.get("project_dir") or os.getcwd())
+        if rel.startswith(".."):
+            rel = ""
+    except ValueError:
+        rel = ""
+    return {"ok": True, "dir": root, "rel": rel, "exists": os.path.isdir(root),
+            "models": models,
+            "pymss": {"ok": bool(py.get("ok")), "version": py.get("version") or "",
+                      "reason": py.get("reason") or ""},
+            "ready": ready, "reason": why,
+            "pick": next((m["name"] for m in models if m["ready"]), "")}
+
+
+_DNR_TYPE_WORDS = (
+    ("bandit_v2", ("bandit2", "bandit_v2")),
+    ("bandit", ("bandit",)),
+    ("bs_roformer", ("bs_roformer", "roformer")),
+    ("mel_band_roformer", ("mel_band", "melband")),
+    ("scnet", ("scnet",)),
+    ("mdx23c", ("mdx23",)),
+    ("htdemucs", ("htdemucs", "demucs")),
+)
+
+
+def _dnr_mtype(m):
+    """猜架构名：先看 yaml 里声明的，再按文件名，最后退回 bandit。
+
+    pymss 的 detect_model_type 对这个 yaml 会失败（根节点不是 mapping），
+    所以这里自己读一行，白名单校验后再交给 pymss。
+    """
+    cfg = m.get("config") or ""
+    if cfg:
+        try:
+            with open(cfg, "r", encoding="utf-8", errors="ignore") as f:
+                head = f.read(8192)
+            for key in ("model_type", "architecture", "model"):
+                mt = re.search(r"^[ \t]*%s[ \t]*:[ \t]*[\"']?([A-Za-z0-9_\-]+)" % key, head, re.M)
+                if mt and mt.group(1).lower() in _ROF_ARCHS:
+                    return mt.group(1).lower()
+        except OSError:
+            pass
+    n = (m.get("name") or "").lower()
+    for typ, words in _DNR_TYPE_WORDS:
+        if any(w in n for w in words):
+            return typ
+    return "bandit"
+
+
+_SEPRO = {
+    "roformer": {"status": lambda force=False: _roformer_status(force=force),
+                 "dir": lambda: _roformer_dir(),
+                 "label": "BS-Roformer"},
+    "dnr": {"status": lambda force=False: _dnr_status(force=force),
+            "dir": lambda: _dnr_dir(),
+            "label": "DnR"},
+}
+
+
+def _sepro_kind(kind):
+    k = str(kind or "roformer").strip().lower()
+    return k if k in _SEPRO else "roformer"
+
+
+def _dnr_get_separator(m):
+    """按模型路径拿一个 pymss separator（缓存，换模型才重建）。
+
+    pymss 的 create_separator 只认「注册过的名字」或缓存目录里的模型名，
+    直接传绝对路径会报 Unknown pymss model —— 所以先按路径注册一个本进程用的别名。
+    """
+    key = m["path"] + "|" + m["config"]
+    if _DNR["sep"] is not None and _DNR["key"] == key:
+        return _DNR["sep"]
+    import pymss
+    dev = "cuda" if _torch_cuda() else "cpu"
+    alias = "lf_dnr_" + hashlib.md5(key.encode("utf-8")).hexdigest()[:10]
+    pymss.register_model(alias, _dnr_mtype(m), m["path"], m["config"] or None, force=True)
+    sep = pymss.create_separator(alias, device=dev)
+    _DNR["sep"], _DNR["key"] = sep, key
+    return sep
+
+
+def _torch_cuda():
+    try:
+        import torch
+        return bool(torch.cuda.is_available())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+_DNR_STEMS = ("Speech", "Music", "Effects")
+
+
+def _dnr_separate(data, sr, mode="effects", model_name=None):
+    """用 DnR 分轨，返回与输入同采样率、同声道数的波形。
+
+    mode：
+      effects      只要音效（舔耳 / 摩擦 / 环境声）—— 唯一值得用它的场景
+      speech       只要对白（含喘息这类人声）
+      instrumental 伴奏 = Music + Effects（给「去人声」用）
+      music        只要音乐床
+    """
+    models = [m for m in _dnr_scan() if m["ready"]]
+    if not models:
+        raise RuntimeError("没有检测到 DnR 模型（%s）" % _dnr_dir())
+    m = next((x for x in models if x["name"] == model_name or x["stem"] == model_name),
+             models[0])
+
+    x = np.asarray(data, dtype="float32")
+    if x.ndim == 1:
+        x = x[:, None]
+    stereo = x.shape[1] >= 2
+    work = x[:, :2] if stereo else np.repeat(x, 2, axis=1)
+    sr0 = int(sr or AUDIO_SR)
+    if sr0 != 44100:
+        work = _resample_audio(work, sr0, 44100)
+
+    with _DNR["lock"]:
+        sep = _dnr_get_separator(m)
+        # pymss 要 (channels, samples)，返回 (samples, channels)
+        res = sep.separate(np.ascontiguousarray(work.T), pbar=False)
+
+    def _pick(k):
+        v = res.get(k)
+        if v is None:
+            return None
+        a = np.asarray(v, dtype="float32")
+        if a.ndim == 1:
+            a = a[:, None]
+        elif a.shape[0] < a.shape[1]:
+            a = a.T
+        return a
+
+    want = str(mode or "effects").lower()
+    if want == "effects":
+        y = _pick("Effects")
+    elif want == "speech":
+        y = _pick("Speech")
+    elif want == "music":
+        y = _pick("Music")
+    else:                                   # instrumental
+        mu, ef = _pick("Music"), _pick("Effects")
+        y = np.zeros_like(work)
+        for a in (mu, ef):
+            if a is not None:
+                y = y + a[: len(y)]
+    if y is None:
+        raise RuntimeError("DnR 没有产出 %s 轨（模型可能不是 DnR）" % mode)
+    if y.shape[1] != work.shape[1]:
+        y = np.repeat(y[:, :1], work.shape[1], axis=1)
+    if not stereo:
+        y = y.mean(1, keepdims=True)
+    if sr0 != 44100:
+        y = _resample_audio(y, 44100, sr0)
+    # 峰值保护：DnR 是单声道模型（pymss 对左右各跑一遍），遇到满幅输入会过冲
+    # （实测输出峰值 1.001、个别样本左右反相到 ±1）。不缩一下写 wav 就被裁波，
+    # 听感是「噼啪」；整体缩放不改音色，只留 0.1 dB 余量。
+    pk = float(np.abs(y).max()) if np.size(y) else 0.0
+    if pk > 0.999:
+        y = y * (0.999 / pk)
+    return y
 
 
 def _roformer_work_dir():
@@ -5119,6 +5375,7 @@ def register_longform(app, api, deps):
         ff = _ffmpeg_bin()
         dm = _demucs_state(probe_only=True)
         ro = _roformer_status()
+        dn = _dnr_status()
         return {"ok": True, "ffmpeg": bool(ff), "ffmpeg_path": ff,
                 "video": bool(ff),
                 "audio_formats": sorted(x.lstrip(".") for x in AUDIO_EXTS),
@@ -5131,18 +5388,26 @@ def register_longform(app, api, deps):
                 "roformer": {"ready": bool(ro["ready"]), "reason": ro["reason"],
                              "count": len(ro["models"]), "dir": ro["dir"],
                              "pick": ro["pick"]},
+                "dnr": {"ready": bool(dn["ready"]), "reason": dn["reason"],
+                        "count": len(dn["models"]), "dir": dn["dir"],
+                        "pick": dn["pick"]},
                 "resample": "soxr",
                 "max_mb": MAT_MAX_BYTES // 1048576}
 
     # ---- BS-Roformer（可选模型）：检测 / 打开目录 / 试跑 ----
     @lf.get("/lf/sepro/status")
-    def lf_sepro_status(force: bool = False):
-        return _roformer_status(force=bool(force))
+    def lf_sepro_status(force: bool = False, kind: str = "roformer"):
+        """可选模型的状态。kind=roformer（人声二分离）/ dnr（对白/音乐/音效三分）。
+
+        同一套接口 + 一个 kind 参数：以后接第三个模型只要往 _SEPRO 里加一行，
+        前端加一个折叠项，不用再写一套路由。
+        """
+        return _SEPRO[_sepro_kind(kind)]["status"](bool(force))
 
     @lf.post("/lf/sepro/open")
-    def lf_sepro_open():
+    def lf_sepro_open(payload: dict = Body(default=None)):
         """在工作台里点「打开模型目录」——目录不存在就先建出来，免得用户自己找。"""
-        root = _roformer_dir()
+        root = _SEPRO[_sepro_kind((payload or {}).get("kind"))]["dir"]()
         try:
             os.makedirs(root, exist_ok=True)
         except OSError as e:
@@ -5166,6 +5431,7 @@ def register_longform(app, api, deps):
         """
         payload = payload or {}
         mname = (payload.get("model") or "").strip() or None
+        kind = _sepro_kind(payload.get("kind"))
         t0 = time.time()
         sr = 44100
         t = np.arange(sr * 3, dtype="float32") / sr
@@ -5173,14 +5439,18 @@ def register_longform(app, api, deps):
         right = 0.25 * np.sin(2 * np.pi * 330 * t) + 0.02 * np.random.randn(t.size)
         x = np.stack([left, right], axis=1).astype("float32")
         try:
-            y = _roformer_separate(x, sr, "vocals", mname, 0.0)
+            if kind == "dnr":
+                y = _dnr_separate(x, sr, "effects", mname)
+            else:
+                y = _roformer_separate(x, sr, "vocals", mname, 0.0)
         except HTTPException:
             raise
         except Exception as e:  # noqa: BLE001
             raise HTTPException(400, "试跑失败：%s: %s" % (type(e).__name__, e))
         rms = float(np.sqrt(np.mean(np.square(y)))) if np.size(y) else 0.0
         return {"ok": True, "ms": int((time.time() - t0) * 1000), "rms": round(rms, 5),
-                "model": mname or _roformer_status()["pick"]}
+                "kind": kind,
+                "model": mname or _SEPRO[kind]["status"]()["pick"]}
 
     @lf.get("/lf/media")
     def lf_media_list():

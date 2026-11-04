@@ -6806,10 +6806,13 @@ function roShortName(n, max) {
 }
 
 /* 把「能不能用 Roformer」落到两个引擎下拉上 */
-function applySepCaps(ro) {
+function applySepCaps(ro, dnr) {
   MAT.ro = ro || null;
+  MAT.dnr = dnr || null;
   const ready = !!(ro && ro.ready);
+  const dReady = !!(dnr && dnr.ready);
   const nm = roShortName(ro && ro.pick, 12);
+  const dnm = roShortName(dnr && dnr.pick, 14);
   [["opVocalEngine", "vocalEngineHint", "vocalDspOpts"],
    ["opSSepEngine", "sepEngineHint", "sepDspOpts"]].forEach(([selId, hintId, dspId]) => {
     const sel = $(selId);
@@ -6822,10 +6825,30 @@ function applySepCaps(ro) {
         ? `BS-Roformer 已就绪：${ro.pick}（比 Demucs 干净，但更吃显存）`
         : "BS-Roformer 需要自备模型：展开下方「BS-Roformer 模型」看下载地址与装法";
     }
+    const dopt = [...sel.options].find((o) => o.value === "dnr");
+    if (dopt) {
+      dopt.disabled = !dReady;
+      dopt.textContent = dReady ? `DnR（${dnm}）` : "DnR（无模型）";
+      dopt.title = dReady
+        ? "DnR：对白 / 音乐 / 音效 三分，抠纯音效用它"
+        : "DnR 需要自备模型：展开「DnR」看下载命令";
+    }
     if (!ready && sel.value === "roformer") sel.value = "demucs";
+    if (!dReady && sel.value === "dnr") sel.value = "demucs";
     syncSepEngine(selId, hintId, dspId);
   });
+  // 「只要音效」只有 DnR 能做
+  ["opVocalMode", "opSSepMode"].forEach((id) => {
+    const sel = $(id);
+    if (!sel) return;
+    const o = [...sel.options].find((x) => x.value === "effects");
+    if (!o) return;
+    o.disabled = !dReady;
+    o.textContent = dReady ? "只要音效（DnR）" : "只要音效（DnR · 无模型）";
+    if (!dReady && sel.value === "effects") sel.value = "vocals";
+  });
   roPaint(ro);
+  dnrPaint(dnr);
 }
 
 /* 「模型拓展」面板开合。展开时把按钮切到 active 态、顺手把内容滚进视野；
@@ -6874,6 +6897,11 @@ function roPaint(ro) {
     }
   }
   if (why) why.textContent = (ro && ro.reason) ? "· " + ro.reason : "";
+  const rtag = $("roStTag");
+  if (rtag) {
+    rtag.className = "mf-st " + (ready ? "ok" : "off");
+    rtag.textContent = ready ? "已就绪" : (n ? "缺后端" : "未安装");
+  }
   // 下载命令里的目录用后端解析出来的真实路径（可能是 LF_ROFORMER_DIR 指过去的）
   const cmd = $("roCmdDown");
   if (cmd && ro && ro.dir) {
@@ -6891,57 +6919,112 @@ function roPaint(ro) {
 }
 
 async function roLoad(force) {
-  let ro = null;
+  let ro = null, dnr = null;
   try {
-    ro = await api("/sepro/status" + (force ? "?force=1" : ""));
+    ro = await api("/sepro/status" + (force ? "?force=1&kind=roformer" : "?kind=roformer"));
   } catch (e) {
     ro = { ready: false, models: [], reason: "检测失败：" + e.message, pymss: {} };
   }
-  applySepCaps(ro);
+  try {
+    dnr = await api("/sepro/status" + (force ? "?force=1&kind=dnr" : "?kind=dnr"));
+  } catch (e) {
+    dnr = { ready: false, models: [], reason: "检测失败：" + e.message, pymss: {} };
+  }
+  applySepCaps(ro, dnr);
   return ro;
 }
 
+/* DnR 面板：状态行 / 目录 / 下载命令 / 折叠标题上的小标签 */
+function dnrPaint(d) {
+  const ready = !!(d && d.ready);
+  const n = ((d && d.models) || []).length;
+  const py = (d && d.pymss) || {};
+  const bar = $("dnrBar"), st = $("dnrState"), dir = $("dnrDir"), why = $("dnrWhy");
+  const tag = $("dnrStTag");
+  if (bar) { bar.classList.toggle("ok", ready); bar.classList.toggle("bad", !ready); }
+  if (dir) dir.textContent = (d && d.dir) || "";
+  if (st) {
+    if (ready) {
+      st.innerHTML = `已就绪：<b>${_roEsc(d.pick)}</b>（Speech / Music / Effects 三轨）`;
+    } else if (n && !py.ok) {
+      st.innerHTML = `检测到 <b>${n}</b> 个模型，但还差推理后端 <b>pymss</b>`;
+    } else if (n) {
+      st.innerHTML = `检测到 <b>${n}</b> 个模型文件，但缺同名 .yaml`;
+    } else {
+      st.textContent = "还没放模型：只有需要「抠纯音效」时才装，日常配音用 Demucs 就够";
+    }
+  }
+  if (why) why.textContent = (d && d.reason) ? "· " + d.reason : "";
+  if (tag) {
+    tag.className = "mf-st " + (ready ? "ok" : "off");
+    tag.textContent = ready ? "已就绪" : (n ? "缺后端" : "未安装");
+  }
+  const cmd = $("dnrCmdDown");
+  if (cmd && d && d.dir) {
+    const mdir = d.rel || d.dir;
+    cmd.textContent = `runtime\\python.exe -m pymss.cli download model_bandit_plus_dnr_sdr_11.47.ckpt `
+      + `--model-dir "${mdir}" --source modelscope`;
+  }
+  const dlh = $("dnrDlHint");
+  if (dlh) dlh.textContent = py.ok ? "已装好后端，可以直接跑" : "先装 pymss（上面第 1 步）";
+}
+
 function roBind() {
-  const open = $("btnRoOpen"), scan = $("btnRoScan"), test = $("btnRoTest");
-  if (open && !open._b) {
-    open._b = true;
-    open.onclick = async () => {
-      try {
-        const r = await api("/sepro/open", { method: "POST", body: {} });
-        if (r && r.ok === false) toast("打不开目录：" + (r.error || "未知原因"), true);
-      } catch (e) { toast("打不开目录：" + e.message, true); }
-    };
-  }
-  if (scan && !scan._b) {
-    scan._b = true;
-    scan.onclick = async () => {
-      scan.disabled = true;
-      try {
-        const ro = await roLoad(true);
-        toast(ro && ro.ready ? "已检测到 BS-Roformer，引擎里可以选了" : (ro && ro.reason) || "还没检测到模型", !(ro && ro.ready));
-      } finally { scan.disabled = false; }
-    };
-  }
-  if (test && !test._b) {
-    test._b = true;
-    test.onclick = async () => {
-      const st = $("roState");
-      test.disabled = true;
-      if (st) st.textContent = "试跑中：加载模型 + 分离 3 秒合成音，第一次可能要一两分钟…";
-      try {
-        const r = await api("/sepro/test", { method: "POST", body: {} });
-        // 试跑只验「模型加载 + 推理链路」，不评判音质：合成音里没有人声，
-        // 人声轨接近静音是正常的，别拿这个吓用户。
-        toast(`试跑通过：${(r.ms / 1000).toFixed(1)} 秒（模型已加载，链路正常）`);
-      } catch (e) {
-        toast("试跑失败：" + e.message, true);
-      } finally {
-        test.disabled = false;
-        await roLoad(true);   // 状态行由 roPaint 重写；试跑顺带也算一次重新检测
-      }
-    };
-  }
-  // 两个「复制」按钮共用一套：data-copy 指向要复制的 <pre>
+  // 两个可选模型共用一套交互：按钮 id 前缀不同，动作完全一样（只是 kind 参数不同）
+  const kinds = [
+    { kind: "roformer", open: "btnRoOpen", scan: "btnRoScan", test: "btnRoTest",
+      state: "roState", label: "BS-Roformer" },
+    { kind: "dnr", open: "btnDnrOpen", scan: "btnDnrScan", test: "btnDnrTest",
+      state: "dnrState", label: "DnR" },
+  ];
+  kinds.forEach(({ kind, open, scan, test, state, label }) => {
+    const bo = $(open);
+    if (bo && !bo._b) {
+      bo._b = true;
+      bo.onclick = async () => {
+        try {
+          const r = await api("/sepro/open", { method: "POST", body: { kind } });
+          if (r && r.ok === false) toast("打不开目录：" + (r.error || "未知原因"), true);
+        } catch (e) { toast("打不开目录：" + e.message, true); }
+      };
+    }
+    const bs = $(scan);
+    if (bs && !bs._b) {
+      bs._b = true;
+      bs.onclick = async () => {
+        bs.disabled = true;
+        try {
+          await roLoad(true);
+          const st = $(state);
+          const ok = st && !/还没放模型|缺同名|差推理后端|检测失败/.test(st.textContent || "");
+          toast(ok ? `已检测到 ${label}，引擎里可以选了` : ((st && st.textContent) || "还没检测到模型"), !ok);
+        } finally { bs.disabled = false; }
+      };
+    }
+    const bt = $(test);
+    if (bt && !bt._b) {
+      bt._b = true;
+      bt.onclick = async () => {
+        const st = $(state);
+        bt.disabled = true;
+        const keep = st ? st.innerHTML : "";
+        if (st) st.textContent = "试跑中：加载模型 + 分离 3 秒合成音，第一次可能要一两分钟…";
+        try {
+          const r = await api("/sepro/test", { method: "POST", body: { kind } });
+          // 试跑只验「模型加载 + 推理链路」，不评判音质：合成音里没有人声，
+          // 人声轨 / 音效轨接近静音是正常的，别拿这个吓用户。
+          toast(`试跑通过：${(r.ms / 1000).toFixed(1)} 秒（模型已加载，链路正常）`);
+        } catch (e) {
+          toast("试跑失败：" + e.message, true);
+        } finally {
+          bt.disabled = false;
+          await roLoad(true);   // 状态行由 paint 重写；试跑顺带也算一次重新检测
+          if (st && !st.textContent) st.innerHTML = keep;
+        }
+      };
+    }
+  });
+  // 所有「复制」按钮共用一套：data-copy 指向要复制的 <pre>
   document.querySelectorAll("#roDetails [data-copy]").forEach((btn) => {
     if (btn._b) return;
     btn._b = true;

@@ -2228,3 +2228,36 @@ html[data-theme="dark"] .refitem.lsel,
 html[data-theme="dark"] .matitem.lsel,
 html[data-theme="dark"] .reftile.lsel,
 html[data-theme="dark"] .mattile.lsel { background: rgba(106, 157, 255, .16); }
+
+/* ================= 模型拓展：可折叠的模型项 =================
+   每个可选模型一个 <details class="mfold">：标题行常驻（带「已就绪 / 未安装」小标签），
+   点开才是安装说明。以后接第三个模型只加一个 <details>，样式不用改。 */
+.ropanel .mfold {
+  border: 1px solid var(--border-2); border-radius: 10px;
+  background: var(--surface); margin: 0 0 8px; overflow: hidden;
+}
+.ropanel .mfold > summary {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 10px; cursor: pointer; list-style: none;
+  font-size: 12.5px; color: var(--ink);
+  user-select: none;
+}
+.ropanel .mfold > summary::-webkit-details-marker { display: none; }
+.ropanel .mfold > summary:hover { background: var(--surface-2); }
+.ropanel .mfold > summary::before {
+  content: "▸"; color: var(--faint); font-size: 10px; flex: none;
+  transition: transform .12s ease;
+}
+.ropanel .mfold[open] > summary::before { transform: rotate(90deg); }
+.ropanel .mfold > summary b { font-weight: 700; }
+.mf-i { font-size: 14px; line-height: 1; }
+.mf-sub { font-weight: 400; font-size: 11px; }
+.mf-st {
+  margin-left: auto; flex: none;
+  font-size: 10.5px; padding: 1px 7px; border-radius: 999px;
+  border: 1px solid var(--border-2); color: var(--faint); background: var(--surface-2);
+}
+.mf-st.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+  background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.mf-body { padding: 2px 10px 10px; }
+.mf-body > .ronote:first-child { margin-top: 0; }

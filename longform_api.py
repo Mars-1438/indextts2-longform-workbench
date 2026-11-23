@@ -932,7 +932,7 @@ def _sfxb_pack(raw, mono, sr, total, min_len, pad):
 
 
 def _sfxb_segments(x, sr, mode="gap", min_gap=0.35, min_len=0.2, thresh_db=10.0, pad=0.03,
-                   cues=None):
+                   cues=None, events=None):
     """把一段音频切成「声音事件」。
 
     mode = gap  按静音间隔（默认，最稳）
@@ -941,6 +941,8 @@ def _sfxb_segments(x, sr, mode="gap", min_gap=0.35, min_len=0.2, thresh_db=10.0,
     mode = srt  按字幕间隔 —— 字幕区间是"在说话"，取补集就是音效候选区。
                 有字幕时这个比 RMS 准得多：RMS 只知道"有没有声音"，
                 而台词和音效都有声音，分不开。
+    mode = vb   按 VocalBurst 的事件区间切 —— 只认「人发出的非语言声音」，
+                不用字幕、不靠响度，所以喘息叠在台词里也能单独成段。
     """
     mono = _sfxb_mono(x)
     total = len(mono) / float(sr)
@@ -958,6 +960,17 @@ def _sfxb_segments(x, sr, mode="gap", min_gap=0.35, min_len=0.2, thresh_db=10.0,
             mode = "gap"
     if mode == "srt":
         raw = _sfxb_srt_runs(cues, total, min_gap)
+    if mode == "vb":
+        for e in (events or []):
+            try:
+                a, b = float(e.get("start")), float(e.get("end"))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            a = max(0.0, min(total, a))
+            b = max(0.0, min(total, b))
+            if b - a > 0.01:
+                raw.append((a, b))
+        raw.sort()
     fell_back = False
     if not raw and mode == "fg":
         # 减完背景什么都没剩（整段是稳态噪声/长音）→ 先记一笔，下面退回按原信号切
@@ -2292,6 +2305,9 @@ _SEPRO = {
     "dnr": {"status": lambda force=False: _dnr_status(force=force),
             "dir": lambda: _dnr_dir(),
             "label": "DnR"},
+    "vocalburst": {"status": lambda force=False: _vb_status(force=force),
+                   "dir": lambda: _vb_dir(),
+                   "label": "VocalBurst"},
 }
 
 
@@ -2397,6 +2413,506 @@ def _dnr_separate(data, sr, mode="effects", model_name=None):
     if pk > 0.999:
         y = y * (0.999 / pk)
     return y
+
+
+# ---------------- VocalBurst Locator（非语音人声打标） ----------------
+# 它回答的问题只有一个：「第 12.4 秒到 13.1 秒，有一次人发出的非语言声音」。
+# 笑 / 喘 / 叹气 / 咳 / 清嗓 / 咂嘴 / 舔耳 都算；不给类型、不做分离。
+# 这正好补上 DnR 的缺口：DnR 的 Effects 轨是「不是人发出的音效」，
+# VocalBurst 管「是人发出的、但不是语言的声音」。
+#
+# 权重 972MB + Whisper-small 编码器 967MB，都不进补丁包，走「检测到才启用」。
+_VB = {"models": [], "dir": "", "scanned": 0.0, "net": None, "fe": None,
+       "key": "", "dev": "", "lock": threading.RLock(), "used": 0.0, "timer": None,
+       "vc": None, "cls": None, "cls_key": "", "cls_bad": "", "classes": [], "groups": {}}
+_VB_DEFAULTS = {"threshold": 0.50, "merge_gap": 0.10, "min_dur": 0.10}
+_VB_SR = 16000
+_VB_WIN = 30.0          # Whisper 的固定输入窗口
+_VB_STEP = 25.0         # 25 秒一步、留 5 秒重叠：跨窗口的事件不会被切断
+_VB_ALIAS = "vocalburst"
+
+
+def _vb_dir():
+    """模型放哪：默认 <整合包>/vendor2/vocalburst/，可用 LF_VOCALBURST_DIR 覆盖。
+
+    目录里应该有两样东西：
+      model_v2.pt      972MB，官方推荐权重（真实录音微调过）
+      whisper-small/   Whisper-small 的 config + model.safetensors（编码器底座）
+    """
+    d = (os.environ.get("LF_VOCALBURST_DIR") or "").strip()
+    if d:
+        return os.path.abspath(os.path.expanduser(d))
+    root = _D.get("project_dir") or os.getcwd()
+    return os.path.join(root, "vendor2", "vocalburst")
+
+
+def _vb_scan(force=False):
+    """扫模型目录。只认根目录下的 .pt，不递归 —— 子目录里是 whisper-small 的分片。"""
+    now = time.time()
+    if not force and _VB["models"] and (now - _VB["scanned"] < 8):
+        return _VB["models"]
+    root = _vb_dir()
+    _VB["dir"] = root
+    out = []
+    if os.path.isdir(root):
+        for f in os.listdir(root):
+            if not f.lower().endswith((".pt", ".pth", ".ckpt")):
+                continue
+            p = os.path.join(root, f)
+            try:
+                size = os.path.getsize(p)
+            except OSError:
+                continue
+            if size < 50 * 1024 * 1024:      # head_only.pt 之类的小文件不算权重
+                continue
+            low = f.lower()
+            rank = 3 if "v2" in low and "mixed" not in low else (2 if "mixed" in low else 1)
+            out.append({"name": f, "path": p, "size": int(size), "rank": rank,
+                        "ready": True})
+    out.sort(key=lambda x: (-x["rank"], x["name"]))
+    _VB["models"], _VB["scanned"] = out, now
+    return out
+
+
+def _vb_whisper_dir():
+    """Whisper-small 底座的本地目录。优先 LF_VB_WHISPER，其次模型目录下的 whisper-small。"""
+    env = (os.environ.get("LF_VB_WHISPER") or "").strip()
+    if env and os.path.isdir(os.path.abspath(os.path.expanduser(env))):
+        return os.path.abspath(os.path.expanduser(env))
+    local = os.path.join(_vb_dir(), "whisper-small")
+    for fn in ("model.safetensors", "pytorch_model.bin"):
+        if os.path.isfile(os.path.join(local, fn)):
+            return local
+    return ""
+
+
+def _vb_cls_dir():
+    return os.path.join(_vb_dir(), "classifier")
+
+
+def _vb_vc_dir():
+    return os.path.join(_vb_dir(), "voiceclap")
+
+
+def _vb_cls_state():
+    """82 类分类器是否就绪。它是可选的：没有就只用通用命名，不影响检测。"""
+    d, v = _vb_cls_dir(), _vb_vc_dir()
+    need = [os.path.join(d, "model.pt"), os.path.join(d, "config.json"),
+            os.path.join(d, "classes.json"), os.path.join(v, "config.json"),
+            os.path.join(v, "modeling_voiceclap.py")]
+    miss = [os.path.basename(p) for p in need if not os.path.isfile(p)]
+    weights = os.path.join(v, "model.safetensors")
+    if not os.path.isfile(weights) and not os.path.isfile(os.path.join(v, "pytorch_model.bin")):
+        miss.append("model.safetensors")
+    if _VB.get("cls_bad"):
+        return {"ready": False, "reason": _VB["cls_bad"], "classes": 0}
+    return {"ready": not miss,
+            "reason": ("缺 " + " / ".join(miss[:3])) if miss else "",
+            "classes": 83 if not miss else 0,
+            "dir": d}
+
+
+def _vb_status(force=False):
+    if force:
+        _VB["cls_bad"] = ""        # 用户补完文件后点「重新检测」应该能恢复
+    models = _vb_scan(force=force)
+    root = _VB["dir"]
+    wd = _vb_whisper_dir()
+    dep_ok, dep_why = True, ""
+    try:
+        import importlib.util
+        for mod in ("torch", "transformers"):
+            if importlib.util.find_spec(mod) is None:
+                dep_ok, dep_why = False, "缺少 %s" % mod
+                break
+    except Exception:  # noqa: BLE001
+        dep_ok = True
+    ready = bool(models) and bool(wd) and dep_ok
+    if not models:
+        why = ("模型目录里还没有 model_v2.pt" if os.path.isdir(root) else "还没有建模型目录")
+    elif not wd:
+        why = "有检测权重，但缺 Whisper-small 底座（whisper-small/ 目录）"
+    elif not dep_ok:
+        why = "检测到模型，但运行环境缺依赖：%s" % dep_why
+    else:
+        why = ""
+    try:
+        rel = os.path.relpath(root, _D.get("project_dir") or os.getcwd())
+        if rel.startswith(".."):
+            rel = ""
+    except ValueError:
+        rel = ""
+    dev = ""
+    try:
+        import torch
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+    except Exception:  # noqa: BLE001
+        dev = ""
+    return {"ok": True, "dir": root, "rel": rel, "exists": os.path.isdir(root),
+            "models": models, "ready": ready, "reason": why,
+            "pick": (models[0]["name"] if models else ""),
+            "whisper": {"ok": bool(wd), "dir": wd,
+                        "reason": "" if wd else "缺 whisper-small（config + model.safetensors）"},
+            "device": dev, "params": dict(_VB_DEFAULTS),
+            "classifier": _vb_cls_state(),
+            "frames_per_sec": 50, "window": _VB_WIN, "step": _VB_STEP}
+
+
+def _vb_build(whisper_dir):
+    """按官方结构搭一个空网络：Whisper 编码器 + 投影 + 时间卷积 + 单 logit。
+
+    结构与 laion/vocalburst-locator 的 WhisperSegmenter 一致（Apache-2.0），
+    LoRA 已经合并进底座权重，所以这里不需要 peft。
+    """
+    import torch.nn as nn
+    from transformers import WhisperModel
+
+    class _Net(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.whisper = WhisperModel.from_pretrained(whisper_dir, local_files_only=True)
+            d = self.whisper.config.d_model
+            h = max(256, d // 2)
+            self.proj = nn.Sequential(nn.Linear(d, h), nn.GELU(), nn.Dropout(0.1))
+            self.temporal = nn.Sequential(
+                nn.Conv1d(h, h, kernel_size=7, padding=3), nn.GELU(), nn.Dropout(0.1))
+            self.out = nn.Linear(h, 1)
+
+        def forward(self, input_features):
+            enc = self.whisper.encoder(input_features=input_features).last_hidden_state
+            x = self.proj(enc).permute(0, 2, 1)
+            x = self.temporal(x).permute(0, 2, 1)
+            return self.out(x).squeeze(-1)
+
+    return _Net()
+
+
+def _vb_load(m):
+    """加载（并缓存）模型。第一次约 10–30 秒、显存 2GB 左右。"""
+    import torch
+    from transformers import WhisperFeatureExtractor
+
+    wd = _vb_whisper_dir()
+    if not wd:
+        raise RuntimeError("缺 Whisper-small 底座：把 config.json / model.safetensors 放进 %s"
+                           % os.path.join(_vb_dir(), "whisper-small"))
+    key = "%s|%s|%s" % (m["path"], os.path.getmtime(m["path"]), wd)
+    with _VB["lock"]:
+        if _VB["net"] is not None and _VB["key"] == key:
+            return _VB["net"], _VB["fe"], _VB["dev"]
+        t0 = time.time()
+        net = _vb_build(wd)
+        sd = torch.load(m["path"], map_location="cpu")
+        if isinstance(sd, dict) and "state_dict" in sd:
+            sd = sd["state_dict"]
+        sd = {re.sub(r"^module\.", "", k): v for k, v in sd.items()}
+        missing, unexpected = net.load_state_dict(sd, strict=False)
+        # 官方权重是 strict=True 能过的；这里放宽到「关键权重都在」，
+        # 以便用户换成自己融合过的 head 时不至于整块功能不可用。
+        if missing or unexpected:
+            _log("vocalburst: state_dict mismatch (missing=%s, unexpected=%s)",
+                 list(missing)[:5], list(unexpected)[:5], level="warning")
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        net = net.to(dev).eval()
+        fe = WhisperFeatureExtractor.from_pretrained(wd)
+        _VB["net"], _VB["fe"], _VB["key"], _VB["dev"] = net, fe, key, dev
+        _log("vocalburst: loaded %s on %s in %.1fs", m["name"], dev, time.time() - t0)
+        return net, fe, dev
+
+
+def _vb_unload(force=False):
+    """释放显存。检测完不马上放（调参数时重复加载很慢），但闲置十分钟自动放。
+
+    为什么必须放：IndexTTS2 自己的模型也在同一张卡上，VocalBurst 占着约 2GB
+    会让「检测完接着生成」更容易 OOM。宁可下次多点一次加载。
+    """
+    if not force and time.time() - float(_VB.get("used") or 0) < 540:
+        return False
+    with _VB["lock"]:
+        had = _VB["net"] is not None or _VB.get("vc") is not None
+        _VB["net"] = None
+        _VB["fe"] = None
+        _VB["key"] = ""
+        _VB["vc"] = None
+        _VB["cls"] = None
+        _VB["cls_key"] = ""
+        try:
+            import gc
+            import torch
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001
+            pass
+        if had:
+            _log("vocalburst: model unloaded (idle or manual)")
+        return had
+
+
+def _vb_touch():
+    """记一次使用，并排一个十分钟后的闲置释放（新的检测会取消旧的）。"""
+    _VB["used"] = time.time()
+    t = _VB.get("timer")
+    if t is not None:
+        try:
+            t.cancel()
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        timer = threading.Timer(600.0, _vb_unload)
+        timer.daemon = True
+        timer.start()
+        _VB["timer"] = timer
+    except Exception:  # noqa: BLE001
+        _VB["timer"] = None
+
+
+def _vb_extract_events(probs, threshold=0.50, merge_gap=0.10, min_dur=0.10):
+    """逐帧概率 → 事件。参数必须用 v2 的 0.50 / 0.10 / 0.10。
+
+    真实 burst 的时长中位数只有约 180ms；用官方脚本里的旧默认值（min_dur=0.5）
+    会先把 96% 的事件丢掉（官方同权重实测 F1 0.243 → 0.598 的差别就出在这里）。
+    """
+    if probs is None or not len(probs):
+        return []
+    binary = probs > float(threshold)
+    raw, i, n = [], 0, len(binary)
+    while i < n:
+        if not binary[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and binary[j + 1]:
+            j += 1
+        raw.append((i, j + 1))
+        i = j + 1
+    if not raw:
+        return []
+    fps = 50.0
+    merged = []
+    for a, b in raw:
+        if merged and (a - merged[-1][1]) / fps <= float(merge_gap):
+            merged[-1][1] = b
+        else:
+            merged.append([a, b])
+    out = []
+    for a, b in merged:
+        s, e = a / fps, b / fps
+        if e - s < float(min_dur):
+            continue
+        out.append((s, e, float(np.mean(probs[a:b]))))
+    return out
+
+
+_VB_GROUP_CN = {
+    "laughter": "笑", "crying_and_distress": "哭", "breathing": "呼吸",
+    "sighs": "叹气", "gasps_and_inhales": "抽气", "groans_and_moans": "呻吟",
+    "grunts": "闷哼", "throat_and_vocal_sounds": "喉音", "humming": "哼唱",
+    "coughing_and_sneezing": "咳", "whistling": "口哨", "mouth_and_lip_sounds": "口唇音",
+    "tongue_clicks": "咂嘴", "eating_and_drinking": "吞咽",
+    "screams_and_shrieks": "尖叫", "hand_and_body_sounds": "指响",
+    "no_burst": "",
+}
+
+# 细类覆盖：同一组里有些声音对做音效的人差别很大，用粗组名会丢信息。
+_VB_CLASS_CN = {
+    "Panting": "喘息", "Heavy Breathing": "喘息", "Fast Breathing": "急喘",
+    "Deep Breathing": "深呼吸", "Deep Breath": "深呼吸",
+    "Licking Sound": "舔舐", "Kissing Noises": "亲吻", "Kissing Sounds": "亲吻",
+    "Lip Smack": "咂嘴", "Smack One's Lips": "咂嘴", "Smacks Lips": "咂嘴",
+    "Cough": "咳", "Coughing": "咳", "Sniff": "抽鼻", "Snort": "喷鼻",
+    "Yawn": "哈欠", "Hiccup": "打嗝", "Hiccups": "打嗝",
+    "Scream": "尖叫", "Shriek": "尖叫", "Growl": "低吼",
+}
+
+
+def _vb_cls_load():
+    """加载 82 类分类器（VoiceCLAP 嵌入 + 三层 MLP）。只在事件数 > 0 时懒加载。"""
+    import json
+    import torch
+    import torch.nn as nn
+    from transformers import AutoModel
+
+    d, v = _vb_cls_dir(), _vb_vc_dir()
+    key = os.path.join(d, "model.pt") + "|" + os.path.join(v, "model.safetensors")
+    with _VB["lock"]:
+        if _VB["cls"] is not None and _VB["cls_key"] == key:
+            return _VB["vc"], _VB["cls"], _VB["classes"], _VB["groups"], _VB["dev"]
+        with open(os.path.join(d, "config.json"), "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        with open(os.path.join(d, "classes.json"), "r", encoding="utf-8") as f:
+            classes = json.load(f)
+        with open(os.path.join(d, "class_to_group.json"), "r", encoding="utf-8") as f:
+            groups = json.load(f)
+        vc = AutoModel.from_pretrained(v, trust_remote_code=True,
+                                       local_files_only=True).to(_VB["dev"]).eval()
+        hid, depth, out = int(cfg["hidden"]), int(cfg["depth"]), int(cfg["num_classes"])
+        L = [nn.Linear(int(cfg["input_dim"]), hid), nn.LayerNorm(hid), nn.GELU(), nn.Dropout(0.0)]
+        for _ in range(depth - 1):
+            L += [nn.Linear(hid, hid), nn.LayerNorm(hid), nn.GELU(), nn.Dropout(0.0)]
+        L += [nn.Linear(hid, out)]
+        mlp = nn.Sequential(*L).to(_VB["dev"]).eval()
+        sd = torch.load(os.path.join(d, "model.pt"), map_location="cpu")
+        # 官方 _MLP 里套了一层 self.net，权重名是 net.0.weight；这里直接用 Sequential，
+        # 所以把前缀去掉（比再包一层 class 省事，也不会改状态名）。
+        if any(k.startswith("net.") for k in sd):
+            sd = {re.sub(r"^net\.", "", k): v for k, v in sd.items()}
+        mlp.load_state_dict(sd, strict=True)
+        _VB["vc"], _VB["cls"], _VB["classes"], _VB["groups"], _VB["cls_key"] = \
+            vc, mlp, classes, groups, key
+        _log("vocalburst: classifier loaded (%d classes)", len(classes))
+        return vc, mlp, classes, groups, _VB["dev"]
+
+
+def _vb_classify_events(data, sr, events, min_group_p=0.45):
+    """给每条事件写一个**粗类型**（笑 / 喘 / 叹气…），写进 ev["type"]。
+
+    为什么用「组概率和」而不是 top-1：官方 fine top-1 只有 49%，但粗到 16 个家族时
+    mAP 0.63、隔离 burst 上约 0.87。做文件名时「喘息-003」比「不知名-003」有用，
+    但「狼哨-003」比「口唇音-003」更糟 —— 所以只在组置信度过线时才写类型，
+    且细类只覆盖少数几个差别大的（Panting → 喘息、Licking → 舔舐）。
+    """
+    if not events:
+        return events
+    try:
+        vc, mlp, classes, groups, dev = _vb_cls_load()
+    except Exception as e:  # noqa: BLE001
+        _VB["cls_bad"] = "分类器加载失败：%s: %s" % (type(e).__name__, e)
+        _log("vocalburst: classifier load failed (%s)", e, level="warning")
+        return events
+    import torch
+    x = np.asarray(data, dtype="float32")
+    if x.ndim > 1:
+        x = x.mean(axis=1)
+    sr0 = int(sr or _VB_SR)
+    if sr0 != _VB_SR:
+        x = _resample_audio(x[:, None], sr0, _VB_SR)[:, 0]
+    nb = [i for i, c in enumerate(classes) if c == "no_burst"]
+    gidx = {}
+    for i, c in enumerate(classes):
+        g = groups.get(c) or ""
+        if g and g != "no_burst":
+            gidx.setdefault(g, []).append(i)
+    for ev in events:
+        try:
+            a = max(0.0, ev["start"] - 0.25)
+            b = min(len(x) / float(_VB_SR), ev["end"] + 0.25)
+            clip = x[int(a * _VB_SR):int(b * _VB_SR)]
+            if clip.size < int(0.25 * _VB_SR):        # 太短补零，别让 CLAP 只看 0.1 秒
+                clip = np.pad(clip, (0, int(0.25 * _VB_SR) - clip.size))
+            t = torch.from_numpy(np.ascontiguousarray(clip)).float().to(dev).unsqueeze(0)
+            with torch.inference_mode():
+                emb = vc.encode_waveform(t)
+                probs = torch.softmax(mlp(emb), dim=-1).float().squeeze(0).cpu().numpy()
+            p_nb = float(probs[nb].sum()) if nb else 0.0
+            if p_nb >= 0.5:
+                ev["type"] = ""
+                ev["type_note"] = "no_burst %.2f" % p_nb
+                continue
+            sums = {g: float(probs[ix].sum()) for g, ix in gidx.items()}
+            g = max(sums, key=sums.get) if sums else ""
+            pg = sums.get(g, 0.0)
+            top_i = int(np.argmax([probs[i] if classes[i] != "no_burst" else -1
+                                   for i in range(len(classes))]))
+            top = classes[top_i]
+            if g and pg >= float(min_group_p):
+                ev["type"] = _VB_CLASS_CN.get(top) or _VB_GROUP_CN.get(g) or ""
+                ev["type_en"] = top
+                ev["type_p"] = round(pg, 3)
+            else:
+                ev["type"] = ""
+                ev["type_note"] = "%s %.2f" % (_VB_GROUP_CN.get(g, g), pg)
+        except Exception as e:  # noqa: BLE001
+            _log("vocalburst: classify one event failed (%s)", e, level="warning")
+            ev["type"] = ""
+    return events
+
+
+def _vb_detect(data, sr, model_name=None, threshold=0.50, merge_gap=0.10, min_dur=0.10):
+    """对整段音频做检测，返回 [{start,end,dur,conf}]（秒，相对输入）。
+
+    30 秒一块、25 秒一步：Whisper 只能吃 30 秒，而直接切块会把跨界的 burst 切成两半。
+    重叠区的处理是「只保留事件起点落在本块核心区的那一份」，再按 IoU 去重 ——
+    比「每块都留、最后按时间合并」稳，不会把两次紧挨着的喘息并成一次。
+    """
+    import torch
+
+    models = [m for m in _vb_scan() if m["ready"]]
+    if not models:
+        raise RuntimeError("没有检测到 VocalBurst 权重（%s）" % _vb_dir())
+    m = next((x for x in models if x["name"] == model_name), models[0])
+    net, fe, dev = _vb_load(m)
+
+    x = np.asarray(data, dtype="float32")
+    if x.ndim > 1:
+        x = x.mean(axis=1)
+    if x.size == 0:
+        return []
+    sr0 = int(sr or _VB_SR)
+    if sr0 != _VB_SR:
+        x = _resample_audio(x[:, None], sr0, _VB_SR)[:, 0]
+    total = len(x) / float(_VB_SR)
+    win = int(_VB_WIN * _VB_SR)
+    step = int(_VB_STEP * _VB_SR)
+
+    starts = list(range(0, max(1, len(x) - win + 1), step)) or [0]
+    if starts[-1] + win < len(x):                 # 末尾不够一块的，补最后一块
+        starts.append(max(0, len(x) - win))
+
+    events = []
+    with torch.inference_mode():
+        for wi, st in enumerate(starts):
+            chunk = x[st:st + win]
+            real = len(chunk) / float(_VB_SR)
+            if len(chunk) < win:
+                chunk = np.pad(chunk, (0, win - len(chunk)))
+            feats = fe(chunk, sampling_rate=_VB_SR, return_tensors="pt")
+            inp = feats.input_features.to(dev)
+            if dev == "cuda" and torch.cuda.is_bf16_supported():
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    logits = net(inp)
+            else:
+                logits = net(inp)
+            probs = torch.sigmoid(logits).float().squeeze(0).cpu().numpy()
+            core = min(real, _VB_STEP) if wi < len(starts) - 1 else real
+            for s, e, c in _vb_extract_events(probs, threshold, merge_gap, min_dur):
+                if s >= real - 0.02:
+                    continue
+                if wi < len(starts) - 1 and s >= core - 0.02:
+                    continue                          # 留给下一块的核心区
+                g0 = st / float(_VB_SR) + s
+                g1 = st / float(_VB_SR) + min(e, real)
+                if g1 - g0 < float(min_dur) * 0.8:
+                    continue
+                events.append({"start": g0, "end": g1, "conf": c})
+
+    # 跨块去重：同一事件在两块里都会出现，IoU > 0.5 视为同一次，保留置信度高的
+    events.sort(key=lambda e: e["start"])
+    out = []
+    for e in events:
+        if out:
+            p = out[-1]
+            inter = max(0.0, min(p["end"], e["end"]) - max(p["start"], e["start"]))
+            union = max(p["end"], e["end"]) - min(p["start"], e["start"])
+            if union > 1e-6 and inter / union > 0.5:
+                if e["conf"] > p["conf"]:
+                    out[-1] = e
+                continue
+            if e["start"] - p["end"] <= float(merge_gap):
+                p["end"] = max(p["end"], e["end"])
+                p["conf"] = max(p["conf"], e["conf"])
+                continue
+        out.append(dict(e))
+    res = []
+    for e in out:
+        a = max(0.0, min(total, e["start"]))
+        b = max(0.0, min(total, e["end"]))
+        if b - a < 0.02:
+            continue
+        res.append({"start": round(a, 3), "end": round(b, 3),
+                    "dur": round(b - a, 3), "conf": round(float(e["conf"]), 3)})
+    _vb_touch()
+    return res
 
 
 def _roformer_work_dir():
@@ -3932,8 +4448,12 @@ def _est_bytes(seconds, fmt="wav", bit_depth=16, channels=2, quality="standard",
     return int(seconds * kbps * 1000 / 8.0) + 4096
 
 
-def _export_plan(script, gap_override=None, uids=None):
-    """扫描一遍台本，算出每段的绝对起止（不读音频），用于导出与体积预估。"""
+def _export_plan(script, gap_override=None, uids=None, exact=True):
+    """扫描一遍台本，算出每段的绝对起止，用于导出与体积预估。
+
+    exact=True 时读音频文件的真实采样数（导出必须准）；False 时用 line["dur"]，
+    给估算用 —— 否则大台本每拖一下滑块都要 sf.info 上千个文件，界面会卡。
+    """
     sid = script["id"]
     wanted = set(uids) if uids else None
     items, missing = [], []
@@ -3947,7 +4467,7 @@ def _export_plan(script, gap_override=None, uids=None):
             items.append({"index": idx, "uid": line["uid"], "kind": "tag",
                           "tag": line.get("tag") or "标签", "text": "",
                           "start": cursor, "dur": hold / 1000.0,
-                          "path": None, "hold": hold})
+                          "path": None, "hold": hold, "pause": 0})
             cursor += hold / 1000.0
             continue
         if not (line.get("text") or "").strip():
@@ -3957,23 +4477,29 @@ def _export_plan(script, gap_override=None, uids=None):
             missing.append({"index": idx, "uid": line["uid"],
                             "reason": "未生成" if not line.get("out") else "需重新生成"})
             continue
-        try:
-            dur = float(line.get("dur") or 0)
-        except (TypeError, ValueError):
-            dur = 0.0
-        if dur <= 0.01:
+        # 时长一律以**音频文件真实长度**为准，不用 line["dur"]（它是两位小数）：
+        # 200 句各差 5ms，字幕末尾就能漂 1 秒。读不出来才退回字段值。
+        dur = 0.0
+        if exact:
             try:
                 info = sf.info(path)
                 dur = info.frames / float(info.samplerate or AUDIO_SR)
             except Exception:  # noqa: BLE001
+                pass
+        if dur <= 0.01:
+            try:
+                dur = float(line.get("dur") or 0)
+            except (TypeError, ValueError):
                 dur = 0.0
+        pause = gap_override if gap_override is not None else _eff(line, script)["pause"]
+        pause_ms = max(0, int(pause or 0))
+        # pause 必须跟着 item 走：写音频时要真的把这段静音写进去，否则
+        # SRT 里算进了停顿、拼接音频里却没写，越到后面偏得越多（实测 20 句差 3.8s）。
         items.append({"index": idx, "uid": line["uid"], "kind": "speech",
                       "text": line.get("text"), "tag": None,
-                      "start": cursor, "dur": dur, "path": path, "hold": 0})
-        cursor += dur
-        pause = gap_override if gap_override is not None else _eff(line, script)["pause"]
-        if pause:
-            cursor += int(pause) / 1000.0
+                      "start": cursor, "dur": dur, "path": path, "hold": 0,
+                      "pause": pause_ms})
+        cursor += dur + pause_ms / 1000.0
     return items, missing, cursor
 
 
@@ -3981,7 +4507,9 @@ def _export_estimate(script, gap_override=None, uids=None, fmt="wav", bit_depth=
                      quality="standard", channels=2, range_start=None, range_end=None,
                      sample_rate=AUDIO_SR):
     """只算不写：返回内容总时长、所选时段时长、预估字节数。"""
-    items, missing, total = _export_plan(script, gap_override, uids)
+    # 估算用字段时长即可：几十毫秒的差在「预计时长 / 体积」上看不出来，
+    # 但上千句逐个 sf.info 会明显拖慢滑块。
+    items, missing, total = _export_plan(script, gap_override, uids, exact=False)
     rs, re_ = _norm_range(range_start, range_end, total)
     span = max(0.0, re_ - rs)
     sr = _norm_sr(sample_rate, AUDIO_SR)
@@ -4042,18 +4570,30 @@ def _export(script, gap_override=None, uids=None, fmt="wav", bit_depth=16,
     if comp is not None:
         kwargs["compression_level"] = float(comp)
 
-    timeline, written, cursor = [], 0, 0.0
+    timeline, written, out_pos = [], 0, 0.0
+    span = max(0.0, re_ - rs)
     with sf.SoundFile(path, "w", **kwargs) as w:
+        def _silence(sec):
+            """往成品里写一段静音。停顿必须真的写进去，否则字幕会比声音越来越晚。"""
+            nonlocal written, out_pos
+            n = int(round(max(0.0, float(sec)) * target))
+            if n <= 0:
+                return
+            z = (np.zeros((n, ch), dtype="float32") if ch == 2
+                 else np.zeros(n, dtype="float32"))
+            w.write(z)
+            written += n
+            out_pos += n / float(target)
+
         for it in items:
             seg_start, seg_dur = it["start"], it["dur"]
-            cursor = seg_start + seg_dur
             if seg_start >= re_ - 1e-6:
                 break
             # 取这一段实际的波形（静音标签用零；语音读文件）
             if it["kind"] == "tag":
                 if seg_dur <= 0:
                     continue
-                data = np.zeros(int(target * seg_dur), dtype="float32")
+                data = np.zeros(int(round(target * seg_dur)), dtype="float32")
             else:
                 try:
                     data, sr = sf.read(it["path"], dtype="float32", always_2d=False)
@@ -4064,16 +4604,19 @@ def _export(script, gap_override=None, uids=None, fmt="wav", bit_depth=16,
                 if data.ndim > 1:
                     data = data.mean(axis=1)
                 data = np.clip(data, -1.0, 1.0).astype("float32", copy=False)
-                # 时长以真实文件为准（比 dur 字段更可靠），再重采样到目标采样率
-                seg_dur = len(data) / float(sr or AUDIO_SR)
-                cursor = seg_start + seg_dur
                 data = _resample_to(data, sr or AUDIO_SR, target)
+                # 以重采样后的真实长度为准：这是真正要写进成品的采样数
+                seg_dur = len(data) / float(target)
 
             # 与 [rs, re) 求交集
             a = max(seg_start, rs)
             b = min(seg_start + seg_dur, re_)
             if b - a <= 1e-6:
                 continue
+            # 先把「到这里为止」的静音补齐：句间停顿、标签留白、选区起点都在这一步对齐
+            lead = (a - rs) - out_pos
+            if lead > 1e-6:
+                _silence(min(lead, span - out_pos))
             i0 = int(round((a - seg_start) * target))
             i1 = int(round((b - seg_start) * target))
             i0 = max(0, min(i0, len(data)))
@@ -4083,18 +4626,29 @@ def _export(script, gap_override=None, uids=None, fmt="wav", bit_depth=16,
                 continue
             if ch == 2:
                 chunk = np.stack([chunk, chunk], axis=1)
+            start_out = out_pos
             w.write(chunk)
             written += len(chunk)
+            out_pos += len(chunk) / float(target)
+            end_out = out_pos
             if it["kind"] == "speech":
                 timeline.append({"index": it["index"], "uid": it["uid"], "kind": "speech",
                                  "text": it["text"], "tag": None,
-                                 "start": round(a, 3), "end": round(b, 3),
-                                 "dur": round(b - a, 3)})
+                                 "start": round(start_out, 3), "end": round(end_out, 3),
+                                 "dur": round(end_out - start_out, 3)})
             else:
                 timeline.append({"index": it["index"], "uid": it["uid"], "kind": "tag",
                                  "tag": it["tag"], "text": "",
-                                 "start": round(a, 3), "end": round(b, 3),
-                                 "dur": round(b - a, 3)})
+                                 "start": round(start_out, 3), "end": round(end_out, 3),
+                                 "dur": round(end_out - start_out, 3)})
+            # 句间停顿：真的写进音频。以前这里只加进 SRT 的时间计算里，
+            # 结果 20 句、每句 200ms，字幕末尾比音频晚 3.8 秒。
+            pause = float(it.get("pause") or 0) / 1000.0
+            if pause > 1e-6 and out_pos < span - 1e-6:
+                _silence(min(pause, span - out_pos))
+        # 末尾补齐到选区长度：体积预估、进度条、SRT 末尾三处才一致
+        if out_pos < span - 1e-6:
+            _silence(span - out_pos)
 
     srt_name = name.rsplit(".", 1)[0] + ".srt"
     with open(os.path.join(out_dir, srt_name), "w", encoding="utf-8") as f:
@@ -4103,9 +4657,9 @@ def _export(script, gap_override=None, uids=None, fmt="wav", bit_depth=16,
             if item["kind"] != "speech":
                 continue
             n += 1
-            # srt 以所选时段的起点为 0
-            f.write(f"{n}\n{_srt_time(max(0.0, item['start'] - rs))} --> "
-                    f"{_srt_time(max(0.0, item['end'] - rs))}\n{item['text']}\n\n")
+            # timeline 里已经是「相对成品 0 秒」的位置，不要再减 rs
+            f.write(f"{n}\n{_srt_time(item['start'])} --> "
+                    f"{_srt_time(item['end'])}\n{item['text']}\n\n")
     tl_name = name.rsplit(".", 1)[0] + ".timeline.json"
     _write_json(os.path.join(out_dir, tl_name), {
         "title": script.get("title"),
@@ -5376,6 +5930,7 @@ def register_longform(app, api, deps):
         dm = _demucs_state(probe_only=True)
         ro = _roformer_status()
         dn = _dnr_status()
+        vb = _vb_status()
         return {"ok": True, "ffmpeg": bool(ff), "ffmpeg_path": ff,
                 "video": bool(ff),
                 "audio_formats": sorted(x.lstrip(".") for x in AUDIO_EXTS),
@@ -5391,6 +5946,9 @@ def register_longform(app, api, deps):
                 "dnr": {"ready": bool(dn["ready"]), "reason": dn["reason"],
                         "count": len(dn["models"]), "dir": dn["dir"],
                         "pick": dn["pick"]},
+                "vocalburst": {"ready": bool(vb["ready"]), "reason": vb["reason"],
+                               "count": len(vb["models"]), "dir": vb["dir"],
+                               "pick": vb["pick"]},
                 "resample": "soxr",
                 "max_mb": MAT_MAX_BYTES // 1048576}
 
@@ -5439,6 +5997,15 @@ def register_longform(app, api, deps):
         right = 0.25 * np.sin(2 * np.pi * 330 * t) + 0.02 * np.random.randn(t.size)
         x = np.stack([left, right], axis=1).astype("float32")
         try:
+            if kind == "vocalburst":
+                # 合成音里没有人发出的非语言声音，事件数必然是 0；试跑只验
+                # 「权重能加载 + 前向能跑完」，不拿它判断灵敏度。
+                ev = _vb_detect(x, sr, mname, _VB_DEFAULTS["threshold"],
+                                _VB_DEFAULTS["merge_gap"], _VB_DEFAULTS["min_dur"])
+                return {"ok": True, "ms": int((time.time() - t0) * 1000),
+                        "kind": kind, "events": len(ev), "rms": 0.0,
+                        "model": mname or _vb_status()["pick"],
+                        "note": "合成音里没有非语音人声，0 个事件是正常的；链路已通。"}
             if kind == "dnr":
                 y = _dnr_separate(x, sr, "effects", mname)
             else:
@@ -5451,6 +6018,15 @@ def register_longform(app, api, deps):
         return {"ok": True, "ms": int((time.time() - t0) * 1000), "rms": round(rms, 5),
                 "kind": kind,
                 "model": mname or _SEPRO[kind]["status"]()["pick"]}
+
+    @lf.post("/lf/sepro/unload")
+    def lf_sepro_unload(payload: dict = Body(default=None)):
+        """手动释放可选模型占的显存。目前只有 VocalBurst 需要（它常驻约 2GB）。"""
+        kind = _sepro_kind((payload or {}).get("kind"))
+        if kind != "vocalburst":
+            return {"ok": True, "kind": kind, "freed": False}
+        freed = _vb_unload(force=True)
+        return {"ok": True, "kind": kind, "freed": bool(freed)}
 
     @lf.get("/lf/media")
     def lf_media_list():
@@ -6027,13 +6603,16 @@ def register_longform(app, api, deps):
             raise HTTPException(404, "作业已过期，请重新点「① 准备素材」")
         data, sr = _read_audio_any(meta["wav"])
         mode = str(req.get("mode") or "gap")
-        if mode not in ("gap", "fg", "onset", "srt"):
+        if mode not in ("gap", "fg", "onset", "srt", "vb"):
             mode = "gap"
         cues = req.get("cues") or []
+        events = req.get("events") or []
         if mode == "srt" and not cues:
             raise HTTPException(400, "按字幕切分需要先载入 SRT（或用「不分离」直接切）")
+        if mode == "vb" and not events:
+            raise HTTPException(400, "按非语音人声切分要先跑一次检测")
         segs, fell_back = _sfxb_segments(
-            data, sr, mode=mode, cues=cues,
+            data, sr, mode=mode, cues=cues, events=events,
             min_gap=float(req.get("min_gap") or 0.35),
             min_len=float(req.get("min_len") or 0.2),
             thresh_db=float(req.get("thresh_db") or 10.0),
@@ -6044,6 +6623,95 @@ def register_longform(app, api, deps):
         return {"ok": True, "mode": mode, "fell_back": bool(fell_back), "count": len(segs),
                 "covered": round(sum(s["dur"] for s in segs), 2),
                 "dur": round(total, 2), "segments": segs}
+
+    @lf.post("/lf/sfxb/vb/detect")
+    def lf_sfxb_vb_detect(req: dict = Body(default=None)):
+        """跑一次 VocalBurst，返回事件区间（秒）+ 与字幕/重复片段的关系。
+
+        这是「给非语音人声加一条字幕轨」的入口：只产区间，不改任何片段。
+        前端可以选择把事件直接变成片段（/sfxb/segment mode=vb），也可以只画出来看。
+        """
+        req = req or {}
+        meta = _sfxb_job(req.get("job"))
+        if not meta:
+            raise HTTPException(404, "作业已过期，请重新准备素材")
+        data, sr = _read_audio_any(meta["wav"])
+        total = len(data) / float(sr)
+        thr = float(req.get("threshold") or _VB_DEFAULTS["threshold"])
+        gap = float(req.get("merge_gap") or _VB_DEFAULTS["merge_gap"])
+        mind = float(req.get("min_dur") or _VB_DEFAULTS["min_dur"])
+        thr = min(0.95, max(0.05, thr))
+        gap = min(2.0, max(0.0, gap))
+        mind = min(1.0, max(0.02, mind))
+        t0 = time.time()
+        try:
+            events = _vb_detect(data, sr, (req.get("model") or "").strip() or None,
+                                thr, gap, mind)
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(400, "检测失败：%s: %s" % (type(e).__name__, e))
+
+        # 和字幕轨交叉：落在台词区间里的 burst 才是「台词中的喘息/笑」，
+        # 这是人耳最容易漏、也最值得单独挑出来的一类。
+        cues = req.get("cues") or []
+        spans = []
+        for c in cues:
+            try:
+                if isinstance(c, (list, tuple)):
+                    a, b = float(c[0]), float(c[1])
+                else:
+                    a, b = float(c.get("t0")), float(c.get("t1"))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if b > a:
+                spans.append((a, b))
+        for ev in events:
+            a, b = ev["start"], ev["end"]
+            best, best_ov = 0, 0.0
+            for i, (c0, c1) in enumerate(spans):
+                ov = max(0.0, min(b, c1) - max(a, c0))
+                if ov > best_ov:
+                    best, best_ov = i + 1, ov
+            ev["cue"] = best if best_ov > 0.02 else 0
+            ev["in_cue"] = bool(best) and best_ov >= (b - a) * 0.3
+            ev["cue_ov"] = round(best_ov, 3)
+            ev["type"] = ""                    # 没有分类器时留空，前端按前缀命名
+
+        cls = _vb_status().get("classifier") or {}
+        if events and req.get("classify", True) and cls.get("ready"):
+            _vb_classify_events(data, sr, events)
+
+        # 同一段素材里反复出现的同一种声音（关门 20 次、每句都吸一口气）：
+        # 用梅尔谱指纹分组，前端可以「每组只留第一个」。
+        vects = []
+        for ev in events[:300]:
+            vects.append(_sfxb_fingerprint(data, sr, ev["start"], ev["end"]))
+        groups, gid = [], 0
+        used = [False] * len(events)
+        for i, v in enumerate(vects):
+            if v is None or used[i]:
+                continue
+            gid += 1
+            used[i] = True
+            for j in range(i + 1, len(vects)):
+                w = vects[j]
+                if w is None or used[j]:
+                    continue
+                if float(np.dot(v, w)) >= 0.985:
+                    used[j] = True
+                    events[j]["dup"] = gid
+                    groups.append([i, j])
+            events[i]["dup"] = 0
+        return {"ok": True, "events": events, "count": len(events),
+                "ms": int((time.time() - t0) * 1000), "dur": round(total, 2),
+                "threshold": thr, "merge_gap": gap, "min_dur": mind,
+                "model": (req.get("model") or _vb_status()["pick"]),
+                "device": _VB["dev"] or _vb_status().get("device") or "",
+                "dups": sum(1 for e in events if e.get("dup")),
+                "in_cue": sum(1 for e in events if e.get("in_cue")),
+                "typed": sum(1 for e in events if e.get("type")),
+                "classifier": cls}
 
     @lf.post("/lf/sfxb/save")
     def lf_sfxb_save(req: dict = Body(default=None)):
@@ -6113,6 +6781,9 @@ def register_longform(app, api, deps):
             op = "音效台 · %s" % (meta.get("engine") or "未分离")
             if labels:
                 op += " + " + "+".join(dict.fromkeys(labels))
+            note = str(it.get("note") or "").strip()
+            if note:
+                op += " · " + note[:60]
             _t0 = time.time()
             if target == "sfx":
                 made.append(_save_sfx_item(seg, sr2, name, meta["name"], "derived",
@@ -7602,8 +8273,24 @@ def register_longform(app, api, deps):
                 extra = [e for e in extra if e]
                 if extra:
                     txt = (txt + " " + " ".join("〔%s〕" % e for e in extra)).strip()
+            if not txt:
+                # 空行/纯占位行不占时间：拼接导出里它本来就不会写入音频，
+                # 这里要是给它估 0.4 秒，字幕会凭空往后挪。
+                continue
+            if ln.get("status") == "stale":
+                # 过期行不会进拼接音频（_export_plan 会跳过），字幕也不能给它留位置
+                continue
             if ln.get("out") and ln.get("dur"):
+                # 和拼接导出用同一个长度来源：音频文件的真实采样数，而不是两位小数的 dur。
+                # 否则单独导出的 SRT 会和成品音频差出「每句几毫秒 × 句数」。
                 dur = float(ln["dur"])
+                try:
+                    _p = os.path.join(_script_dir(sid), "audio",
+                                      os.path.basename(ln["out"]))
+                    _info = sf.info(_p)
+                    dur = _info.frames / float(_info.samplerate or AUDIO_SR)
+                except Exception:  # noqa: BLE001
+                    pass
                 gen += 1
             else:
                 # 没生成：按字数估。至少 0.4 秒，避免一个字一行时贴着下一句

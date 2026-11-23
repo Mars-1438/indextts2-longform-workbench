@@ -1108,7 +1108,7 @@
             </span>
           </button>
           <button id="btnRoPanel" class="bigentry ghost" type="button" aria-expanded="false"
-                  title="可选增强：BS-Roformer 等人声分离模型（不装也能用 Demucs）">
+                  title="可选增强：BS-Roformer / DnR 分离模型 + VocalBurst 非语音人声检测（不装也能用 Demucs）">
             <span class="bi">🧩</span>
             <span class="btxt">
               <b>模型拓展</b>
@@ -1131,8 +1131,9 @@
             <div class="ronote">
               <b>这里的每一项都是可选项，</b>放了模型才会出现在引擎下拉里，不放不影响任何现有功能。
               每一项对应一类活儿：<b>BS-Roformer</b> 管「人声 / 伴奏」二分离，
-              <b>DnR</b> 管「对白 / 音乐 / 音效」三分。都走同一个推理后端 pymss，
-              装一次就够（见下面第一项的第 1 步）。
+              <b>DnR</b> 管「对白 / 音乐 / 音效」三分，<b>VocalBurst</b> 管「非语音人声在哪几秒」
+              （不是分离，是打时间戳）。前两个都走同一个推理后端 pymss，
+              装一次就够（见下面第一项的第 1 步）；VocalBurst 走 transformers，不需要 pymss。
               <br>以后要接别的模型，也是在这里加一个折叠项 —— 面板结构不用再改。
             </div>
 
@@ -1340,6 +1341,115 @@ runtime\python.exe -m pip install pymss</pre>
             </div>
             </div>
             </details>
+
+            <details class="mfold" id="mfVb">
+            <summary>
+              <span class="mf-i">🔍</span>
+              <b>VocalBurst</b>
+              <span class="hint mf-sub">非语音人声事件轨（笑 / 喘 / 叹气）</span>
+              <span class="mf-st" id="vbStTag">检测中…</span>
+            </summary>
+            <div class="mf-body">
+            <div class="ronote">
+              <b>它不是分离模型。</b>BS-Roformer 和 DnR 都在「拆轨道」，
+              VocalBurst 只回答一个问题：<b>第 12.4 秒到 13.1 秒，是不是有一次人发出的非语言声音？</b>
+              （笑、喘、叹气、抽气、咳、清嗓、咂嘴、舔耳……）<br>
+              这件事 DnR 做不到：它把喘息和台词一起放进 Speech 轨。
+              VocalBurst 不拆轨，但能给出<b>区间 + 置信度</b>，
+              在高级音频处理台里画成一条与字幕并列的「事件轨」，也能直接按事件切段、自动命名。
+            </div>
+
+            <div class="ffbar" id="vbBar">
+              <div class="ffline">
+                <span class="ffdot" id="vbDot"></span>
+                <span class="hint grow" id="vbState">正在检测模型目录…</span>
+              </div>
+              <div class="ffbtns">
+                <button class="btn mini ghost" id="btnVbOpen" type="button"
+                        title="在资源管理器里打开模型目录（不存在会自动建）">📂 打开模型目录</button>
+                <button class="btn mini ghost" id="btnVbScan" type="button"
+                        title="重新扫一遍目录（放完模型不用重启）">⟳ 重新检测</button>
+                <button class="btn mini ghost" id="btnVbTest" type="button"
+                        title="加载权重 + 跑一次 3 秒前向，确认链路能通（不评判灵敏度）">▶ 试跑一次</button>
+                <button class="btn mini ghost" id="btnVbFree" type="button"
+                        title="把 VocalBurst 从显存里卸掉（约 2GB）。闲置十分钟也会自动释放">🧹 释放显存</button>
+              </div>
+            </div>
+            <div class="hint mono" id="vbDir" style="margin-top:6px;word-break:break-all"></div>
+            <div class="hint" id="vbWhy" style="margin-top:4px"></div>
+
+            <div class="rohelp">
+              <div class="rohelp-t">它适合干什么、不适合干什么</div>
+              <table class="rotbl">
+                <thead><tr><th>场景</th><th>能不能用 VocalBurst</th></tr></thead>
+                <tbody>
+                  <tr class="rec"><td>找出笑声 / 咳嗽 / 抽气 / 叹气 / 清嗓在第几秒</td><td><b>能</b>，事件级时间戳</td></tr>
+                  <tr class="rec"><td>把事件变成带名字的片段（喘息-001）</td><td><b>能</b>，处理台里直接生成</td></tr>
+                  <tr><td>判断这次喘息是「舒服」还是「难受」</td><td>不能 —— 只检测、不分类</td></tr>
+                  <tr><td>把叠在台词里的喘息单独抠出来</td><td>不能 —— 只给区间，不分离</td></tr>
+                  <tr><td>持续的喘息 / 舔耳（不是短事件）</td><td>经常检不到 —— 用「按静音间隔」切更合适</td></tr>
+                </tbody>
+              </table>
+              <div class="hint">
+                官方在 992 条真实表达性语音上事件级 F1 是 <b>0.607</b>（阈值 0.50）：
+                漏检和误检各占三成左右。它的定位是「提示人去看」，不是「自动决定留删」。
+                另外，真实 burst 的时长中位数只有约 <b>180ms</b>，所以处理台里最短事件默认 0.1 秒，
+                不要照旧脚本改成 0.5 秒（那会丢掉 96% 的事件）。
+              </div>
+
+              <div class="rostep">
+                <b>1　下检测权重（972MB）</b>
+                <div class="hint">
+                  Apache-2.0，可随包分发，但不进补丁包。用镜像下（直连 HF 不通时也能用）：
+                </div>
+                <pre class="rocmd" id="vbCmdDown">set HF_ENDPOINT=https://hf-mirror.com
+runtime\python.exe -c "from huggingface_hub import hf_hub_download as d; d('laion/vocalburst-locator','model_v2.pt',local_dir=r'vendor2\vocalburst')"</pre>
+                <div class="ffbtns">
+                  <button class="btn mini ghost" type="button" data-copy="vbCmdDown">复制命令</button>
+                  <span class="hint" id="vbDlHint"></span>
+                </div>
+              </div>
+
+              <div class="rostep">
+                <b>2　下 Whisper-small 底座（967MB）</b>
+                <div class="hint">
+                  检测网络用 Whisper-small 的编码器当特征提取器；它不参与生成，只做「听」。
+                  必须放在模型目录下的 <code>whisper-small\</code> 子目录里。
+                </div>
+                <pre class="rocmd" id="vbCmdWhisper">runtime\python.exe -c "from huggingface_hub import snapshot_download as s; s('openai/whisper-small', local_dir=r'vendor2\vocalburst\whisper-small', allow_patterns=['config.json','preprocessor_config.json','generation_config.json','model.safetensors','tokenizer*','vocab.json','merges.txt','normalizer.json','added_tokens.json','special_tokens_map.json'])"</pre>
+                <div class="ffbtns">
+                  <button class="btn mini ghost" type="button" data-copy="vbCmdWhisper">复制命令</button>
+                </div>
+                <div class="hint">
+                  手动下也行：<a href="https://hf-mirror.com/laion/vocalburst-locator" target="_blank" rel="noopener">vocalburst-locator</a>
+                  （要 <code>model_v2.pt</code>，不要 <code>model.pt</code> —— 那是合成数据训练的旧版）
+                  和 <a href="https://hf-mirror.com/openai/whisper-small" target="_blank" rel="noopener">whisper-small</a>。
+                </div>
+              </div>
+
+              <div class="rostep">
+                <b>3　可选：类型名（再 465MB）</b>
+                <div class="hint">
+                  不放也能用，只是片段统一叫「非语音人声-001」。
+                  放了 82 类分类器之后，会按粗类型命名：<b>喘息-001 / 笑-002 / 叹气-003</b>。
+                  官方 fine top-1 只有 49%，所以只在<b>组置信度 ≥ 0.45</b> 时才写类型，
+                  拿不准就退回通用名 —— 不会硬猜。
+                </div>
+                <pre class="rocmd" id="vbCmdCls">set HF_ENDPOINT=https://hf-mirror.com
+runtime\python.exe -c "from huggingface_hub import snapshot_download as s; s('laion/voiceclap-commercial', local_dir=r'vendor2\vocalburst\voiceclap', allow_patterns=['*.json','*.py','model.safetensors']); s('laion/vocalburst-classifier-single', local_dir=r'vendor2\vocalburst\classifier')"</pre>
+                <div class="ffbtns">
+                  <button class="btn mini ghost" type="button" data-copy="vbCmdCls">复制命令</button>
+                </div>
+              </div>
+
+              <div class="hint">
+                都放好后点「⟳ 重新检测」。之后高级音频处理台会出现
+                「④.5 非语音人声」：可以只画事件轨，也可以一键生成带名字的片段。
+                没放模型时这块是灰的，不影响分离、切分、入库任何现有流程。
+              </div>
+            </div>
+            </div>
+            </details>
           </div>
         </div>
 
@@ -1378,6 +1488,6 @@ runtime\python.exe -m pip install pymss</pre>
 <script src="/longform-assets/libfolders.js?v=20261104c"></script>
 <script src="/longform-assets/emoctl.js?v=20261102b"></script>
 <script src="/longform-assets/genparams.js?v=20261102b"></script>
-<script src="/longform-assets/longform.js?v=20261105a"></script>
+<script src="/longform-assets/longform.js?v=20261105e"></script>
 </body>
 </html>

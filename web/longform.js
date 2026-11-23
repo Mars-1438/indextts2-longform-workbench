@@ -6806,9 +6806,10 @@ function roShortName(n, max) {
 }
 
 /* 把「能不能用 Roformer」落到两个引擎下拉上 */
-function applySepCaps(ro, dnr) {
+function applySepCaps(ro, dnr, vb) {
   MAT.ro = ro || null;
   MAT.dnr = dnr || null;
+  MAT.vb = vb || null;
   const ready = !!(ro && ro.ready);
   const dReady = !!(dnr && dnr.ready);
   const nm = roShortName(ro && ro.pick, 12);
@@ -6849,6 +6850,7 @@ function applySepCaps(ro, dnr) {
   });
   roPaint(ro);
   dnrPaint(dnr);
+  vbPaint(vb);
 }
 
 /* 「模型拓展」面板开合。展开时把按钮切到 active 态、顺手把内容滚进视野；
@@ -6877,12 +6879,14 @@ function roPaint(ro) {
   if (bar) { bar.classList.toggle("ok", ready); bar.classList.toggle("bad", !ready); }
   if (dir) dir.textContent = (ro && ro.dir) || "";
   if (sum) {
-    // 副标题直接写模型名（比「已就绪 · 1 个模型」有用：一眼知道跑的是哪个权重）
-    const nm = String((ro && ro.pick) || "").replace(/\.[a-z]+$/i, "");
-    const short = nm.length > 22 ? nm.slice(0, 22) + "…" : nm;
-    sum.textContent = ready ? `（BS-Roformer · ${short}）`
+    // 副标题写「哪几项已经就绪」：现在有三项，只写 BS 会让人以为另外两个没生效
+    const names = [];
+    if (ready) names.push("BS-Roformer");
+    if (MAT.dnr && MAT.dnr.ready) names.push("DnR");
+    if (MAT.vb && MAT.vb.ready) names.push("VocalBurst");
+    sum.textContent = names.length ? `（${names.join(" / ")} 已就绪）`
       : (n ? `（有 ${n} 个模型，缺推理后端）` : "（可选 · 未启用）");
-    sum.title = ready ? (ro && ro.pick) || "" : "";
+    sum.title = names.join(" / ");
   }
   if (st) {
     if (ready) {
@@ -6919,7 +6923,7 @@ function roPaint(ro) {
 }
 
 async function roLoad(force) {
-  let ro = null, dnr = null;
+  let ro = null, dnr = null, vb = null;
   try {
     ro = await api("/sepro/status" + (force ? "?force=1&kind=roformer" : "?kind=roformer"));
   } catch (e) {
@@ -6930,7 +6934,12 @@ async function roLoad(force) {
   } catch (e) {
     dnr = { ready: false, models: [], reason: "检测失败：" + e.message, pymss: {} };
   }
-  applySepCaps(ro, dnr);
+  try {
+    vb = await api("/sepro/status" + (force ? "?force=1&kind=vocalburst" : "?kind=vocalburst"));
+  } catch (e) {
+    vb = { ready: false, models: [], reason: "检测失败：" + e.message, whisper: {} };
+  }
+  applySepCaps(ro, dnr, vb);
   return ro;
 }
 
@@ -6969,6 +6978,39 @@ function dnrPaint(d) {
   if (dlh) dlh.textContent = py.ok ? "已装好后端，可以直接跑" : "先装 pymss（上面第 1 步）";
 }
 
+/* VocalBurst 面板：比前两个简单 —— 不需要 pymss，只认「权重 + Whisper 底座」两样。
+   状态必须分开说：有检测权重但没底座时，用户会以为是模型坏了，其实只差一个目录。 */
+function vbPaint(v) {
+  const ready = !!(v && v.ready);
+  const n = ((v && v.models) || []).length;
+  const w = (v && v.whisper) || {};
+  const bar = $("vbBar"), st = $("vbState"), dir = $("vbDir"), why = $("vbWhy");
+  const tag = $("vbStTag");
+  if (bar) { bar.classList.toggle("ok", ready); bar.classList.toggle("bad", !ready); }
+  if (dir) dir.textContent = (v && v.dir) || "";
+  if (st) {
+    if (ready) {
+      const cl = (v && v.classifier) || {};
+      st.innerHTML = `已就绪：<b>${_roEsc(v.pick)}</b> · Whisper-small${v.device ? ` · ${_roEsc(v.device)}` : ""}`
+        + "（给非语音人声打时间戳，不分离）"
+        + (cl.ready ? " · 类型名已启用" : " · 未装类型分类器（统一用前缀命名）");
+    } else if (n && !w.ok) {
+      st.innerHTML = `检测到 <b>${n}</b> 个权重，但缺 <b>Whisper-small 底座</b> —— 看下面第 2 步`;
+    } else if (n) {
+      st.innerHTML = `检测到 <b>${n}</b> 个权重`;
+    } else {
+      st.textContent = "还没放模型：只在你需要「自动标出喘息 / 笑 / 叹气在第几秒」时才装";
+    }
+  }
+  if (why) why.textContent = (v && v.reason) ? "· " + v.reason : "";
+  if (tag) {
+    tag.className = "mf-st " + (ready ? "ok" : "off");
+    tag.textContent = ready ? "已就绪" : (n ? "缺底座" : "未安装");
+  }
+  const dlh = $("vbDlHint");
+  if (dlh) dlh.textContent = ready ? "已经装好了" : "约 972MB，下到模型目录";
+}
+
 function roBind() {
   // 两个可选模型共用一套交互：按钮 id 前缀不同，动作完全一样（只是 kind 参数不同）
   const kinds = [
@@ -6976,6 +7018,8 @@ function roBind() {
       state: "roState", label: "BS-Roformer" },
     { kind: "dnr", open: "btnDnrOpen", scan: "btnDnrScan", test: "btnDnrTest",
       state: "dnrState", label: "DnR" },
+    { kind: "vocalburst", open: "btnVbOpen", scan: "btnVbScan", test: "btnVbTest",
+      state: "vbState", label: "VocalBurst" },
   ];
   kinds.forEach(({ kind, open, scan, test, state, label }) => {
     const bo = $(open);
@@ -6996,7 +7040,7 @@ function roBind() {
         try {
           await roLoad(true);
           const st = $(state);
-          const ok = st && !/还没放模型|缺同名|差推理后端|检测失败/.test(st.textContent || "");
+          const ok = st && !/还没放模型|缺同名|差推理后端|缺 Whisper|缺底座|检测失败/.test(st.textContent || "");
           toast(ok ? `已检测到 ${label}，引擎里可以选了` : ((st && st.textContent) || "还没检测到模型"), !ok);
         } finally { bs.disabled = false; }
       };
@@ -7024,6 +7068,21 @@ function roBind() {
       };
     }
   });
+  const bf = $("btnVbFree");
+  if (bf && !bf._b) {
+    bf._b = true;
+    bf.onclick = async () => {
+      bf.disabled = true;
+      try {
+        const r = await api("/sepro/unload", { method: "POST", body: { kind: "vocalburst" } });
+        toast(r.freed ? "已释放 VocalBurst 显存（下次检测会重新加载）" : "当前没有常驻显存可释放");
+        await roLoad(true);
+      } catch (e) {
+        toast("释放失败：" + e.message, true);
+      } finally { bf.disabled = false; }
+    };
+  }
+
   // 所有「复制」按钮共用一套：data-copy 指向要复制的 <pre>
   document.querySelectorAll("#roDetails [data-copy]").forEach((btn) => {
     if (btn._b) return;
@@ -12484,6 +12543,8 @@ window.__lfDebug = {
     return p ? applyPresetToLines(p, uids) : 0;
   },
   repaint() { renderCenter(); renderStats(); paintRender(); },
+  get vb() { return (MAT && MAT.vb) || null; },
+  loadCaps(force) { return roLoad(!!force); },
 };
 
 boot();

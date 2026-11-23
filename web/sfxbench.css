@@ -166,6 +166,7 @@ body {
 .trk-dot.raw { background: #c8a15a; }
 .trk-dot.proc { background: var(--accent); }
 .trk-dot.srt { background: var(--teal); }
+.trk-dot.vb { background: #c77d2e; }
 
 /* 每轨左上角的状态胶囊：播放中 / 已静音 / 待命。
    只靠按钮图标很难看出"现在到底在放哪条、哪条被静音了"，这里用文字直说。 */
@@ -183,6 +184,17 @@ body {
   background: rgba(190,66,80,.10); font-weight: 600;
 }
 .tstate.srt { color: var(--teal); border-color: rgba(23,146,153,.4); background: rgba(23,146,153,.08); }
+.tstate.vb { color: #a3601d; border-color: rgba(199,125,46,.45); background: rgba(199,125,46,.09); }
+html[data-theme="dark"] .tstate.vb { color: #e3ab6b; }
+
+/* 非语音人声：事件轨 + 检测参数折叠 */
+#waveVb { display: block; width: 100%; height: 62px; cursor: pointer; touch-action: none; }
+.vb-opt { margin-top: 7px; border-top: 1px dashed var(--border); padding-top: 6px; }
+.vb-opt > summary { cursor: pointer; font-size: 10.5px; color: var(--muted); list-style: none; }
+.vb-opt > summary::-webkit-details-marker { display: none; }
+.vb-opt > summary::before { content: "▸ "; color: var(--faint); }
+.vb-opt[open] > summary::before { content: "▾ "; }
+.vb-opt .row2, .vb-opt .grid2 { margin-top: 6px; }
 /* 轨道跟播放头走的当前时间（两条轨同一个时间，便于 A/B 对齐） */
 .tcur { flex: none; font-size: 9.5px; color: var(--faint); min-width: 40px; }
 

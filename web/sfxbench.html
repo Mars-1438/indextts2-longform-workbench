@@ -16,7 +16,7 @@
   });
 })();
 </script>
-<link rel="stylesheet" href="/sfxbench-assets/sfxbench.css?v=20261104h">
+<link rel="stylesheet" href="/sfxbench-assets/sfxbench.css?v=20261105b">
 </head>
 <body>
 
@@ -128,6 +128,50 @@
       <div class="hint" id="srtHint">把原音声的字幕放进来，会多出一条字幕轨：每句一块，点一下就跳到那句。</div>
       <label class="mini-chk"><input type="checkbox" id="srtShow" checked> 显示字幕轨</label>
       <button class="btn mini wide" id="btnSrtNext" type="button" disabled>→ 跳到下一条字幕</button>
+    </section>
+
+    <section class="sb-card" id="cardVb">
+      <div class="sb-h"><i>4.5</i>非语音人声<span class="hint">（VocalBurst · 可选）</span>
+        <button class="sb-hbtn" type="button" data-help="vb" title="这一块怎么用">?</button>
+      </div>
+      <button class="btn wide" id="btnVbRun" type="button"
+              title="找出笑 / 喘 / 叹气 / 咳 / 抽气 / 清嗓 / 咂嘴这类「人发出、但不是语言」的声音">🔍 找非语音人声</button>
+      <div class="hint" id="vbHint">给非语音人声加一条<b>事件轨</b>：不靠响度、不靠字幕，直接说「第几秒到第几秒有一次」。
+        检测完可以自动变成带名字的片段。</div>
+      <details class="vb-opt" id="vbOpt">
+        <summary>灵敏度 / 命名 / 自动成段</summary>
+        <div class="row2">
+          <span class="hint">灵敏度</span>
+          <select class="sel" id="vbPreset" title="阈值越低标得越多；官方在真实录音上的最佳点是 0.50">
+            <option value="0.5">稳（0.50 · 官方推荐）</option>
+            <option value="0.35" selected>敏感（0.35 · 适合 ASMR）</option>
+            <option value="0.25">很敏感（0.25 · 宁可多标）</option>
+            <option value="custom">自定义…</option>
+          </select>
+        </div>
+        <div class="grid2">
+          <label>阈值<input class="inp" id="vbThr" type="number" min="0.05" max="0.95" step="0.05" value="0.35"></label>
+          <label>最短<input class="inp" id="vbMin" type="number" min="0.02" max="2" step="0.02" value="0.1"><i>秒</i></label>
+          <label>合并<input class="inp" id="vbGap" type="number" min="0" max="2" step="0.05" value="0.1"><i>秒</i></label>
+        </div>
+        <div class="row2">
+          <span class="hint">命名</span>
+          <input class="inp" id="vbPrefix" value="非语音人声" autocomplete="off"
+                 title="这一批片段的命名前缀。当前版本只做检测，不判断类型（喘 / 笑 / 叹气），所以统一用这个前缀">
+        </div>
+        <label class="mini-chk"><input type="checkbox" id="vbAutoSeg" checked> 检测完直接替换成片段</label>
+        <label class="mini-chk"><input type="checkbox" id="vbDropDup"> 同一种声音只留第一次（查重）</label>
+        <label class="mini-chk"><input type="checkbox" id="vbOnlyCue"> 只要句内事件（台词里夹着的那一声）</label>
+        <div class="hint" id="vbDupHint"></div>
+        <button class="btn mini ghost" id="btnVbFree" type="button"
+                title="把 VocalBurst 从显存里卸掉（约 2GB）；不点也会在闲置十分钟后自动释放">🧹 释放显存</button>
+      </details>
+      <div class="sb-warn" id="vbWarn" hidden></div>
+      <div class="hint" id="vbStat"></div>
+      <div class="row2" style="margin-top:6px">
+        <button class="btn mini" id="btnVbApply" type="button" disabled>用事件生成片段</button>
+        <button class="btn mini ghost" id="btnVbSrt" type="button" disabled title="事件轨导出成 SRT：别的软件也能当时码表用">⤓ 事件轨 .srt</button>
+      </div>
     </section>
 
     <section class="sb-card" id="cardPlan">
@@ -300,6 +344,21 @@
         <canvas id="waveSrt"></canvas>
       </div>
 
+      <!-- 非语音人声事件轨：只读，每块一次「笑 / 喘 / 叹气 / 咳」 -->
+      <div class="sb-trk" id="trkVb" hidden>
+        <div class="sb-trk-h">
+          <span class="trk-dot vb"></span><b>非语音人声</b>
+          <span class="tstate vb" id="vbState">事件轨</span>
+          <button class="tbtn tp" id="btnVbPlay" type="button" title="播当前这一个事件">▶</button>
+          <button class="tbtn" id="btnVbPrev" type="button" title="上一个事件">◀</button>
+          <button class="tbtn" id="btnVbNext" type="button" title="下一个事件">▶</button>
+          <label class="mini-chk" style="margin-left:2px"><input type="checkbox" id="vbShow" checked> 显示</label>
+          <span class="spacer"></span>
+          <span class="hint" id="vbTrackInfo"></span>
+        </div>
+        <canvas id="waveVb"></canvas>
+      </div>
+
       <div class="sb-playbar">
         <button class="btn" id="btnPlayAll" type="button">▶ 播放</button>
         <label class="mini-chk" title="单段试听时循环这一小段"><input type="checkbox" id="loopSeg"> 循环</label>
@@ -394,6 +453,6 @@
 <div class="toast" id="toast" hidden></div>
 
 <script src="/sfxbench-assets/libfolders.js?v=20261104c"></script>
-<script src="/sfxbench-assets/sfxbench.js?v=20261104k"></script>
+<script src="/sfxbench-assets/sfxbench.js?v=20261105h"></script>
 </body>
 </html>

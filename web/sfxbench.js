@@ -27,6 +27,7 @@ const S = {
   playSeg: null,                 // 正在试听哪一段（列表 / 轨道按钮据此显示 ⏸）
   tool: "select", busy: false, drag: null, undo: [], redo: [], edited: false,
   cueCur: -1, hover: null,
+  vb: [], vbShow: true, vbBusy: false, vbCur: -1, vbMeta: null,
   saveFolder: "", batchFolder: true, plans: [], scrub: null,
   stem: "instrumental",     // instrumental=去人声 / vocals=去伴奏 / none=原样
   mapPlan: null,            // 对位预览结果（只用于显示，写入时重算）
@@ -371,7 +372,8 @@ function paintStem() {
     : "不做分离，直接在原音上切 —— 本来就是音效的素材用这一档。";
 }
 
-async function doPrepare() {
+async function doPrepare(opt) {
+  opt = opt || {};
   if (!S.curMid) return toast("先在左边选一个素材", true);
   if (S.busy) return;
   // 重新准备 = 换作业，当前片段会整份消失；和「重新切分」一样先问一句
@@ -403,7 +405,9 @@ async function doPrepare() {
     S.durRaw = r.raw_dur || S.dur;
     S.sr = r.sr || 44100;
     S.segs = []; S.sel.clear(); S.curSeg = -1; S.anchor = -1;
+    S.vb = []; S.vbCur = -1; S.vbMeta = null;
     S.dup.clear(); S.dupGroups = []; S.undo = []; S.redo = []; S.cueCur = -1; S.edited = false;
+    try { paintVb(null); } catch (e) { /* 初始化阶段 DOM 可能还没齐 */ }
     S.limit = 240;
     S.playSeg = null;
     resetView();
@@ -430,8 +434,9 @@ async function doPrepare() {
     btn.textContent = old;
     btn.disabled = !S.curMid;
   }
-  // 切分要等 busy 放掉再调（doSegment 自己有 busy 保护，放在 try 里会被它自己挡掉）
-  if (prepared) await doSegment();
+  // 切分要等 busy 放掉再调（doSegment 自己有 busy 保护，放在 try 里会被它自己挡掉）。
+  // 非语音人声检测会自己生成片段，所以它走 noSeg，别让默认的「按静音切」先跑一遍。
+  if (prepared && !opt.noSeg) await doSegment();
 }
 
 function loadAudio(r) {
@@ -680,6 +685,345 @@ function cueAt(t) {
 }
 
 /* ---------------- 视图（缩放 / 平移） ---------------- */
+/* ---------------- 非语音人声事件轨（VocalBurst） ----------------
+   它和「字幕轨」是两条互补的时间轴：
+     字幕   —— 人在说话的时间（台词）
+     事件轨 —— 人发出非语言声音的时间（笑 / 喘 / 叹气 / 咳 / 抽气 / 清嗓 / 咂嘴）
+   两条一减，就能分出「纯音效区」「台词区」「台词里夹着的喘息」。
+   模型只给区间 + 置信度，不给类型、也不做分离；所以这里只做两件事：
+   把区间画出来、把区间变成带名字的片段。 */
+
+const VB_PRESETS = {
+  "0.5": { thr: 0.5, min: 0.1, gap: 0.1 },
+  "0.35": { thr: 0.35, min: 0.08, gap: 0.12 },
+  "0.25": { thr: 0.25, min: 0.06, gap: 0.15 },
+};
+
+function vbParams() {
+  return {
+    threshold: parseFloat($("vbThr").value || "0.35"),
+    min_dur: parseFloat($("vbMin").value || "0.08"),
+    merge_gap: parseFloat($("vbGap").value || "0.12"),
+  };
+}
+
+function vbPresetSync() {
+  const v = $("vbPreset").value;
+  const p = VB_PRESETS[v];
+  if (!p) return;
+  $("vbThr").value = p.thr;
+  $("vbMin").value = p.min;
+  $("vbGap").value = p.gap;
+}
+
+function vbName(ev, i, total, counters) {
+  const base = (ev && ev.type) || ($("vbPrefix").value || "").trim() || "非语音人声";
+  const w = Math.max(3, String(total || 1).length);
+  // 有类型时按类型各自编号（喘息-001 / 笑-001），比全局流水号好找；
+  // 没类型时只有一种前缀，等价于全局编号。
+  const n = counters ? (counters[base] = (counters[base] || 0) + 1) : (i + 1);
+  return `${base}-${String(n).padStart(w, "0")}`;
+}
+
+/* 下拉选项里只留「这次真的要生成」的事件：勾了查重就每组只留第一条 */
+function vbPicked() {
+  const drop = $("vbDropDup").checked;
+  const onlyCue = $("vbOnlyCue").checked;
+  const out = [];
+  S.vb.forEach((ev, i) => {
+    if (drop && ev.dup) return;
+    if (onlyCue && !ev.in_cue) return;
+    out.push({ ev, i });
+  });
+  return out;
+}
+
+function vbStatText(r) {
+  if (!r) return "";
+  const evs = r.events || [];
+  const cover = evs.reduce((a, e) => a + (e.end - e.start), 0);
+  const conf = evs.length ? evs.reduce((a, e) => a + e.conf, 0) / evs.length : 0;
+  const inCue = evs.filter((e) => e.in_cue).length;
+  const dup = evs.filter((e) => e.dup).length;
+  const typed = evs.filter((e) => e.type).length;
+  const bits = [
+    `检测到 <b>${evs.length}</b> 个事件`,
+    `覆盖 ${cover.toFixed(1)}s / ${mmss(r.dur || S.dur)}`,
+    `平均置信度 ${conf.toFixed(2)}`,
+    `句内 ${inCue} · 句间 ${evs.length - inCue}`,
+  ];
+  if (typed) bits.push(`已识别类型 ${typed}/${evs.length}`);
+  if (dup) bits.push(`疑似重复 ${dup}`);
+  bits.push(`${(r.ms / 1000).toFixed(1)}s`);
+  return bits.join(" · ");
+}
+
+function paintVb(r) {
+  const meta = r || S.vbMeta;
+  if (r) S.vbMeta = r;
+  const evs = S.vb || [];
+  const has = evs.length > 0;
+  $("btnVbApply").disabled = !has || S.busy;
+  $("btnVbSrt").disabled = !has;
+  $("trkVb").hidden = !(has && $("vbShow").checked);
+  $("vbStat").innerHTML = meta ? vbStatText(meta) : (has ? `当前 ${evs.length} 个事件` : "");
+  const conf = evs.length ? evs.reduce((a, e) => a + e.conf, 0) / evs.length : 0;
+  $("vbTrackInfo").textContent = has
+    ? `${evs.length} 个 · 平均 ${conf.toFixed(2)} · 点一下跳到那次事件`
+    : "";
+  const dup = evs.filter((e) => e.dup).length;
+  $("vbDupHint").textContent = dup
+    ? `有 ${dup} 个事件和前面的听感几乎一样（同一段素材里反复出现）。勾上「只留第一次」再生成片段。`
+    : "查重按梅尔谱指纹分组：同一种声音在原片里出现多次时，只留第一条。";
+  if (meta && meta.count === 0) {
+    $("vbHint").innerHTML = "这段里没有检测到<b>事件型</b>的非语音人声。"
+      + "持续的喘息 / 舔耳不一定会被当成「事件」，这种素材用「按静音间隔」切更合适；"
+      + "也可以把灵敏度调到「很敏感」再试一次。";
+  } else if (has) {
+    $("vbHint").innerHTML = "事件轨已画在波形下方。可以只画着看，也可以点「用事件生成片段」"
+      + "把它们变成带名字的片段，再按老流程入库 / 写进工程。";
+  }
+  redrawAll();
+}
+
+async function vbStatus(force, quiet) {
+  try {
+    const st = await api("/sepro/status?kind=vocalburst" + (force ? "&force=1" : ""));
+    S.vbReady = !!(st && st.ready);
+    S.vbStatus = st || null;
+    // 可选功能：进页面时安静检测，不因为「没装模型」先甩一块黄条；
+    // 只有用户真的点了检测、或手动重新检测时才提示。
+    if (!S.vbReady && !quiet) {
+      $("vbWarn").hidden = false;
+      $("vbWarn").className = "sb-warn";
+      $("vbWarn").textContent = "VocalBurst 还没就绪：" + ((st && st.reason) || "没检测到模型")
+        + "。到工作台「模型拓展 → VocalBurst」看下载与放置方法；不放模型不影响其他功能。";
+    } else {
+      $("vbWarn").hidden = true;
+    }
+    return S.vbReady;
+  } catch (e) {
+    S.vbReady = false;
+    if (!quiet) {
+      $("vbWarn").hidden = false;
+      $("vbWarn").className = "sb-warn bad";
+      $("vbWarn").textContent = "检测不到 VocalBurst 状态：" + e.message;
+    }
+    return false;
+  }
+}
+
+/* 当前处理轨是「去掉人声」的时候，非语音人声已经被一起拿走了。
+   这时候硬跑只会得到 0 个事件，还会让人以为模型坏了 —— 先问一句，改用原样重新载入。 */
+async function vbEnsureSource() {
+  if (S.jobStem !== "instrumental") return true;
+  const ok = await askConfirm("这条轨上没有人声",
+    "第 2 步选的是「<b>伴奏（去掉台词人声）</b>」，喘息 / 笑 / 叹气也一起被去掉了。\n\n"
+    + "要把它们找出来，得用<b>原样</b>或<b>留人声</b>的那一轨。\n"
+    + "现在改用「原样（不分离）」重新载入吗？只是复制一份原音，很快。",
+    "改用原样");
+  if (!ok) return false;
+  $("stem").value = "none";
+  paintStem();
+  await doPrepare({ noSeg: true });
+  return !!S.job;
+}
+
+async function runVb() {
+  if (!S.job) return toast("先选素材并点「② 开始处理并载入」", true);
+  if (S.busy || S.vbBusy) return;
+  if (!(await vbStatus(false))) {
+    $("vbOpt").open = true;
+    return toast("VocalBurst 还没就绪：先到工作台「模型拓展」放模型", true);
+  }
+  if (!(await vbEnsureSource())) return;
+  const btn = $("btnVbRun");
+  S.vbBusy = true;
+  btn.disabled = true;
+  const keep = btn.textContent;
+  btn.textContent = "检测中…（首次加载模型要十几秒）";
+  $("vbStat").textContent = "";
+  try {
+    const p = vbParams();
+    const r = await api("/sfxb/vb/detect", {
+      method: "POST",
+      body: Object.assign({ job: S.job, cues: S.cues.map((c) => [c.t0, c.t1]) }, p),
+    });
+    S.vb = (r.events || []).map((e, i) => Object.assign({ i }, e));
+    S.vbCur = -1;
+    paintVb(r);
+    if ($("vbAutoSeg").checked && S.vb.length) await applyVb(true);
+    else if (S.vb.length) toast(`找到 ${S.vb.length} 个非语音人声事件`);
+    else toast("这段里没有检测到事件型非语音人声", true);
+  } catch (e) {
+    toast("检测失败：" + e.message, true);
+    $("vbWarn").hidden = false;
+    $("vbWarn").className = "sb-warn bad";
+    $("vbWarn").textContent = "检测失败：" + e.message;
+  } finally {
+    S.vbBusy = false;
+    btn.disabled = false;
+    btn.textContent = keep;
+    paintVb(null);
+  }
+}
+
+async function applyVb(quiet) {
+  if (!S.vb.length) return toast("先点「找非语音人声」", true);
+  const picked = vbPicked();
+  if (!picked.length) {
+    return toast($("vbOnlyCue").checked
+      ? "没有句内事件：先载入字幕，或取消「只要句内事件」"
+      : "事件都被查重过滤掉了：取消「只留第一次」再试", true);
+  }
+  if (S.segs.length && (S.edited || S.undo.length)) {
+    const ok = await askConfirm("用事件生成片段会覆盖现在的片段",
+      `现在有 <b>${S.segs.length}</b> 段（含手工改动）。\n\n`
+      + `继续会用 <b>${picked.length}</b> 个非语音人声事件重建整份片段列表。`,
+      "用事件重建");
+    if (!ok) return;
+    if ($("planAuto").checked) savePlan("", true);
+  }
+  try {
+    snap();
+    const r = await api("/sfxb/segment", {
+      method: "POST",
+      body: {
+        job: S.job, mode: "vb",
+        events: picked.map(({ ev }) => ({ start: ev.start, end: ev.end })),
+        min_len: 0.05, pad: 0.02,
+      },
+    });
+    const total = (r.segments || []).length;
+    const counters = {};
+    S.segs = (r.segments || []).map((s) => {
+      // 事件与片段一一对应；按起点找它原本是哪一次事件，名字才数得上
+      const hit = picked.find(({ ev }) => Math.abs(ev.start - s.start) < 0.09);
+      s._id = ++S.seq;
+      s.name = hit ? vbName(hit.ev, hit.i, S.vb.length, counters) : "";
+      s.vb = hit ? { conf: hit.ev.conf, cue: hit.ev.cue, in_cue: hit.ev.in_cue } : null;
+      return s;
+    });
+    S.sel.clear();
+    S.curSeg = -1;
+    S.anchor = -1;
+    S.dup.clear(); S.dupGroups = [];
+    S.edited = false;
+    S.limit = 240;
+    $("segStat").textContent = `按非语音人声切成 ${total} 段 · 覆盖 ${mmss(r.covered)} / ${mmss(r.dur)}`;
+    $("segHint").textContent = total
+      ? "每一段都对应事件轨上的一次发声；名字按「前缀-序号」自动起好，可以在列表里改。"
+      : "事件都被「最短片段」滤掉了：把第 3 块的最短片段调小再试。";
+    renderSegs();
+    redrawAll();
+    if (!quiet) toast(`已生成 ${total} 段`);
+  } catch (e) {
+    toast("生成片段失败：" + e.message, true);
+  }
+}
+
+function drawVb() {
+  const cv = $("waveVb");
+  if (!cv || $("trkVb").hidden) return;
+  const { c, W, H } = ctx2d(cv);
+  const dark = sbIsDark();
+  c.font = "9px ui-monospace, Consolas, monospace";
+  S.vb.forEach((q, i) => {
+    const x0 = tx(q.start, W), x1 = tx(q.end, W);
+    if (x1 < -2 || x0 > W + 2) return;
+    const w = Math.max(2, x1 - x0);
+    const a = 0.30 + 0.62 * Math.min(1, Math.max(0, q.conf || 0));
+    const dup = q.dup && $("vbDropDup").checked;
+    const dfilt = $("vbOnlyCue").checked && !q.in_cue;
+    c.fillStyle = (dup || dfilt)
+      ? (dark ? "rgba(130,124,116,.22)" : "rgba(150,145,136,.18)")
+      : (dark ? `rgba(224,163,92,${a})` : `rgba(199,125,46,${a})`);
+    c.fillRect(Math.max(0, x0), 6, Math.min(W, w), H - 14);
+    // 句内事件：顶上画一条青色短杠，和字幕轨同一个颜色语言
+    if (q.in_cue) {
+      c.fillStyle = dark ? "rgba(79,190,194,.9)" : "rgba(23,146,153,.8)";
+      c.fillRect(Math.max(0, x0), 3, Math.min(W, w), 2);
+    }
+    if (q.i === S.vbCur) {
+      c.strokeStyle = dark ? "#f0c48d" : "#8a4d16";
+      c.lineWidth = 1.5;
+      c.strokeRect(Math.max(0, x0) + 0.5, 6.5, Math.max(1, Math.min(W, w) - 1), H - 15);
+    }
+    if (w > 16) {
+      c.fillStyle = dark ? "rgba(30,28,26,.92)" : "rgba(255,255,255,.95)";
+      c.fillText(String(i + 1), Math.max(0, x0) + 3, H - 8);
+    }
+  });
+  drawPlayhead(c, W, H);
+}
+
+function vbAt(t) {
+  for (let i = 0; i < S.vb.length; i++) {
+    if (t >= S.vb[i].start - 0.02 && t <= S.vb[i].end + 0.02) return i;
+  }
+  return -1;
+}
+
+function vbPlay(dir) {
+  if (!S.vb.length) return;
+  let i = S.vbCur;
+  if (i < 0) i = vbAt(curTime());
+  if (i < 0) i = dir > 0 ? 0 : S.vb.length - 1;
+  else i = Math.max(0, Math.min(S.vb.length - 1, i + (dir || 0)));
+  S.vbCur = i;
+  const ev = S.vb[i];
+  seekAndPlay(ev.start, ev.end, "proc");
+  redrawAll();
+}
+
+function vbSeekAt(x, cv) {
+  // 不要用 ctx2d 取宽度：它会 clearRect，点在空白处就会把事件轨擦掉且不重画
+  const W = cv.clientWidth || 600;
+  const t = xt(x, W);
+  let best = -1, dist = 1e9;
+  S.vb.forEach((q, i) => {
+    const d = t < q.start ? q.start - t : (t > q.end ? t - q.end : 0);
+    if (d < dist) { dist = d; best = i; }
+  });
+  if (best >= 0 && dist < 0.35) {
+    S.vbCur = best;
+    seekAll(S.vb[best].start);
+    redrawAll();
+  } else {
+    seekAll(t);
+  }
+}
+
+function vbSrt() {
+  if (!S.vb.length) return;
+  const p2 = (n) => String(n).padStart(2, "0");
+  const ts = (t) => {
+    const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60);
+    const s = Math.floor(t % 60), ms = Math.round((t - Math.floor(t)) * 1000);
+    return `${p2(h)}:${p2(m)}:${p2(s)},${String(ms).padStart(3, "0")}`;
+  };
+  const lines = [];
+  const counters = {};
+  let k = 0;
+  S.vb.forEach((ev, i) => {
+    if ($("vbDropDup").checked && ev.dup) return;
+    if ($("vbOnlyCue").checked && !ev.in_cue) return;
+    k += 1;
+    const bits = [vbName(ev, i, S.vb.length, counters)];
+    bits.push(`置信度 ${(ev.conf || 0).toFixed(2)}`);
+    if (ev.cue) bits.push(ev.in_cue ? `句 ${ev.cue}` : `句${ev.cue}附近`);
+    lines.push(String(k), `${ts(ev.start)} --> ${ts(ev.end)}`, bits.join(" · "), "");
+  });
+  const name = (($("vbPrefix").value || "非语音人声").trim() || "非语音人声") + "-事件轨.srt";
+  const blob = new Blob(["\ufeff" + lines.join("\n")], { type: "text/plain;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  toast(`已导出 ${k} 条事件（SRT）`);
+}
+
 function viewSpan() { return Math.max(0.02, S.view.b - S.view.a); }
 function resetView() {
   S.view.a = 0;
@@ -1006,7 +1350,7 @@ function sbOnThemeChanged() {
 
 function redrawAll() {
   if ($("editor").hidden) return;
-  drawNav(); drawScrub(); drawRaw(); drawProc(); drawSrt();
+  drawNav(); drawScrub(); drawRaw(); drawProc(); drawSrt(); drawVb();
 }
 function drawWave() { redrawAll(); }      // 旧名字保留：外部/测试还在用
 
@@ -2003,6 +2347,8 @@ async function doSave() {
         folder: effectiveFolder(),
         items: picked.map((s) => ({
           start: s.start, end: s.end, name: s.name || "", ops: s.ops || undefined,
+          note: s.vb ? `非语音人声 ${s.vb.in_cue ? "句内" : "句间"} 置信度 ${(s.vb.conf || 0).toFixed(2)}`
+            + (s.vb.cue ? ` 第${s.vb.cue}句` : "") : "",
         })),
       },
     });
@@ -2090,6 +2436,30 @@ const HELP = {
         <dt>跳到下一条</dt><dd>按播放头位置找下一条字幕，对齐切点时很好用。</dd>
       </dl>
       <div class="warnline">字幕的时间基准是<b>原音</b>，不是配完中文的时间。所以它只用来看"哪一句在原音的哪儿"，不要拿它当成品字幕。</div>`,
+  },
+  vb: {
+    title: "④.5 非语音人声（VocalBurst）",
+    body: `<p>这一块给<b>非语音人声</b>单独加一条「事件轨」：笑、喘、叹气、抽气、咳、清嗓、咂嘴、舔耳……
+      只要是人发出、但不是语言的声音，它都能标出<b>从第几秒到第几秒</b>。</p>
+      <dl>
+        <dt>和字幕轨什么关系</dt><dd>互补。字幕轨标「人在说话」的时间，事件轨标「人发出非语言声音」的时间。
+          两条一起看，就能分出：纯台词、纯音效、<b>台词里夹着的一声喘</b>。句内事件在轨道顶部有一条青色短杠。</dd>
+        <dt>它不做什么</dt><dd>不分离、不替你做决定。它只说「这里有一次发声」，
+          留下的还是原来那条音频；重叠在台词里的部分也不会被抠掉。
+          类型名是可选的：装了 82 类分类器、且有把握（家族置信度 ≥ 0.45）时才写，
+          否则统一用你设的前缀。</dd>
+        <dt>灵敏度</dt><dd>官方在真实录音上的最佳阈值是 <b>0.50</b>；ASMR 里持续、轻的呼吸更容易漏，
+          所以默认给 0.35。调到 0.25 会标得更多，也更可能有误检。</dd>
+        <dt>最短 / 合并</dt><dd>真实 burst 的中位时长只有约 180ms —— 最短别设太大（0.1 秒够用），
+          否则一半以上的事件会被直接丢掉。合并间隔负责把一次笑声里的断点接回去。</dd>
+        <dt>自动成段</dt><dd>勾上「检测完直接替换成片段」：每个事件变成一段，名字按「前缀-序号」起好，
+          后面入库 / 写进工程和普通片段完全一样。</dd>
+        <dt>事件轨 .srt</dt><dd>把事件导成 SRT：别的软件也能当时码表用，或者拿回工作台当字幕参考。</dd>
+        <dt>为什么有时候 0 个</dt><dd>它找的是「事件」，不是「持续音」。一段连续的喘息、舔耳可能一次都不触发；
+          这种素材用「按静音间隔」切更合适。反过来，正常台词基本不会误报。</dd>
+      </dl>
+      <div class="warnline">当前处理轨如果是「伴奏（去掉人声）」，非语音人声已经被一起去掉了。
+        点检测时会问你要不要改用「原样」重新载入 —— 不换轨的话，检出 0 个是正常的。</div>`,
   },
   plan: {
     title: "⑤ 处理方案（保存 / 恢复）",
@@ -2963,6 +3333,68 @@ function bind() {
     redrawAll();
   };
   $("btnSrtClear").onclick = clearSrt;
+
+  // 非语音人声
+  $("btnVbRun").onclick = runVb;
+  $("btnVbApply").onclick = () => applyVb(false);
+  $("btnVbSrt").onclick = vbSrt;
+  $("vbPreset").onchange = () => { vbPresetSync(); paintVb(null); };
+  ["vbThr", "vbMin", "vbGap"].forEach((id) => {
+    $(id).onchange = () => {
+      const p = VB_PRESETS[$("vbPreset").value];
+      if (!p || Math.abs(p.thr - parseFloat($("vbThr").value || "0")) > 0.001
+          || Math.abs(p.min - parseFloat($("vbMin").value || "0")) > 0.001) {
+        $("vbPreset").value = "custom";
+      }
+    };
+  });
+  $("vbShow").onchange = () => {
+    S.vbShow = $("vbShow").checked;
+    $("trkVb").hidden = !(S.vbShow && S.vb.length);
+    redrawAll();
+  };
+  $("vbDropDup").onchange = () => { paintVb(null); };
+  $("vbOnlyCue").onchange = () => { paintVb(null); };
+  $("btnVbFree").onclick = async () => {
+    const b = $("btnVbFree");
+    b.disabled = true;
+    try {
+      const r = await api("/sepro/unload", { method: "POST", body: { kind: "vocalburst" } });
+      toast(r.freed ? "已释放显存；下次检测会重新加载（首次约几秒）" : "当前没有常驻显存可释放");
+    } catch (e) {
+      toast("释放失败：" + e.message, true);
+    } finally { b.disabled = false; }
+  };
+  $("btnVbPlay").onclick = () => vbPlay(0);
+  $("btnVbPrev").onclick = () => vbPlay(-1);
+  $("btnVbNext").onclick = () => vbPlay(1);
+  const cvVb = $("waveVb");
+  if (cvVb) {
+    let vbDrag = false;
+    const at = (e) => vbSeekAt(pos(e, cvVb).x, cvVb);
+    cvVb.addEventListener("pointerdown", (e) => {
+      if (!S.vb.length) return;
+      e.preventDefault();
+      vbDrag = true;
+      cvVb.setPointerCapture(e.pointerId);
+      at(e);
+    });
+    cvVb.addEventListener("pointermove", (e) => {
+      if (!vbDrag) return;
+      const t = xt(pos(e, cvVb).x, cvVb.clientWidth || 600);
+      seekAll(t);
+      redrawAll();
+    });
+    cvVb.addEventListener("pointerup", (e) => {
+      vbDrag = false;
+      try { cvVb.releasePointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
+    });
+    cvVb.addEventListener("dblclick", (e) => {
+      const t = xt(pos(e, cvVb).x, cvVb.clientWidth || 600);
+      const i = vbAt(t);
+      if (i >= 0) { S.vbCur = i; vbPlay(0); }
+    });
+  }
   $("btnSrtPaste").onclick = () => {
     const t = window.prompt("把 SRT 文本粘进来（整段，含时间轴那几行）：");
     if (t && t.trim()) applySrt(t, "粘贴的字幕");
@@ -3151,6 +3583,8 @@ function midTime() {
   paintStem();
   loadPlans();
   paintPlayStates();
+  paintVb(null);
+  vbStatus(false, true);
   $("eng").onchange();
   $("toolHint").textContent = "";
   await loadMats();
@@ -3169,6 +3603,7 @@ function midTime() {
   try {
     window.S = S;
     window.SFXB = { redrawAll, selectOnly, updateSel, applySrt, savePlan, applyPlan,
-                    renderPlans, paintPlayStates, paintTimeLabels, askConfirm };
+                    renderPlans, paintPlayStates, paintTimeLabels, askConfirm,
+                    runVb, applyVb, vbSrt, paintVb, vbParams };
   } catch (e) { /* 忽略 */ }
 })();

@@ -9116,6 +9116,20 @@
   $("btnAddSfxTrack").onclick = () => addTrackOfKind("sfx");
   if ($("btnCleanTracks")) $("btnCleanTracks").onclick = cleanEmptyTracks;
   if ($("btnMediaRefresh")) $("btnMediaRefresh").onclick = () => { loadMedia(); toast("素材列表已刷新"); };
+  if ($("btnMediaFolder")) $("btnMediaFolder").onclick = async () => {
+    const kind = MTAB === "mat" ? "media" : MTAB;
+    const label = { sfx: "音效库", ref: "音色库", media: "导入台" }[kind] || "素材库";
+    try {
+      const r = await fetch(`/api/v1/lf/libs/${kind}/open`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      toast(`已打开${label}文件夹`);
+    } catch (e) {
+      toast(`打开${label}文件夹失败：${e.message}`, true);
+    }
+  };
   if ($("btnDesk")) $("btnDesk").onclick = () => openDesk("sfx");
   if ($("mediaSearch")) $("mediaSearch").oninput = (e) => { mediaQuery = e.target.value; drawMediaList(); };
   document.querySelectorAll("#mSeg .msb").forEach((b) => {

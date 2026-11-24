@@ -613,6 +613,8 @@
             <button type="button" data-rv="grid">网格</button>
           </div>
           <input id="refSearch" class="inp libsearch" placeholder="搜音色名…" autocomplete="off">
+          <button id="btnRefFolder" class="btn mini ghost" type="button"
+                  title="在资源管理器中打开音色库文件夹（longform/refs）">📂</button>
           <button id="btnRefRefresh" class="btn mini ghost" type="button" title="刷新音色列表">⟳</button>
           <span id="refCount" class="libcount">0 个</span>
         </div>
@@ -643,6 +645,8 @@
           </div>
           <input id="sfxSearch" class="inp libsearch" placeholder="搜音效名…" autocomplete="off">
           <button id="btnSfxPaste" class="btn mini ghost" type="button" disabled title="把上次「复制」的音效粘贴成一份副本">粘贴副本</button>
+          <button id="btnSfxFolder" class="btn mini ghost" type="button"
+                  title="在资源管理器中打开音效库文件夹（longform/sfx）">📂</button>
           <button id="btnSfxRefresh" class="btn mini ghost" type="button" title="刷新音效列表">⟳</button>
           <span id="sfxCount" class="libcount">0 个</span>
         </div>
@@ -693,6 +697,8 @@
             <option value="derived">处理结果</option>
           </select>
           <button id="btnMatRefresh" class="btn mini ghost" type="button">刷新</button>
+          <button id="btnMatFolder" class="btn mini ghost" type="button"
+                  title="在资源管理器中打开导入台素材文件夹（longform/materials）">📂</button>
           <button id="btnMatAll" class="btn mini ghost" type="button">全选 / 取消</button>
           <span id="matCount" class="hint">0 个素材</span>
         </div>
@@ -1488,6 +1494,6 @@ runtime\python.exe -c "from huggingface_hub import snapshot_download as s; s('la
 <script src="/longform-assets/libfolders.js?v=20261104c"></script>
 <script src="/longform-assets/emoctl.js?v=20261102b"></script>
 <script src="/longform-assets/genparams.js?v=20261102b"></script>
-<script src="/longform-assets/longform.js?v=20261105e"></script>
+<script src="/longform-assets/longform.js?v=20261125a"></script>
 </body>
 </html>

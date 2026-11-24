@@ -4893,6 +4893,27 @@ def _under(path, base):
         return False
 
 
+def _open_in_file_manager(path):
+    """在系统文件管理器里打开目录 / 定位文件（Windows explorer / macOS open / Linux xdg-open）。"""
+    p = os.path.abspath(path)
+    if not os.path.exists(p):
+        raise FileNotFoundError(p)
+    if os.path.isfile(p):
+        if sys.platform.startswith("win"):
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(p)])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", p])
+        else:
+            subprocess.Popen(["xdg-open", os.path.dirname(p)])
+    else:
+        if sys.platform.startswith("win"):
+            subprocess.Popen(["explorer", os.path.normpath(p)])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", p])
+        else:
+            subprocess.Popen(["xdg-open", p])
+
+
 def _storage_plan(root):
     """扫一遍，返回 [{key,label,desc,size,count,safe,files,dirs}]。
 
@@ -5215,25 +5236,32 @@ def register_longform(app, api, deps):
         if not os.path.exists(probe):
             raise HTTPException(404, "目录不存在")
         try:
-            if os.path.isfile(probe):
-                if sys.platform.startswith("win"):
-                    subprocess.Popen(["explorer", "/select,", os.path.normpath(probe)])
-                elif sys.platform == "darwin":
-                    subprocess.Popen(["open", "-R", probe])
-                else:
-                    subprocess.Popen(["xdg-open", os.path.dirname(probe)])
-            else:
-                if sys.platform.startswith("win"):
-                    subprocess.Popen(["explorer", os.path.normpath(probe)])
-                elif sys.platform == "darwin":
-                    subprocess.Popen(["open", probe])
-                else:
-                    subprocess.Popen(["xdg-open", probe])
+            _open_in_file_manager(probe)
         except OSError as e:  # noqa: BLE001
             raise HTTPException(500, f"打不开：{e}") from e
         _log("longform: storage open %s", probe)
         return {"ok": True, "path": probe,
                 "rel": os.path.relpath(probe, root).replace(os.sep, "/")}
+
+    @lf.post("/lf/libs/{kind}/open")
+    def lf_lib_open(kind: str):
+        """打开三个素材库对应的本地文件夹：音色库 / 音效库 / 导入台。
+
+        这三个目录都在整合包内（longform/refs、longform/sfx、longform/materials），
+        前端只要给 kind，不拼路径 —— 这样换机器、改目录也不用动前端。
+        """
+        dirs = {"ref": _refs_dir(), "sfx": _sfx_dir(), "media": _mat_dir()}
+        d = dirs.get(kind)
+        if not d:
+            raise HTTPException(404, "没有这个库：%s" % kind)
+        os.makedirs(d, exist_ok=True)
+        try:
+            _open_in_file_manager(d)
+        except OSError as e:  # noqa: BLE001
+            raise HTTPException(500, f"打不开：{e}") from e
+        rel = os.path.relpath(d, _D["project_dir"]).replace(os.sep, "/")
+        _log("longform: library open %s -> %s", kind, rel)
+        return {"ok": True, "kind": kind, "path": d, "rel": rel}
 
     @lf.post("/lf/storage/clean")
     def lf_storage_clean(req: dict = Body(default={})):

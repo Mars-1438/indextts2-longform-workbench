@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """生成长篇工作台「补丁包」（zip）：纯增量文件 + 安装器，不含模型/音频/测试脚本。
 
-产物：dist/IndexTTS2_全能音声工作台补丁_v0.33.zip
+产物：dist/IndexTTS2_全能音声工作台补丁_v0.34.zip
 内容：
   payload/longform_api.py lf_import.py timeline_api.py hrir.py rooms.py
   payload/web/{longform,timeline}.{html,css,js} emoctl.js
@@ -23,7 +23,7 @@ import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIST = os.path.join(ROOT, "dist")
-NAME = "IndexTTS2_全能音声工作台补丁_v0.33"
+NAME = "IndexTTS2_全能音声工作台补丁_v0.34"
 STAGE = os.path.join(DIST, NAME)
 PAYLOAD = os.path.join(STAGE, "payload")
 
@@ -69,7 +69,8 @@ HRIR = ["assets/hrir/MIT_KEMAR_normal_pinna.sofa",
         "assets/hrir/KU100_near.npz",
         "assets/hrir/KU100_near_circ.npz",
         "assets/hrir/README.md"]
-DOCS = ["docs/技术路线_长篇台本与时间轴.md", "docs/使用说明.txt"]
+DOCS = ["docs/技术路线_长篇台本与时间轴.md", "docs/使用说明.txt",
+        "docs/非语音人声事件轨_接入方案.md", "docs/音频打标模型评估.md"]
 DATA_KEEP = ["longform/refs", "longform/scripts", "longform/sfx", "longform/materials",
              "longform/presets", "longform/_import", "longform/_trash", "outputs", "logs"]
 
@@ -170,7 +171,15 @@ def main():
             return False
         return not r.lower().endswith((".txt", ".md"))
 
-    n2 = copy_tree("vendor2", skip_files=_skip_rof)
+    def _skip_vendor(r):
+        """vocalburst / dnr 和 roformer 一样是「用户自备权重」：
+        vocalburst 2.3GB、dnr 142MB，绝不能无声塞进补丁包。
+        代码留在仓库 / 运行目录里，用户按模型拓展面板的说明自己下。"""
+        if r.startswith("vendor2/vocalburst/") or r.startswith("vendor2/dnr/"):
+            return True
+        return _skip_rof(r)
+
+    n2 = copy_tree("vendor2", skip_files=_skip_vendor)
     print("  + vendor2/（Demucs 分离 / Roformer：%s）%d 个文件"
           % ("含权重" if with_roformer else "只带说明", n2))
 

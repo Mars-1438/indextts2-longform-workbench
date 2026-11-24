@@ -4895,6 +4895,18 @@ async function refreshExports() {
 }
 
 /* ------------------------------ 音色 / 预设 ------------------------------ */
+/* 打开三个素材库对应的本地文件夹：音色库 / 音效库 / 导入台。
+   浏览器不能直接开本地目录，走后端在资源管理器里打开；按钮只传 kind，不拼路径。 */
+async function openLibFolder(kind) {
+  const label = { ref: "音色库", sfx: "音效库", media: "导入台" }[kind] || "素材库";
+  try {
+    await api(`/libs/${kind}/open`, { method: "POST", body: {} });
+    toast(`已打开${label}文件夹`);
+  } catch (e) {
+    toast(`打开${label}文件夹失败：${e.message}`, true);
+  }
+}
+
 function initRefsPanel() {
   const fi = $("fileRefs");
   if (fi) {
@@ -4906,6 +4918,8 @@ function initRefsPanel() {
   }
   const go = $("btnGoMedia");
   if (go) go.onclick = () => openDrawer("media", "ref");
+  const rfo = $("btnRefFolder");
+  if (rfo) rfo.onclick = () => openLibFolder("ref");
   const rf = $("btnRefRefresh");
   if (rf) rf.onclick = async () => {
     await loadMeta();
@@ -8494,6 +8508,8 @@ function bindMediaEvents() {
     if (!ids.length) return toast("先勾选要移动的素材", true);
     LibFolders.moveItems("media", ids, { onDone: async () => { await loadMaterials(); } });
   };
+  const mfo = $("btnMatFolder");
+  if (mfo) mfo.onclick = () => openLibFolder("media");
   const rf = $("btnMatRefresh");
   if (rf) rf.onclick = () => loadMaterials();
   const all = $("btnMatAll");
@@ -8548,6 +8564,8 @@ function bindSfxEvents() {
   if (paste) paste.onclick = () => pasteSfx();
   const pre = $("btnSfxPreprocess");
   if (pre) pre.onclick = () => openDrawer("media", "sfx");
+  const sfo = $("btnSfxFolder");
+  if (sfo) sfo.onclick = () => openLibFolder("sfx");
   const rsf = $("btnSfxRefresh");
   if (rsf) rsf.onclick = async () => { await loadSfx(); toast("音效列表已刷新"); };
   const list = $("sfxList");
